@@ -34,6 +34,10 @@
 //! never misses a batch: it sees every batch's records published, or none
 //! of them appended yet. Rebuilding keeps the arrival order the old log
 //! still knows, and puts the records it didn't after them.
+//!
+//! The directory also holds `index/supersession`, which isn't an index
+//! lock: [`Annotations::supersede`](crate::annotations::Annotations::supersede)
+//! holds it to read an issuer's current statement and issue the next.
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -828,9 +832,23 @@ impl<P: Platform> Store<P> {
     /// Locks the index: shared by batches being indexed, exclusive for a
     /// rebuild.
     fn lock_index(&self, mode: LockMode) -> Result<LockedFile, StoreError> {
+        self.lock_in_index("lock", mode)
+    }
+
+    /// Locks supersession, exclusively: see [`Annotations::supersede`].
+    /// It's a lock of its own, since issuing takes the index's, on another
+    /// handle, which `flock` conflicts with even within one process.
+    ///
+    /// [`Annotations::supersede`]: crate::annotations::Annotations::supersede
+    pub(crate) fn lock_supersession(&self) -> Result<LockedFile, StoreError> {
+        self.lock_in_index("supersession", LockMode::Exclusive)
+    }
+
+    /// Locks the file `name` in the index's directory in `mode`.
+    fn lock_in_index(&self, name: &str, mode: LockMode) -> Result<LockedFile, StoreError> {
         let dir = self.index_dir();
         fs::create_dir_all(&dir).map_err(|source| StoreError::io(&dir, source))?;
-        Ok(LockedFile::open(&self.platform, &dir.join("lock"), mode)?)
+        Ok(LockedFile::open(&self.platform, &dir.join(name), mode)?)
     }
 
     /// Durably replaces the index with one holding `entries` and
