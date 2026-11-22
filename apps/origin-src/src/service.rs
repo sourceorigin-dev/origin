@@ -366,7 +366,8 @@ impl OriginService {
             RecordId::Acceptance(id) => {
                 self.store.get(id).map(|acceptance| acceptance.body().state)
             }
-            RecordId::Statement(_) | RecordId::Snapshot(_) => {
+            // Never a bare tree, whose paths would be read as others.
+            RecordId::Snapshot(_) | RecordId::Statement(_) => {
                 return Err(ServiceError::NotASnapshot(record));
             }
         };

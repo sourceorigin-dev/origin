@@ -23,9 +23,9 @@
 //!    they may not change. On `policy`, the policy is the acceptance
 //!    before's, never the one landing's ([`Policy::governing`]). Each of
 //!    the target's requirements needs a [claim](crate::annotations::Claim)
-//!    about the revision that lands: results with the same input digest
-//!    are promoted to it first, and a valid promotion claims what its
-//!    original does, as its original's issuer.
+//!    about the revision that lands: results about the target's revisions
+//!    with the same input digest are promoted to it first, and a valid
+//!    promotion claims what its original does, as its original's issuer.
 //! 4. **Missing evidence** leaves the landing waiting, until the statements
 //!    are issued and the landing is retried.
 //! 5. **Otherwise** this node signs an acceptance naming what landed, the
@@ -33,11 +33,13 @@
 //!
 //! Landing another target works the same way: its tip is merged from the
 //! newest acceptances both targets' histories share, and the requirements
-//! apply to the merged snapshot. A merge that changes nothing lands
-//! nothing if either tip is in the other's history: the target has the
-//! source's already, or the source has nothing more. Otherwise it lands,
-//! with no evidence then, so the target's history records the source's tip
-//! and later merges start from it.
+//! apply to the merge, a revision this node makes on the target's tip, as
+//! for a rebase: so results about the same merge on another target, which
+//! ran under checks that may differ, never count here. A merge that
+//! changes nothing lands nothing if either tip is in the other's history:
+//! the target has the source's already, or the source has nothing more.
+//! Otherwise it lands, with no evidence then, so the target's history
+//! records the source's tip and later merges start from it.
 //!
 //! The queue of each target lives in `queue/<target id>/`: a `lock` held
 //! while landing, so landings on one target never race, and a file for each
@@ -55,8 +57,9 @@ use origin_platform::{DurableWrite, LockMode, LockedFile, Native, Platform};
 use origin_shared::access::{Level, PathAccess};
 use origin_shared::landing::{Blocked, Landing, Pending, Proposal};
 use origin_shared::{
-    AcceptanceBody, AcceptanceId, ChangeId, EncodedObject, Head, NodeKey, Principal, PrincipalName,
-    Record, RecordId, RepoPath, RevisionId, Source, TargetId, TargetName, Tree, TreeId,
+    AcceptanceBody, AcceptanceId, Base, ChangeId, Digest, EncodedObject, Head, NodeKey, Principal,
+    PrincipalName, Record, RecordId, RepoPath, Revision, RevisionId, Source, TargetId, TargetName,
+    Tree, TreeId,
 };
 
 use crate::annotations::{AnnotateError, Annotations};
@@ -225,14 +228,36 @@ impl<'a, P: Platform> Queue<'a, P> {
         }
         // Even a merge that changes nothing lands, so that the tip is in
         // the target's history, and later merges start from it.
+        //
+        // Checked as a revision on `onto`'s tip, as a rebase is, so results
+        // about it count on `onto` alone (see `Store::target_of`): the same
+        // merge on another target is checked with that target's checks. The
+        // same tips make the same revision, which a retry checks again.
+        let onto_tip = session.tip.acceptance;
+        let digest = Digest::of(&[*onto_tip.as_bytes(), *tip.acceptance.as_bytes()].concat());
+        let mut change = [0; ChangeId::LEN];
+        change.copy_from_slice(&digest.as_bytes()[..ChangeId::LEN]);
+        let description = EncodedObject::attachment(b"");
+        let merged = Revision {
+            change: ChangeId::from_bytes(change),
+            predecessors: Vec::new(),
+            base: Base::Acceptance(onto_tip),
+            deps: Vec::new(),
+            snapshot: merge.tree,
+            description: description.id().into(),
+            author: self.principal(),
+        }
+        .encode();
+        let mut trees = merge.trees;
+        trees.push(description);
         session.submit(Candidate {
             kept_as: proposal.clone(),
             proposal,
             source: Source::Target(tip.acceptance),
-            subject: RecordId::Snapshot(merge.tree),
+            subject: RecordId::Revision(merged.id().into()),
             state: merge.tree,
-            trees: merge.trees,
-            revision: None,
+            trees,
+            revision: Some(merged),
         })
     }
 

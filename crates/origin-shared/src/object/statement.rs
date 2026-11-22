@@ -15,7 +15,8 @@ use crate::{
 ///
 /// Statements are permanent. An issuer revises one by issuing another that
 /// supersedes it. A promoted statement carries another one over to a record
-/// with the same input digest, pointing at it instead of copying its issuer.
+/// on the same target with the same input digest, pointing at it instead of
+/// copying its issuer.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
 pub struct Statement {
     /// The record the claim is about.

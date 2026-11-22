@@ -42,8 +42,8 @@ pub struct Pending {
     /// What lands.
     pub proposal: Proposal,
     /// What the evidence must be about: the revision that would land, or
-    /// the merged snapshot of a target. A conflict is about the revision,
-    /// or the acceptance, that didn't merge.
+    /// for a target, the revision of the merge on the tip it lands on. A
+    /// conflict is about the revision, or the acceptance, that didn't merge.
     pub subject: RecordId,
     /// Why it waits.
     pub blocked: Blocked,

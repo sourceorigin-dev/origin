@@ -198,8 +198,8 @@ enum WorkspaceCommand {
         #[arg(default_value = "@")]
         rev: String,
     },
-    /// Carry results over to a revision from the records with the same
-    /// input digest.
+    /// Carry results over to a revision from the records on the same target
+    /// with the same input digest.
     Promote {
         /// The revision: `@`, a change for its head, or a revision.
         #[arg(default_value = "@")]
@@ -345,7 +345,7 @@ struct AnnotateArgs {
     )]
     withdraw: bool,
     /// The files and directories the claim depended on, which lets it be
-    /// promoted to revisions where they're the same.
+    /// promoted to revisions on the same target where they're the same.
     #[arg(long, num_args = 1..)]
     inputs: Vec<RepoPath>,
     /// The check's command and configuration: text, or the hex digest of

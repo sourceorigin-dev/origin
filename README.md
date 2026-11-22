@@ -31,7 +31,7 @@ origin annotate @ review --pass -m "Looks good"            # with details: -m, o
 origin annotate @ review --withdraw -m "Spoke too soon"    # take your statement of a kind back
 origin annotate --on <id> flaky --neutral -m "Timeout on CI"  # a statement about a statement
 origin statements [<rev>]           # the statements about a revision, and those about them
-origin promote [<rev>]              # carry results over from revisions with the same inputs
+origin promote [<rev>]              # carry results over from the target's revisions with the same inputs
 origin gc                           # drop expired payloads (policy.toml) and pack objects
 
 origin land [<change>] [--onto <target>]   # land a change and the ones below it

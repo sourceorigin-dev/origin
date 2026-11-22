@@ -323,8 +323,8 @@ impl Workspace {
     }
 
     /// `origin promote [<rev>]`: carries promotable results over to a
-    /// revision, the working copy by default, from the records with the
-    /// same input digest, as statements this node issues.
+    /// revision, the working copy by default, from the records on the same
+    /// target with the same input digest, as statements this node issues.
     ///
     /// # Errors
     ///

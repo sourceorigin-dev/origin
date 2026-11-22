@@ -61,6 +61,55 @@ fn missing_evidence_waits_and_promoted_results_count() {
 }
 
 #[test]
+fn results_from_another_target_never_count() {
+    let require =
+        "require = [{ kind = \"ci.test\", verdict = \"pass\", issuer = \"group:runners\" }]\n";
+    let repo = Repo::new(&format!(
+        "[groups]\nrunners = [\"node:ci\"]\n[targets.main]\nauthority = \"node:queue\"\n\
+         {require}[targets.release]\nauthority = \"node:queue\"\n{require}"
+    ));
+    let (main, overhaul) = (TargetName::MAIN, TargetName::new("overhaul").unwrap());
+    let release = TargetName::new("release").unwrap();
+    let queue = repo.queue();
+    queue.create_target(&overhaul, &main).unwrap();
+    queue.create_target(&release, &main).unwrap();
+    let on_overhaul = Base::Acceptance(repo.tip(&overhaul).acceptance);
+    let tested = repo.revision(2, &[], on_overhaul, &[("src/lib.rs", "fn a() {}")]);
+    let change = ChangeId::from_bytes([2; 16]);
+    queue
+        .land_change(&mut repo.annotations(), change, &overhaul)
+        .unwrap();
+    let issue = |statement: &Statement| {
+        Annotations::open(&repo.store)
+            .unwrap()
+            .issue(statement, None)
+            .unwrap();
+    };
+    issue(&ci_test(tested, "node:ci"));
+    let waits = |landing: &Landing| matches!(landing, Landing::Pending(pending) if matches!(pending.blocked, Blocked::Evidence(_)));
+
+    // Landing the overhaul on `release` makes the same merge as on
+    // `main`. The result about it ran under `release`'s checks.
+    let Landing::Pending(on_release) = queue
+        .land_target(&mut repo.annotations(), &overhaul, &release)
+        .unwrap()
+    else {
+        panic!("the overhaul's own result doesn't count on release")
+    };
+    issue(&Statement {
+        subject: on_release.subject,
+        ..ci_test(tested, "node:ci")
+    });
+
+    // Results ran under `overhaul`'s and `release`'s checks, which may
+    // differ from `main`'s: landing the overhaul waits for `main`'s.
+    let landing = queue
+        .land_target(&mut repo.annotations(), &overhaul, &main)
+        .unwrap();
+    assert!(waits(&landing), "{landing:?}");
+}
+
+#[test]
 fn promotes_only_what_the_submitter_sees() {
     let repo = Repo::new(
         "[targets.main]\nauthority = \"node:queue\"\n\
