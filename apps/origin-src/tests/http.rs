@@ -451,7 +451,7 @@ async fn promotions_must_match_their_original() {
         subject: RecordId::Revision(made.id),
         kind: Kind::new("ci.test").unwrap(),
         verdict: Some(Verdict::Pass),
-        issuer: "user:ci".parse().unwrap(),
+        issuer: "user:ada".parse().unwrap(),
         inputs: Some(Inputs {
             paths: vec!["a.txt".parse().unwrap()],
             definition: Digest::of(b"test"),
@@ -464,7 +464,6 @@ async fn promotions_must_match_their_original() {
     };
     let promotion = Statement {
         subject: RecordId::Revision(same.id),
-        issuer: "user:eve".parse().unwrap(),
         promoted_from: Some(original.encode().id().into()),
         ..original.clone()
     };
@@ -736,11 +735,22 @@ async fn landings_wait_for_evidence() {
         "{page:?}"
     );
 
-    repo.put_records(&Pack {
+    // Only `user:ci` issues them, and only as itself.
+    let forged = Pack {
         objects: vec![ci_test(made.id, "user:ci")],
-    })
-    .await
-    .unwrap();
+    };
+    assert_eq!(
+        code(repo.put_records(&forged).await.unwrap_err()),
+        ErrorCode::Forbidden
+    );
+    let own = Pack {
+        objects: vec![ci_test(made.id, "user:ada")],
+    };
+    assert_eq!(
+        code(repo.put_records(&own).await.unwrap_err()),
+        ErrorCode::Forbidden
+    );
+    server.ci.put_records(&forged).await.unwrap();
     let landed = repo.land(&land).await.unwrap();
     assert!(matches!(landed.landings[..], [Landing::Landed { .. }]));
     assert_eq!(repo.landings().await.unwrap(), []);
@@ -864,6 +874,18 @@ async fn tells_callers_what_they_may_do_and_issues_narrower_tokens() {
     let error = server
         .anonymous
         .issue_token(&scope(&["read /"]))
+        .await
+        .unwrap_err();
+    assert_eq!(code(error), ErrorCode::Forbidden);
+
+    // The agent proposes changes to `src`.
+    let base = main_tip(&server.strict).await;
+    let in_src = Made::nested(change(1), base, &[("src/lib.rs", "fn a() {}")]);
+    agent.put_records(&in_src.pack()).await.unwrap();
+    // Anonymous callers only read.
+    let error = server
+        .anonymous
+        .put_records(&in_src.pack())
         .await
         .unwrap_err();
     assert_eq!(code(error), ErrorCode::Forbidden);

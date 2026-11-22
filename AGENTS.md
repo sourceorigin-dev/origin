@@ -21,15 +21,12 @@ review bots read and write at the same time, written in Rust.
   the HTTP routes (`http.rs`) and the command line's commands that the API
   offers only translate into its calls, so neither duplicates the other.
   `sync.rs` shares records with a remote (`remote.rs`), which answers the
-  same calls over the SDK or, for a local path, in-process.
+  same calls over the SDK or, for a local path, in-process. Every call
+  takes a `Caller`, authenticated by `auth.rs`; `permissions.rs` filters
+  what it reads and checks what it writes, by the rights `policy.rs`
+  resolves from `policy.toml`.
 - `tools/xtask`: development tasks, run with `cargo xtask`, such as timing
   origin against git (`just bench-git`).
-
-## API changes
-
-Every server feature lives in `OriginService`; transports like HTTP only
-translate requests. A new HTTP endpoint also takes a line in the SDK's
-`endpoints!` macro, and `just openapi` to update `docs/openapi.json`.
 
 ## Testing & Benchmarks
 

@@ -284,7 +284,8 @@ impl<'a, P: Platform> Annotations<'a, P> {
 }
 
 /// Where the revisions are read that decide who may issue a reserved kind:
-/// a store.
+/// a store, or a batch being put along with what its store has, so a
+/// statement can be about a revision of the same batch.
 pub trait RevisionView {
     /// The revision `id`.
     ///

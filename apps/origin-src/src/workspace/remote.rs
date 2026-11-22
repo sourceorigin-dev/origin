@@ -112,7 +112,7 @@ impl Workspace {
         let meta = root.join(Self::META_DIR);
         let store = Store::new(meta, Native::default()).with_actor(actor.in_workspace(&root));
         store.init()?;
-        let sync = Sync::new(&store, &remote, config.node().clone());
+        let sync = Sync::new(&store, &remote, config.node().clone(), config.user());
         let cursor = sync.moved(None)?.cursor;
         sync.fetch_chains(slice::from_ref(target))?;
         let tip = store
@@ -227,9 +227,14 @@ impl Workspace {
         Ok(self.remote.get_or_init(|| remote).as_ref())
     }
 
-    /// Syncs with `remote`, as this node.
+    /// Syncs with `remote`, as this node, for its user.
     pub(super) fn sync<'s>(&'s self, remote: &'s Remote) -> Sync<'s> {
-        Sync::new(&self.store, remote, self.config.node().clone())
+        Sync::new(
+            &self.store,
+            remote,
+            self.config.node().clone(),
+            self.config.user(),
+        )
     }
 
     /// The repository's remote, which the command needs.

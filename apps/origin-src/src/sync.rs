@@ -23,8 +23,8 @@
 //!   snapshot, its target's tip. A snapshot is marked while it's fetched
 //!   ([`Store::fetching`]), so one whose fetch was interrupted is fetched
 //!   again rather than taken for whole.
-//! - **Pushing** shares revisions, with their snapshots, and statements. It
-//!   never lands anything. It first compares each change's heads with the
+//! - **Pushing** shares revisions, with their snapshots, and the user's
+//!   statements. It never lands anything. It first compares each change's heads with the
 //!   remote's, and refuses before uploading anything when the remote has a
 //!   revision this node lacks: the change is stale. The remote checks the
 //!   heads again as it publishes the revisions, so a push racing another
@@ -76,6 +76,8 @@ pub struct Sync<'a> {
     remote: &'a Remote,
     /// This node, which flags the divergence fetched revisions reveal.
     node: Principal,
+    /// The user, whose statements pushes share.
+    user: Principal,
     /// The most bytes a push's request holds: [`Pack::LIMIT`], but in
     /// tests.
     pack_limit: usize,
@@ -144,7 +146,7 @@ pub struct Pushed {
     /// Every object sent: those, and the blobs and trees of their
     /// snapshots the remote lacked.
     pub objects: usize,
-    /// The statements that stay here: they need a record the remote
+    /// The user's statements that stay here: they need a record the remote
     /// neither has nor got, such as a statement they supersede about
     /// another change, or the original they promote.
     pub unsent: Vec<StatementId>,
@@ -356,12 +358,13 @@ impl<'a> Sync<'a> {
     /// server sends.
     const EVENTS: u32 = 1024;
 
-    /// Syncs `store` with `remote`, as the node `node`.
-    pub fn new(store: &'a Store, remote: &'a Remote, node: PrincipalName) -> Self {
+    /// Syncs `store` with `remote`, as the node `node`, for `user`.
+    pub fn new(store: &'a Store, remote: &'a Remote, node: PrincipalName, user: Principal) -> Self {
         Self {
             store,
             remote,
             node: Principal::Node(node),
+            user,
             pack_limit: Pack::LIMIT,
         }
     }
@@ -1146,10 +1149,12 @@ impl<'a> Sync<'a> {
             .collect()
     }
 
-    /// The statements about the revisions of `changes`, and about
+    /// The user's statements about the revisions of `changes`, and about
     /// statements about them, that the remote lacks, each after those of
     /// them it needs, adding each to `shared`; and those that need a record
-    /// that isn't in `shared`, which stay.
+    /// that isn't in `shared`, which stay. Others' statements are theirs to
+    /// share, and this node's own, like divergence, the remote finds
+    /// itself.
     fn statements(
         &self,
         index: &Index,
@@ -1172,7 +1177,10 @@ impl<'a> Sync<'a> {
                 if shared.contains(&id.into()) {
                     continue;
                 }
-                waiting.push((id, self.store.get(id)?));
+                let statement = self.store.get(id)?;
+                if statement.issuer == self.user {
+                    waiting.push((id, statement));
+                }
             }
         }
         let mut ordered = Vec::new();
@@ -1477,7 +1485,12 @@ mod tests {
         }
 
         fn sync(&self) -> Sync<'_> {
-            Sync::new(&self.store, &self.remote, "laptop".parse().unwrap())
+            Sync::new(
+                &self.store,
+                &self.remote,
+                "laptop".parse().unwrap(),
+                "user:ada".parse().unwrap(),
+            )
         }
 
         /// Writes a revision of `change` with `files` on `base`, with every

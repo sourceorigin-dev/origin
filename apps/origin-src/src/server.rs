@@ -40,8 +40,8 @@ use crate::store::Store;
 /// "user:alice" = "a long random secret"
 /// ```
 ///
-/// Paths are relative to the file. Callers without a token are anonymous;
-/// the server also takes the scoped tokens it signed (see
+/// Paths are relative to the file. Callers without a token are anonymous,
+/// and only read; the server also takes the scoped tokens it signed (see
 /// [`ServerConfig::issue_token`]).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
