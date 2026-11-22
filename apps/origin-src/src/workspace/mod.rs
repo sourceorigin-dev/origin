@@ -346,7 +346,7 @@ impl Workspace {
         Ok(())
     }
 
-    /// Makes the files match `to`, given that they match `from`.
+    /// Makes the files match `to`, given that they match `from`, durably.
     fn checkout(&self, from: TreeId, to: TreeId) -> Result<(), WorkspaceError> {
         let changes = self.store.diff(from, to)?;
         Ok(Worktree::new(&self.root, &self.store).checkout(&changes)?)
