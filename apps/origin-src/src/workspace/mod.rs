@@ -1338,12 +1338,15 @@ impl Workspace {
     /// The snapshot to merge `heads`, revisions of one change, from: that of
     /// the newest revision they all evolve from, or the
     /// [merge](Ancestry::merge_base) of several, if each lacks another.
+    /// Fetches the snapshots it reads that a clone lacks.
     fn merge_base(&self, heads: &[RevisionId]) -> Result<Option<TreeId>, WorkspaceError> {
         let ancestry = Ancestry::walk(heads, |id| {
             let revision: Revision = self.store.get(id)?;
             Ok::<_, StoreError>((revision.predecessors, revision.snapshot))
         })?;
-        Ok(ancestry.merge_base(&self.store, heads)?)
+        ancestry.merge_base(&self.store, heads, |id| {
+            self.need(&[RecordId::Revision(id)])
+        })
     }
 
     /// `origin log [<target>]`: prints the working copy's stack of changes

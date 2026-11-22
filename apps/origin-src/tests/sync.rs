@@ -228,3 +228,32 @@ fn a_move_that_cannot_fetch_moves_nothing() {
     clone.ok(&["edit", &own]);
     assert_eq!(clone.read("notes"), "mine\n");
 }
+
+#[test]
+fn a_clone_converges_heads_whose_merge_base_it_never_read() {
+    let ada = User::new("ada");
+    let origin = Repo::init(&ada);
+    origin.write("file", "base\n");
+    origin.ok(&["describe", "Shared work"]);
+    let change = origin.full_change();
+    // Two agents revise the same revision.
+    let pointer = origin.path(".origin/workspace");
+    let started = fs::read_to_string(&pointer).unwrap();
+    origin.write("file", "left\n");
+    origin.ok(&["describe", "Shared work"]);
+    fs::write(&pointer, started).unwrap();
+    origin.write("file", "right\n");
+    origin.ok(&["describe", "Shared work"]);
+
+    // The clone fetches the heads' snapshots, and their merge base's.
+    let clone = Repo::clone(&ada, origin.root().to_str().unwrap(), &[]);
+    clone.ok(&["fetch", "--change", &change]);
+    let converged = clone.ok(&["converge", &change]);
+    assert!(converged.starts_with("Converged change "), "{converged}");
+    clone.ok(&["edit", &change]);
+    let file = clone.read("file");
+    assert!(
+        file.contains("left\n") && file.contains("right\n"),
+        "{file}"
+    );
+}

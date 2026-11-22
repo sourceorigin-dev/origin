@@ -48,35 +48,38 @@ impl<I: Copy + Eq + Hash + Ord> Ancestry<I> {
     /// recursive strategy does: each from their own merge base, with what
     /// [`Store::merge_bases`] leaves where they conflict, so a merge from
     /// the result conflicts there, and under it, unless both sides agree. Writes the trees
-    /// that makes, which merging reads.
+    /// that makes, which merging reads. Calls `need` with each record
+    /// before reading its snapshot, so a lazy clone can fetch it.
     ///
     /// # Errors
     ///
-    /// Fails if a tree cannot be read or written.
-    pub fn merge_base<P: Platform>(
+    /// Fails as `need` does, or if a tree cannot be read or written.
+    pub fn merge_base<P: Platform, E: From<StoreError>>(
         &self,
         store: &Store<P>,
         tips: &[I],
-    ) -> Result<Option<TreeId>, StoreError> {
+        mut need: impl FnMut(I) -> Result<(), E>,
+    ) -> Result<Option<TreeId>, E> {
         let groups: Vec<_> = tips.iter().map(std::slice::from_ref).collect();
-        self.merge_base_of(store, &groups)
+        self.merge_base_of(store, &groups, &mut need)
     }
 
     /// The snapshot to merge `groups` from, each standing for all it holds.
-    fn merge_base_of<P: Platform>(
+    fn merge_base_of<P: Platform, E: From<StoreError>>(
         &self,
         store: &Store<P>,
         groups: &[&[I]],
-    ) -> Result<Option<TreeId>, StoreError> {
+        need: &mut impl FnMut(I) -> Result<(), E>,
+    ) -> Result<Option<TreeId>, E> {
         let bases = self.best_common(groups);
         let Some((&first, others)) = bases.split_first() else {
             return Ok(None);
         };
         let mut merged = vec![first];
-        let mut tree = self.snapshot(first);
+        let mut tree = self.snapshot(first, need)?;
         for &other in others {
-            let base = self.merge_base_of(store, &[&merged, &[other]])?;
-            let merge = store.merge_bases(base, tree, self.snapshot(other))?;
+            let base = self.merge_base_of(store, &[&merged, &[other]], need)?;
+            let merge = store.merge_bases(base, tree, self.snapshot(other, need)?)?;
             store.write_all(&merge.trees)?;
             tree = merge.tree;
             merged.push(other);
@@ -127,8 +130,10 @@ impl<I: Copy + Eq + Hash + Ord> Ancestry<I> {
         self.records.get(&id).map_or(&[], |(parents, _)| parents)
     }
 
-    fn snapshot(&self, id: I) -> TreeId {
-        self.records[&id].1
+    /// The snapshot of `id`, once `need` had it.
+    fn snapshot<E>(&self, id: I, need: &mut impl FnMut(I) -> Result<(), E>) -> Result<TreeId, E> {
+        need(id)?;
+        Ok(self.records[&id].1)
     }
 }
 
