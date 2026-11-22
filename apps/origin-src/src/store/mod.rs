@@ -35,6 +35,7 @@ use std::thread;
 use std::time::{Duration, SystemTime};
 
 use origin_platform::{DurableWrite, LockMode, LockedFile, Native, Platform, WritableError};
+use origin_shared::access::PathAccess;
 use origin_shared::object::{DecodeError, IdMismatch};
 use origin_shared::{AttachmentId, EncodedObject, Head, ObjectId, TargetName, TypedId};
 
@@ -55,6 +56,9 @@ pub struct Store<P = Native> {
     packs: Arc<Packs>,
     /// Who the op log says writes.
     pub(crate) actor: Actor,
+    /// What this repository may read of its remote's snapshots, if the
+    /// remote withholds some paths: see [`Store::with_withheld`].
+    pub(crate) readable: Option<Arc<PathAccess>>,
 }
 
 impl<P: Platform> Store<P> {
@@ -75,6 +79,7 @@ impl<P: Platform> Store<P> {
             platform,
             packs: Arc::default(),
             actor: Actor::default(),
+            readable: None,
         }
     }
 
@@ -82,6 +87,19 @@ impl<P: Platform> Store<P> {
     #[must_use]
     pub fn with_actor(self, actor: Actor) -> Self {
         Self { actor, ..self }
+    }
+
+    /// The store of a repository whose remote withholds the content of the
+    /// paths `readable` doesn't read: their trees keep the entries, but the
+    /// store lacks what they point to. Tree operations then never read
+    /// them: diffs skip them, merges compare them by id, and walks leave
+    /// them out (see [`crate::tree`]).
+    #[must_use]
+    pub fn with_withheld(self, readable: PathAccess) -> Self {
+        Self {
+            readable: (!readable.reads_all()).then(|| Arc::new(readable)),
+            ..self
+        }
     }
 
     /// Who the op log says writes.
