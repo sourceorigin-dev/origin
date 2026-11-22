@@ -119,9 +119,11 @@ key = "node.key"         # its secret key, created if missing
 demo = "repos/demo"
 ```
 
-The HTTP API, under `/api/v1`, puts and fetches records in batches, lists
-statements, revisions, targets and their logs, lands changes and targets,
-and streams events by long-poll: `GET
+The HTTP API, under `/api/v1`, puts records in batches and fetches them
+by id, walks snapshots for the trees and blobs a client lacks (the only
+way files leave a server), in parts of at most 64 MiB, lists statements,
+revisions, targets and their logs, lands changes and targets, and streams
+events by long-poll: `GET
 /api/v1/repos/<repo>/events?cursor=<n>&wait=30s` answers as soon as there
 are events after the cursor, with a JSON batch and the next cursor.
 [`docs/openapi.json`](docs/openapi.json) describes it, and

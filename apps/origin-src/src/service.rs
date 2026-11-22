@@ -19,22 +19,23 @@
 
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
+use std::iter;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use origin_platform::Native;
 use origin_shared::api::{
-    Annotation, ErrorCode, EventsQuery, LandRequest, Landings, LogEntry, NewTarget, RevisionEntry,
-    Revisions, Stored, TargetInfo,
+    Annotation, ErrorCode, EventsQuery, FetchSnapshot, LandRequest, Landings, LogEntry, NewTarget,
+    RevisionEntry, Revisions, Stored, TargetInfo,
 };
 use origin_shared::event::{Filter, Page};
 use origin_shared::landing::{Pending, Proposal};
 use origin_shared::object::DecodeError;
-use origin_shared::pack::Pack;
+use origin_shared::pack::{Pack, Packer, Part};
 use origin_shared::{
     Base, ChangeId, Head, NodeKey, Object, ObjectId, ObjectKind, Principal, PrincipalName,
-    RecordId, Statement, StatementId, TargetName,
+    RecordId, Statement, StatementId, TargetName, TreeId,
 };
 
 use crate::annotations::{AnnotateError, Annotations};
@@ -79,6 +80,8 @@ pub struct OriginService {
     /// The record indexes kept open, but those in use: see the module.
     indexes: Mutex<Vec<Index>>,
     wakeup: Wakeup,
+    /// The most bytes a fetch's answer holds: [`Pack::LIMIT`], but in tests.
+    pack_limit: usize,
 }
 
 impl OriginService {
@@ -99,6 +102,7 @@ impl OriginService {
             node,
             indexes: Mutex::default(),
             wakeup: Wakeup::default(),
+            pack_limit: Pack::LIMIT,
         }
     }
 
@@ -179,17 +183,99 @@ impl OriginService {
         self.indexes.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// The objects `ids` name, in their order, as a pack.
+    /// The records `ids` name, in their order, as a pack: revisions,
+    /// statements and acceptances, each followed by the blob it carries, if
+    /// the repository has it: a revision's description, a statement's
+    /// payload. Snapshots only leave through [`OriginService::snapshot`].
+    /// The pack stops short at [`Pack::LIMIT`], before a record that
+    /// doesn't fit with its blob: the rest comes from asking for the ids
+    /// after the last record it has.
     ///
     /// # Errors
     ///
-    /// Fails if the repository doesn't have one, or cannot read it.
-    pub fn records(&self, _caller: &Caller, ids: &[ObjectId]) -> Result<Pack, ServiceError> {
-        let objects = ids
+    /// Fails if the repository doesn't have one, one is a blob or a tree, or
+    /// it cannot read one.
+    pub fn records(&self, _caller: &Caller, ids: &[ObjectId]) -> Result<Part, ServiceError> {
+        let mut packer = Packer::new(self.pack_limit);
+        for &id in ids {
+            let object = self.store.read(id)?;
+            let carried = match object
+                .decode()
+                .map_err(|source| StoreError::Decode { id, source })?
+            {
+                Object::Blob(_) | Object::Tree(_) => return Err(ServiceError::NotARecord(id)),
+                Object::Revision(revision) => Some(revision.description.into()),
+                Object::Statement(statement) => statement.payload.map(Into::into),
+                Object::Acceptance(_) => None,
+            };
+            let carried = carried
+                .map(|id| self.store.try_read(id))
+                .transpose()?
+                .flatten();
+            let group: Vec<_> = iter::once(object).chain(carried).collect();
+            if !packer.fits(&group) {
+                return Ok(Part {
+                    pack: packer.finish(),
+                    more: true,
+                });
+            }
+            packer.extend(group);
+        }
+        Ok(Part {
+            pack: packer.finish(),
+            more: false,
+        })
+    }
+
+    /// The objects of the snapshot the request names that the caller lacks,
+    /// as a pack, parents before children: those none of the snapshots it
+    /// has holds at the same path, under the paths it asks for, but the
+    /// first `skip`. See [`Store::added`]. The pack stops short at
+    /// [`Pack::LIMIT`]: the rest comes from asking again, skipping what
+    /// came.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the repository doesn't have the snapshot, or cannot read
+    /// it.
+    pub fn snapshot(
+        &self,
+        _caller: &Caller,
+        request: &FetchSnapshot,
+    ) -> Result<Part, ServiceError> {
+        let is_tree = |id: TreeId| -> Result<bool, StoreError> {
+            let object = self.store.try_read(id.into())?;
+            Ok(object.is_some_and(|object| object.kind().ok() == Some(ObjectKind::Tree)))
+        };
+        if !is_tree(request.snapshot)? {
+            return Err(ServiceError::UnknownSnapshot(request.snapshot));
+        }
+        let mut have = Vec::new();
+        for &id in &request.have {
+            if is_tree(id)? {
+                have.push(id);
+            }
+        }
+        let added = self.store.added(request.snapshot, &have, &request.paths)?;
+        let skip = usize::try_from(request.skip).unwrap_or(usize::MAX);
+        let ids: Vec<ObjectId> = added
             .iter()
-            .map(|&id| self.store.read(id))
-            .collect::<Result<_, _>>()?;
-        Ok(Pack { objects })
+            .skip(skip)
+            .map(|placed| placed.entry.id)
+            .collect();
+        let mut packer = Packer::new(self.pack_limit);
+        let mut more = false;
+        self.store.read_each(&ids, |object| {
+            more = !packer.fits([&object]);
+            if !more {
+                packer.extend([object]);
+            }
+            Ok::<_, StoreError>(!more)
+        })?;
+        Ok(Part {
+            pack: packer.finish(),
+            more,
+        })
     }
 
     /// Writes the objects of `pack`: snapshots, revisions and statements.
@@ -615,6 +701,12 @@ pub enum ServiceError {
     /// No target has this name.
     #[error("no target is named `{0}`")]
     UnknownTarget(TargetName),
+    /// The repository has no such snapshot.
+    #[error("snapshot {0} not found")]
+    UnknownSnapshot(TreeId),
+    /// A blob or a tree was fetched as a record.
+    #[error("{0} is not a record: fetch snapshots by walking them")]
+    NotARecord(ObjectId),
     /// A target was proposed for landing without a target to land on.
     #[error("landing a target needs a target to land on")]
     NoTarget,
@@ -675,10 +767,12 @@ impl ServiceError {
     #[must_use]
     pub fn code(&self) -> ErrorCode {
         match self {
-            Self::UnknownRepository(_) | Self::UnknownChange(_) | Self::UnknownTarget(_) => {
-                ErrorCode::NotFound
-            }
+            Self::UnknownRepository(_)
+            | Self::UnknownChange(_)
+            | Self::UnknownTarget(_)
+            | Self::UnknownSnapshot(_) => ErrorCode::NotFound,
             Self::NoTarget
+            | Self::NotARecord(_)
             | Self::Malformed { .. }
             | Self::Acceptance(_)
             | Self::Missing { .. }

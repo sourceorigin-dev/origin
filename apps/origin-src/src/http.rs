@@ -15,12 +15,13 @@ use axum::response::{IntoResponse, Response};
 use origin_shared::ChangeId;
 use origin_shared::Head;
 use origin_shared::api::{
-    Annotation, ApiError, ErrorCode, EventsQuery, FetchRecords, LandRequest, Landings, LogEntry,
-    LogQuery, NewTarget, RepoName, RepoSummary, Revisions, StatementsQuery, Stored, TargetInfo,
+    Annotation, ApiError, ErrorCode, EventsQuery, FetchRecords, FetchSnapshot, LandRequest,
+    Landings, LogEntry, LogQuery, MORE, NewTarget, RepoName, RepoSummary, Revisions,
+    StatementsQuery, Stored, TargetInfo,
 };
 use origin_shared::event::Page;
 use origin_shared::landing::Pending;
-use origin_shared::pack::{Pack, PackError};
+use origin_shared::pack::{Pack, PackError, Part};
 use utoipa::OpenApi;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
@@ -51,6 +52,7 @@ impl Api {
         OpenApiRouter::with_openapi(ApiDoc::openapi())
             .routes(routes!(list_repos))
             .routes(routes!(fetch_records))
+            .routes(routes!(fetch_snapshot))
             .routes(routes!(put_records))
             .routes(routes!(statements))
             .routes(routes!(revisions))
@@ -160,7 +162,28 @@ async fn list_repos(State(repositories): Repos, caller: Caller) -> Json<Vec<Repo
     Json(repositories.list(&caller))
 }
 
-/// Fetches objects by id, as a pack.
+/// A part of a fetch, as a response: its pack, with the [`MORE`] header if
+/// it stopped short.
+struct PackResponse(Part);
+
+impl IntoResponse for PackResponse {
+    fn into_response(self) -> Response {
+        let Part { pack, more } = self.0;
+        let mut response = (
+            [(header::CONTENT_TYPE, "application/octet-stream")],
+            pack.encode(),
+        )
+            .into_response();
+        if more {
+            response
+                .headers_mut()
+                .insert(MORE, header::HeaderValue::from_static("true"));
+        }
+        response
+    }
+}
+
+/// Fetches records by id, each with the blob it carries, as a pack.
 #[utoipa::path(
     post,
     path = "/api/v1/repos/{repo}/records/fetch",
@@ -168,8 +191,9 @@ async fn list_repos(State(repositories): Repos, caller: Caller) -> Json<Vec<Repo
     params(("repo" = String, Path, description = "The repository")),
     request_body = FetchRecords,
     responses(
-        (status = 200, description = "The objects, in the order asked, as a pack: each a 32-byte id, a little-endian u64 length and the object's encoding", content_type = "application/octet-stream", body = Binary),
-        (status = 404, description = "The repository or an object does not exist", body = ApiError)
+        (status = 200, description = "The records, in the order asked, each followed by its description or payload if the repository has it, as a pack: each object a 32-byte id, a little-endian u64 length and the object's encoding. At most 64 MiB, but for a record alone", content_type = "application/octet-stream", body = Binary, headers(("origin-more" = bool, description = "Present if the pack stopped short: ask again for the records after the last it holds"))),
+        (status = 400, description = "An object is a blob or a tree, which only leave by walking a snapshot", body = ApiError),
+        (status = 404, description = "The repository or a record does not exist", body = ApiError)
     )
 )]
 async fn fetch_records(
@@ -177,16 +201,38 @@ async fn fetch_records(
     Path(repo): Path<RepoName>,
     caller: Caller,
     Json(request): Json<FetchRecords>,
-) -> Result<Response, HttpError> {
-    let pack = call(repos, repo, caller, move |service, caller| {
+) -> Result<PackResponse, HttpError> {
+    call(repos, repo, caller, move |service, caller| {
         service.records(caller, &request.ids)
     })
-    .await?;
-    Ok((
-        [(header::CONTENT_TYPE, "application/octet-stream")],
-        pack.encode(),
+    .await
+    .map(PackResponse)
+}
+
+/// Fetches the objects of a snapshot the caller lacks, as a pack: the only
+/// way trees and blobs leave a repository.
+#[utoipa::path(
+    post,
+    path = "/api/v1/repos/{repo}/snapshots/fetch",
+    operation_id = "fetch_snapshot",
+    params(("repo" = String, Path, description = "The repository")),
+    request_body = FetchSnapshot,
+    responses(
+        (status = 200, description = "The trees and blobs, parents before children, as a pack, of at most 64 MiB, but for an object alone", content_type = "application/octet-stream", body = Binary, headers(("origin-more" = bool, description = "Present if the pack stopped short: ask again, skipping the objects it holds"))),
+        (status = 404, description = "The repository or the snapshot does not exist", body = ApiError)
     )
-        .into_response())
+)]
+async fn fetch_snapshot(
+    repos: Repos,
+    Path(repo): Path<RepoName>,
+    caller: Caller,
+    Json(request): Json<FetchSnapshot>,
+) -> Result<PackResponse, HttpError> {
+    call(repos, repo, caller, move |service, caller| {
+        service.snapshot(caller, &request)
+    })
+    .await
+    .map(PackResponse)
 }
 
 /// Puts a batch of objects, as a pack: snapshots, revisions and

@@ -429,7 +429,7 @@
     },
     "/api/v1/repos/{repo}/records/fetch": {
       "post": {
-        "summary": "Fetches objects by id, as a pack.",
+        "summary": "Fetches records by id, each with the blob it carries, as a pack.",
         "operationId": "fetch_records",
         "parameters": [
           {
@@ -454,7 +454,82 @@
         },
         "responses": {
           "200": {
-            "description": "The objects, in the order asked, as a pack: each a 32-byte id, a little-endian u64 length and the object's encoding",
+            "description": "The records, in the order asked, each followed by its description or payload if the repository has it, as a pack: each object a 32-byte id, a little-endian u64 length and the object's encoding. At most 64 MiB, but for a record alone",
+            "headers": {
+              "origin-more": {
+                "schema": {
+                  "type": "boolean"
+                },
+                "description": "Present if the pack stopped short: ask again for the records after the last it holds"
+              }
+            },
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/Binary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "An object is a blob or a tree, which only leave by walking a snapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The repository or a record does not exist",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/repos/{repo}/snapshots/fetch": {
+      "post": {
+        "summary": "Fetches the objects of a snapshot the caller lacks, as a pack: the only\nway trees and blobs leave a repository.",
+        "operationId": "fetch_snapshot",
+        "parameters": [
+          {
+            "name": "repo",
+            "in": "path",
+            "description": "The repository",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FetchSnapshot"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The trees and blobs, parents before children, as a pack, of at most 64 MiB, but for an object alone",
+            "headers": {
+              "origin-more": {
+                "schema": {
+                  "type": "boolean"
+                },
+                "description": "Present if the pack stopped short: ask again, skipping the objects it holds"
+              }
+            },
             "content": {
               "application/octet-stream": {
                 "schema": {
@@ -464,7 +539,7 @@
             }
           },
           "404": {
-            "description": "The repository or an object does not exist",
+            "description": "The repository or the snapshot does not exist",
             "content": {
               "application/json": {
                 "schema": {
@@ -1052,7 +1127,7 @@
       },
       "FetchRecords": {
         "type": "object",
-        "description": "Asks for records, and any other objects, by id.",
+        "description": "Asks for records by id: revisions, statements and acceptances. Each\ncomes with the blob it carries, if the repository has it: a revision's\ndescription, a statement's payload. Snapshots are fetched with\n[`FetchSnapshot`] instead.",
         "required": [
           "ids"
         ],
@@ -1062,7 +1137,40 @@
             "items": {
               "$ref": "#/components/schemas/ObjectId"
             },
-            "description": "The objects, returned in this order."
+            "description": "The records, returned in this order, each followed by its blob. A\nresponse that stops short, with the [`MORE`] header, holds those up\nto the last record it has: ask again for those after it."
+          }
+        }
+      },
+      "FetchSnapshot": {
+        "type": "object",
+        "description": "Asks for the objects of a snapshot that the caller lacks: its trees and\nblobs, walked from its root. This is the only way blobs and trees leave\na repository, so what each caller may read can be checked by path.",
+        "required": [
+          "snapshot"
+        ],
+        "properties": {
+          "have": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TreeId"
+            },
+            "description": "Snapshots the caller holds whole. Whatever one of them holds at the\nsame path is skipped, so only what changed since comes. Those the\nrepository doesn't have are ignored."
+          },
+          "paths": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RepoPath"
+            },
+            "description": "Only these files and directories, with everything under them, and\nthe trees on the way to them. Everything by default."
+          },
+          "skip": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Skip this many of the objects, which earlier parts brought: a\nresponse that stops short has the [`MORE`] header.",
+            "minimum": 0
+          },
+          "snapshot": {
+            "$ref": "#/components/schemas/TreeId",
+            "description": "The snapshot."
           }
         }
       },

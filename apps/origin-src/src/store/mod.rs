@@ -480,6 +480,61 @@ impl<P: Platform> Store<P> {
         self.try_read(id)?.ok_or(StoreError::NotFound(id))
     }
 
+    /// Reads objects the store must have, in order, from every core.
+    ///
+    /// # Errors
+    ///
+    /// Fails like [`Store::read`].
+    pub fn read_all(&self, ids: &[ObjectId]) -> Result<Vec<EncodedObject>, StoreError> {
+        let chunks = Self::on_every_core(ids, |chunk| {
+            chunk
+                .iter()
+                .map(|&id| self.read(id))
+                .collect::<Result<Vec<_>, _>>()
+        });
+        let mut objects = Vec::with_capacity(ids.len());
+        for chunk in chunks {
+            objects.extend(chunk?);
+        }
+        Ok(objects)
+    }
+
+    /// Reads the objects `ids` names, in order, handing each to `each` until
+    /// it returns `false`. They're read from every core a chunk at a time,
+    /// chunks growing while their objects are small and shrinking while
+    /// they're large, so a chunk holds a few MiB.
+    ///
+    /// # Errors
+    ///
+    /// Fails like [`Store::read`], or as `each` does.
+    pub fn read_each<E: From<StoreError>>(
+        &self,
+        ids: &[ObjectId],
+        mut each: impl FnMut(EncodedObject) -> Result<bool, E>,
+    ) -> Result<(), E> {
+        /// The bytes a chunk aims for.
+        const TARGET: usize = 8 << 20;
+        let mut size = 16;
+        let mut rest = ids;
+        while !rest.is_empty() {
+            let (chunk, after) = rest.split_at(size.min(rest.len()));
+            rest = after;
+            let objects = self.read_all(chunk)?;
+            let bytes: usize = objects.iter().map(|object| object.bytes().len()).sum();
+            if bytes < TARGET / 2 {
+                size = (size * 2).min(4096);
+            } else if bytes > TARGET * 2 {
+                size = (size / 2).max(1);
+            }
+            for object in objects {
+                if !each(object)? {
+                    return Ok(());
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Reads and decodes the record `id` names.
     ///
     /// # Errors
