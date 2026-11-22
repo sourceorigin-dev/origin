@@ -41,7 +41,8 @@ benchmark, and its numbers in the pull request.
 End-to-end tests run the `origin` binary with `ORIGIN_CONFIG_DIR` set to a
 temporary directory, which holds the user's `config.toml` and node key.
 The HTTP tests drive every SDK method against a real server. One fails
-while `docs/openapi.json` is stale: `just openapi` rewrites it.
+while `docs/openapi.json` is stale: `just openapi` rewrites it. The sync
+tests clone, push and fetch through `origin serve` and through local paths;
 `tests/common` holds the helpers every end-to-end test shares.
 
 ## Commits & Pull Requests

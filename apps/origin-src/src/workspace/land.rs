@@ -171,17 +171,22 @@ impl Workspace {
         self.start_on(&mut working_copy, target, description, files)
     }
 
-    /// `origin pull`: moves the working copy where its change went without
-    /// it, merging the edits made since: onto the tip of the target it
+    /// `origin pull`: fetches, if the repository has a remote, then moves
+    /// the working copy where its change went without it, merging the edits
+    /// made since: onto the tip of the target it
     /// landed on, as a new change, or onto the landing queue's rebase of it.
     /// Otherwise rebases it onto the tip of the target its stack is on:
     /// once the change below it landed, or once the target it's on moved.
     ///
     /// # Errors
     ///
-    /// Fails if the working copy cannot be snapshotted, a file was edited
-    /// while it moved, or the records cannot be read or written.
+    /// Fails like [`Workspace::fetch`], or if the working copy cannot be
+    /// snapshotted, a file was edited while it moved, or the records cannot
+    /// be read or written.
     pub fn pull(&mut self) -> Result<(), WorkspaceError> {
+        if self.remote()?.is_some() {
+            self.fetch(&[], &[])?;
+        }
         let mut working_copy = self.save_draft()?;
         if self.follow(&mut working_copy)? {
             return Ok(());
@@ -218,6 +223,7 @@ impl Workspace {
             .head(target)?
             .ok_or_else(|| WorkspaceError::UnknownTarget(target.clone()))?;
         let state = self.store.get(tip.acceptance)?.body().state;
+        self.need(&[state])?;
         let tip_label = format!("{target} #{}", tip.seq);
         let merge = self.store.merge_marked(
             Some(base),
@@ -318,7 +324,7 @@ impl Workspace {
 
     /// Rebases the working copy, made on `base`, onto the tip of `onto`, as
     /// the module explains.
-    fn rebase_onto_tip(
+    pub(super) fn rebase_onto_tip(
         &mut self,
         working_copy: &mut WorkingCopy,
         base: TreeId,
@@ -329,6 +335,7 @@ impl Workspace {
             .head(onto)?
             .ok_or_else(|| WorkspaceError::UnknownTarget(onto.clone()))?;
         let state = self.store.get(tip.acceptance)?.body().state;
+        self.need(&[state])?;
         let current = &working_copy.revision;
         let tip_label = format!("{onto} #{}", tip.seq);
         let merge = self.store.merge_marked(

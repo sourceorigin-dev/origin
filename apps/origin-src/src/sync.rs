@@ -19,9 +19,10 @@
 //!   however long the history: only without a cursor, or once it expired,
 //!   are all the changes this node knows compared.
 //! - Snapshots don't come with records: [`Sync::need`] fetches one when
-//!   something reads it, such as a checkout. A snapshot is marked while it's
-//!   fetched ([`Store::fetching`]), so one whose fetch was interrupted is
-//!   fetched again rather than taken for whole.
+//!   something reads it, such as a checkout, so a clone fetches one
+//!   snapshot, its target's tip. A snapshot is marked while it's fetched
+//!   ([`Store::fetching`]), so one whose fetch was interrupted is fetched
+//!   again rather than taken for whole.
 //! - **Pushing** shares revisions, with their snapshots, and statements. It
 //!   never lands anything. It first compares each change's heads with the
 //!   remote's, and refuses before uploading anything when the remote has a
