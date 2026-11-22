@@ -30,6 +30,7 @@ use std::io;
 use std::num::NonZero;
 use std::panic;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, SystemTime};
@@ -597,11 +598,13 @@ impl<P: Platform> Store<P> {
     /// Reads the objects `ids` names, in order, handing each to `each` until
     /// it returns `false`. They're read from every core a chunk at a time,
     /// chunks growing while their objects are small and shrinking while
-    /// they're large, so a chunk holds a few MiB.
+    /// they're large. The cores stop reading a chunk once it holds a few
+    /// MiB, so it never holds much more, however large its objects.
     ///
     /// # Errors
     ///
-    /// Fails like [`Store::read`], or as `each` does.
+    /// Fails like [`Store::read`] once `each` reaches an object that cannot
+    /// be read, or as `each` does.
     pub fn read_each<E: From<StoreError>>(
         &self,
         ids: &[ObjectId],
@@ -612,19 +615,49 @@ impl<P: Platform> Store<P> {
         let mut size = 16;
         let mut rest = ids;
         while !rest.is_empty() {
-            let (chunk, after) = rest.split_at(size.min(rest.len()));
-            rest = after;
-            let objects = self.read_all(chunk)?;
-            let bytes: usize = objects.iter().map(|object| object.bytes().len()).sum();
-            if bytes < TARGET / 2 {
-                size = (size * 2).min(4096);
-            } else if bytes > TARGET * 2 {
-                size = (size / 2).max(1);
-            }
-            for object in objects {
-                if !each(object)? {
-                    return Ok(());
+            let chunk = &rest[..size.min(rest.len())];
+            let read = AtomicUsize::new(0);
+            // Each core reads its part of the chunk, in order, until it
+            // fails or the chunk holds its target, though always one object,
+            // so the first part moves on.
+            let parts = Self::on_every_core(chunk, |part| {
+                let mut objects = Vec::new();
+                for &id in part {
+                    if !objects.is_empty() && read.load(Ordering::Relaxed) >= TARGET {
+                        break;
+                    }
+                    let object = self.read(id);
+                    let failed = object.is_err();
+                    if let Ok(object) = &object {
+                        read.fetch_add(object.bytes().len(), Ordering::Relaxed);
+                    }
+                    objects.push(object);
+                    if failed {
+                        break;
+                    }
                 }
+                (objects.len() == part.len(), objects)
+            });
+            // In order, up to the first part that stopped short: the rest
+            // comes with the next chunk.
+            let mut handed = 0;
+            for (whole, objects) in parts {
+                for object in objects {
+                    handed += 1;
+                    if !each(object?)? {
+                        return Ok(());
+                    }
+                }
+                if !whole {
+                    break;
+                }
+            }
+            rest = &rest[handed..];
+            let bytes = read.into_inner();
+            if handed < chunk.len() || bytes > TARGET * 2 {
+                size = (size / 2).max(1);
+            } else if bytes < TARGET / 2 {
+                size = (size * 2).min(4096);
             }
         }
         Ok(())
@@ -1100,6 +1133,30 @@ pub(crate) mod tests {
         fs::write(store.path(blob.id()), other).unwrap();
 
         assert!(matches!(store.read(blob.id()), Err(StoreError::Corrupt(_))));
+    }
+
+    #[test]
+    fn reading_each_fails_only_on_reaching_an_unreadable_object() {
+        let (_dir, store) = store();
+        let blobs: Vec<_> = (0..8_u8).map(|i| EncodedObject::blob(&[i])).collect();
+        store.write_all(&blobs).unwrap();
+        let corrupt = zstd::bulk::compress(EncodedObject::blob(b"evil").bytes(), 1).unwrap();
+        fs::write(store.path(blobs[4].id()), corrupt).unwrap();
+        let ids: Vec<_> = blobs.iter().map(EncodedObject::id).collect();
+
+        let mut read = Vec::new();
+        store
+            .read_each(&ids, |object| {
+                read.push(object);
+                Ok::<_, StoreError>(read.len() < 4)
+            })
+            .unwrap();
+        assert_eq!(read, blobs[..4], "stopped before it");
+        let reached = store.read_each(&ids, |_| Ok::<_, StoreError>(true));
+        assert!(
+            matches!(reached, Err(StoreError::Corrupt(_))),
+            "{reached:?}"
+        );
     }
 
     #[test]
