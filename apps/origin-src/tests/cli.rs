@@ -1271,26 +1271,10 @@ fn targets_fork_and_land_on_each_other() {
     assert!(repo.ok(&["log", "main"]).contains("\n    overhaul #1\n"));
 }
 
-/// Lands a policy that makes `main` require `ci.test` to pass, from the
-/// runners, ada among them.
-fn require_tests(repo: &Repo) {
-    repo.ok(&["new", "--on", "policy", "Require tests"]);
-    let policy = repo
-        .read("policy.toml")
-        .replace("# [groups]", "[groups]")
-        .replace(
-            "# runners = [\"node:ci-1\"]",
-            "runners = [\"node:ci-1\", \"user:ada\"]",
-        )
-        .replace("# require", "require");
-    repo.write("policy.toml", &policy);
-    assert!(repo.ok(&["land"]).contains(" on policy #1\n"));
-}
-
 #[test]
 fn results_there_count_over_promoted_ones() {
     let repo = Repo::new();
-    require_tests(&repo);
+    repo.require_tests();
     repo.ok(&["new", "--on", "main", "Library"]);
     repo.write("src/lib.rs", "fn a() {}\n");
     repo.ok(&["annotate", "@", "ci.test", "--pass", "--inputs", "src"]);
@@ -1319,7 +1303,7 @@ fn results_there_count_over_promoted_ones() {
 #[test]
 fn landings_wait_for_the_evidence_policy_requires() {
     let repo = Repo::new();
-    require_tests(&repo);
+    repo.require_tests();
     assert!(
         repo.ok(&["targets"])
             .contains("    requires ci.test pass from group:runners\n")

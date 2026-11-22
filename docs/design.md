@@ -473,6 +473,8 @@ plugin can do nothing the API can't, which keeps the API complete.
 
 Official plugins live in `apps/origin-<name>`. The first is `origin-ci`:
 - **Tool mode:** `origin ci run [<rev>]` checks a revision as the user.
+  `origin ci exec <name> [--rev <rev>] -- <command...>` runs a command as
+  the check `ci.<name>` the same way, even if a result covers it.
 - **Worker mode:** `origin ci worker --remote <url>` answers `check.requested`
   with a token that can read the repository and annotate `ci.*`. It
   reconciles the waiting landings at start, every minute and after an

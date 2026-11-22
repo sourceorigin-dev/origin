@@ -37,6 +37,7 @@
 //! reads instead, such as `rust-toolchain.toml` among its `inputs`: then
 //! a new toolchain is a change of the inputs, and the check runs again.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use origin_shared::{Digest, Inputs, InvalidName, Kind, RepoPath};
@@ -138,6 +139,45 @@ impl Checks {
 }
 
 impl Check {
+    /// A check given rather than read from `checks.toml`, named `name`:
+    /// it runs `words`, each quoted for the shell, and reads `inputs`, the
+    /// whole snapshot if none.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the name doesn't make a kind.
+    pub fn adhoc(
+        name: &str,
+        words: &[String],
+        inputs: Vec<RepoPath>,
+        toolchain: Option<String>,
+        external: bool,
+    ) -> Result<Self, InvalidName> {
+        let words: Vec<_> = words.iter().map(|word| Self::quote(word)).collect();
+        Ok(Self {
+            kind: Checks::kind(name)?,
+            command: words.join(" "),
+            inputs: if inputs.is_empty() {
+                vec![RepoPath::root()]
+            } else {
+                inputs
+            },
+            target_inputs: Vec::new(),
+            toolchain,
+            external,
+        })
+    }
+
+    /// `word`, quoted for the shell unless it needs no quotes.
+    fn quote(word: &str) -> Cow<'_, str> {
+        // Without `=`: a first word `A=1` would assign a variable.
+        let plain = |byte: u8| byte.is_ascii_alphanumeric() || b"_-./:,+@%".contains(&byte);
+        if !word.is_empty() && word.bytes().all(plain) {
+            return Cow::Borrowed(word);
+        }
+        Cow::Owned(format!("'{}'", word.replace('\'', "'\\''")))
+    }
+
     /// What a result of the check declares it depended on, with the output
     /// of its toolchain command, if it has one.
     #[must_use]
@@ -271,5 +311,15 @@ mod tests {
             check("cargo test --release").inputs(b"rustc 1.99.0")
         );
         assert_ne!(inputs, check("cargo test").inputs(b"rustc 1.100.0"));
+    }
+
+    #[test]
+    fn adhoc_checks_quote_their_words() {
+        let words = ["A=1", "printf", "%s\\n", "a b", "it's", ""].map(String::from);
+        let check = Check::adhoc("say", &words, Vec::new(), None, false).unwrap();
+        assert_eq!(check.kind, Checks::kind("say").unwrap());
+        assert_eq!(check.command, r"'A=1' printf '%s\n' 'a b' 'it'\''s' ''");
+        assert_eq!(check.inputs, [RepoPath::root()], "the whole snapshot");
+        assert_eq!(check.target_inputs, [], "no checks.toml");
     }
 }

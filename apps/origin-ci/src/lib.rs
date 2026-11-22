@@ -3,7 +3,8 @@
 //! landing queue takes as evidence.
 //!
 //! As a tool, `origin ci run` checks a revision of the repository it runs
-//! in, as the user. It talks to origin only through its public API: the
+//! in, as the user, and `origin ci exec` runs a command given to it as a
+//! check the same way. It talks to origin only through its public API: the
 //! SDK over HTTP, or for a repository on a local path, the same service
 //! in-process.
 
