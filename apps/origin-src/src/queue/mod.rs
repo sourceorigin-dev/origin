@@ -3,8 +3,9 @@
 //!
 //! Landing a change lands its stack: the head of each change below it that
 //! isn't on the target yet, from the bottom, with an acceptance each. A
-//! change that diverged is refused. A stack stops at the first change that
-//! waits. For each revision:
+//! change that diverged, that its creator abandoned, or whose head has
+//! unresolved conflicts (see [`conflict`](crate::conflict)) is refused. A
+//! stack stops at the first change that waits. For each revision:
 //!
 //! 1. **Rebase.** The changes it made to its base are merged onto the
 //!    target's tip, file by file ([`Store::merge`]). A revision made on the
@@ -159,7 +160,8 @@ impl<'a, P: Platform> Queue<'a, P> {
     /// # Errors
     ///
     /// Fails if this node isn't the target's authority, a change in the
-    /// stack diverged, or the records cannot be read or written.
+    /// stack diverged, was abandoned or has unresolved conflicts, or the
+    /// records cannot be read or written.
     pub fn land_change(
         &self,
         change: ChangeId,
@@ -312,6 +314,22 @@ pub enum LandError {
         change: ChangeId,
         /// Its heads.
         heads: Vec<RevisionId>,
+    },
+    /// The change was given up.
+    #[error("change {} was abandoned, so it cannot land", .0.short())]
+    Abandoned(ChangeId),
+    /// The change's head has unresolved conflicts.
+    #[error(
+        "change {} has unresolved conflicts, so it cannot land: edit {}, or accept them as they \
+         are with `origin resolve`",
+        change.short(),
+        paths.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
+    )]
+    Unresolved {
+        /// The change.
+        change: ChangeId,
+        /// The unresolved paths.
+        paths: Vec<RepoPath>,
     },
     /// Landing on `policy` would leave it without a valid policy.
     #[error("landing would leave `policy` without a valid policy.toml")]

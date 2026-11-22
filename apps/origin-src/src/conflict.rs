@@ -23,7 +23,9 @@
 //! Every revision made from one with unresolved paths, by a snapshot,
 //! `describe`, a new change on top, or a merge, carries those it still has
 //! the entries of over, in a `core.conflict` of its own, published before
-//! the revision itself, so it's never found without it.
+//! the revision itself, so it's never found without it. The landing queue
+//! refuses a revision whose author's latest `core.conflict` lists a path it
+//! still has the entry of.
 //!
 //! The landing queue also issues `core.conflict`, as a node, when a revision
 //! doesn't rebase onto its target, even one the queue rebased itself. That
