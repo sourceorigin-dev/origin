@@ -491,7 +491,7 @@ impl<'a, P: Platform> Writer<'a, P> {
 
 /// What revisions do where their writer may not write, as the module
 /// explains: the service checks it of every revision a signed-in caller
-/// puts.
+/// puts, and a client of those it pushes, before sending anything.
 pub struct Effects<'a, P, V> {
     store: &'a Store<P>,
     /// Where revisions are read: a batch's, then the store's.

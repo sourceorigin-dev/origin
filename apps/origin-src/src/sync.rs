@@ -20,13 +20,16 @@
 //!   are all the changes this node knows compared.
 //! - Snapshots don't come with records: [`Sync::need`] fetches one when
 //!   something reads it, such as a checkout, so a clone fetches one
-//!   snapshot, its target's tip. A snapshot is marked while it's fetched
-//!   ([`Store::fetching`]), so one whose fetch was interrupted is fetched
-//!   again rather than taken for whole.
+//!   snapshot, its target's tip. The remote withholds the content of the
+//!   paths the user may not read: the trees keep their place, and nothing
+//!   reads them (see [`Store::with_withheld`]). A snapshot is marked while
+//!   it's fetched ([`Store::fetching`]), so one whose fetch was interrupted
+//!   is fetched again rather than taken for whole.
 //! - **Pushing** shares revisions, with their snapshots, and the user's
-//!   statements. It never lands anything. It first compares each change's heads with the
-//!   remote's, and refuses before uploading anything when the remote has a
-//!   revision this node lacks: the change is stale. The remote checks the
+//!   statements. It never lands anything. It first compares each change's
+//!   heads with the remote's, and refuses before uploading anything when
+//!   the remote has a revision this node lacks: the change is stale, or a
+//!   revision changes a path the user may not write. The remote checks the
 //!   heads again as it publishes the revisions, so a push racing another
 //!   is refused too. Revisions only go to a remote that has the acceptance
 //!   they're based on. Each object goes after those it needs: snapshots
@@ -50,6 +53,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::{iter, mem};
 
 use origin_platform::Native;
+use origin_shared::access::{Level, PathAccess};
 use origin_shared::api::{
     ErrorCode, EventsQuery, Expected, FetchRecords, FetchSnapshot, Inventory, InventoryRequest,
     List, LogQuery, PutQuery,
@@ -59,12 +63,13 @@ use origin_shared::object::{BadSignature, DecodeError};
 use origin_shared::pack::{Pack, Packer, Part};
 use origin_shared::{
     Acceptance, AcceptanceId, Base, ChangeId, EncodedObject, Head, Object, ObjectId, ObjectKind,
-    Principal, PrincipalName, Record, RecordId, Revision, RevisionId, Statement, StatementId,
-    TargetName, TreeId,
+    Principal, PrincipalName, Record, RecordId, RepoPath, Revision, RevisionId, Statement,
+    StatementId, TargetName, TreeId,
 };
 
 use crate::annotations::Annotations;
 use crate::index::Index;
+use crate::permissions::{Effects, Forbidden};
 use crate::policy::{Policy, PolicyError};
 use crate::remote::{Remote, RemoteError};
 use crate::service::Dependencies;
@@ -78,6 +83,8 @@ pub struct Sync<'a> {
     node: Principal,
     /// The user, whose statements pushes share.
     user: Principal,
+    /// What the user may write on the remote, as of the last fetch.
+    writes: PathAccess,
     /// The most bytes a push's request holds: [`Pack::LIMIT`], but in
     /// tests.
     pack_limit: usize,
@@ -358,14 +365,26 @@ impl<'a> Sync<'a> {
     /// server sends.
     const EVENTS: u32 = 1024;
 
-    /// Syncs `store` with `remote`, as the node `node`, for `user`.
+    /// Syncs `store` with `remote`, as the node `node`, for `user`, who
+    /// writes everything until [`Sync::writing`] says otherwise.
     pub fn new(store: &'a Store, remote: &'a Remote, node: PrincipalName, user: Principal) -> Self {
         Self {
             store,
             remote,
             node: Principal::Node(node),
             user,
+            writes: PathAccess::uniform(Level::Write),
             pack_limit: Pack::LIMIT,
+        }
+    }
+
+    /// Syncs knowing the user may only write `paths`, so pushes that would
+    /// be refused fail before sending anything.
+    #[must_use]
+    pub fn writing(self, paths: PathAccess) -> Self {
+        Self {
+            writes: paths,
+            ..self
         }
     }
 
@@ -948,6 +967,24 @@ impl<'a> Sync<'a> {
         Ok(true)
     }
 
+    /// Fetches what the snapshot of `record` holds under `paths`, whatever
+    /// the store has: files a checkout lacks, such as those whose content
+    /// was withheld until the user could read them.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the remote doesn't have the record, or the remote or the
+    /// store fails.
+    pub fn need_paths(&self, record: RecordId, paths: Vec<RepoPath>) -> Result<(), SyncError> {
+        let request = FetchSnapshot {
+            of: record,
+            have: Vec::new(),
+            paths,
+            skip: 0,
+        };
+        self.fetch_parts(request, None)
+    }
+
     /// Fetches what `request` asks for, part after part, in one batch. With
     /// `whole`, the snapshot it fetches whole, which is marked until the
     /// batch is durable.
@@ -1013,6 +1050,7 @@ impl<'a> Sync<'a> {
             {
                 self.check_shared(*id, revision, base)?;
             }
+            self.check_writes(revision)?;
         }
 
         // Snapshots and attachments first, then revisions, then statements.
@@ -1265,6 +1303,15 @@ impl<'a> Sync<'a> {
         Ok(())
     }
 
+    /// Checks that `revision` has an effect the user may give it (see
+    /// [`Effects`]).
+    fn check_writes(&self, revision: &Revision) -> Result<(), SyncError> {
+        match Effects::new(self.store, self.store, &self.writes).check(revision)? {
+            Some(forbidden) => Err(forbidden.into()),
+            None => Ok(()),
+        }
+    }
+
     /// `changes`, and every change below their revisions, following their
     /// bases and dependencies.
     fn stack(&self, index: &Index, changes: &[ChangeId]) -> Result<Vec<ChangeId>, SyncError> {
@@ -1366,6 +1413,9 @@ pub enum SyncError {
     /// A snapshot was needed of a record that has none.
     #[error("{0} has no snapshot")]
     NoSnapshot(RecordId),
+    /// A push would change what the user may not.
+    #[error("the remote would refuse the push, as of your rights when you last fetched")]
+    Forbidden(#[from] Forbidden),
     /// The change has no revision to push.
     #[error("change {} has no revisions", .0.short())]
     UnknownChange(ChangeId),
@@ -1442,7 +1492,7 @@ mod tests {
 
     use origin_platform::Native;
     use origin_shared::event::Filter;
-    use origin_shared::{AcceptanceBody, Kind, NodeKey, RepoPath, Verdict};
+    use origin_shared::{AcceptanceBody, Kind, NodeKey, Verdict};
 
     use super::*;
     use crate::events::Events;

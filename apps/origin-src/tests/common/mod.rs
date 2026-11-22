@@ -358,6 +358,49 @@ impl Server {
     pub fn url(&self) -> String {
         format!("{}/demo", self.base)
     }
+
+    /// Adds `rules` to `demo`'s `policy.toml`, landing them on `policy` as
+    /// the server's own user, who runs its node, through the repository's
+    /// path.
+    pub fn add_policy(&self, rules: &str) {
+        let operator = User::anonymous("operator");
+        fs::write(
+            operator.config().join("config.toml"),
+            "user = \"operator\"\nnode = \"hosted\"\n",
+        )
+        .unwrap();
+        fs::copy(
+            self.dir().join("node.key"),
+            operator.config().join("node.key"),
+        )
+        .unwrap();
+        let path = self.dir().join("repos/demo");
+        let policy = Repo::clone(&operator, path.to_str().unwrap(), &["--target", "policy"]);
+        let mut toml = policy.read("policy.toml");
+        toml.push_str(rules);
+        policy.write("policy.toml", &toml);
+        policy.ok(&["describe", "Change the rules"]);
+        let landed = policy.ok(&["land"]);
+        assert!(landed.contains("Landed change"), "{landed}");
+    }
+
+    /// Signs a token for `principal` with `scope` with the server's key.
+    pub fn issue_token(&self, principal: &str, scope: &[&str]) -> String {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_origin"));
+        command
+            .args(["token", "issue", "--as", principal, "--config"])
+            .arg(self.dir().join("origin-server.toml"));
+        for capability in scope {
+            command.args(["--scope", capability]);
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
 }
 
 impl Drop for Server {
