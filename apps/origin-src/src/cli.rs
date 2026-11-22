@@ -80,6 +80,11 @@ enum RepoCommand {
         /// The server configuration file.
         #[arg(short, long, default_value = "origin-server.toml")]
         config: PathBuf,
+        /// Who may change the policy over the API, such as `user:alice`:
+        /// by default, only the server's operator, through the
+        /// repository's path.
+        #[arg(long)]
+        admin: Option<Principal>,
     },
 }
 
@@ -524,8 +529,12 @@ impl Cli {
     pub fn run(self) -> Result<()> {
         match self.command {
             Command::Serve { config } => return ServerConfig::load(&config)?.serve(),
-            Command::Repo(RepoCommand::Create { path, config }) => {
-                return ServerConfig::load(&config)?.create_repo(&path);
+            Command::Repo(RepoCommand::Create {
+                path,
+                config,
+                admin,
+            }) => {
+                return ServerConfig::load(&config)?.create_repo(&path, admin.as_ref());
             }
             Command::Token(TokenCommand::Issue {
                 scope,

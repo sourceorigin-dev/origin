@@ -1525,7 +1525,7 @@ mod tests {
             name: "hosted".parse().unwrap(),
             key: Arc::new(NodeKey::from_bytes(&[7; 32])),
         };
-        let policy = Policy::initial(&node.name, &node.key.public());
+        let policy = Policy::initial(&node.name, &node.key.public(), None);
         let service = OriginService::create(dir.path().join("repo"), node, &policy).unwrap();
         // A landing holds an index all along: a read meanwhile takes another.
         service

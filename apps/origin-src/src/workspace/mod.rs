@@ -269,7 +269,7 @@ impl Workspace {
         let store = Store::new(meta, Native::default()).with_actor(actor.in_workspace(&root));
         store.init()?;
 
-        let policy = Policy::initial(config.node(), &key.public());
+        let policy = Policy::initial(config.node(), &key.public(), None);
         let main = Queue::new(&store, &key, config.node().clone()).init(&policy)?;
         let empty_tree = Tree::default().encode();
         let empty_description = EncodedObject::attachment(b"");
