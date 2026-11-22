@@ -356,8 +356,8 @@ impl<P: Platform> Store<P> {
         Ok(id)
     }
 
-    /// Durably replaces the head of a target, logging that it advanced.
-    /// Publishing the first
+    /// Durably replaces the head of a target, logging that it advanced, from
+    /// which its event comes. Publishing the first
     /// acceptance creates the target: its name is written too, and its
     /// directory made durable.
     fn publish(

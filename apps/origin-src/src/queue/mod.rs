@@ -516,4 +516,4 @@ pub enum LandError {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

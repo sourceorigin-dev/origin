@@ -10,9 +10,10 @@
 //! - working copies moved, by recording a draft or by a command.
 //!
 //! Each entry has a sequence number, one more than the entry before it,
-//! which never changes. The entries one command run appends form an
-//! operation, numbered by its first entry's sequence number, which `origin
-//! op log` shows and `origin undo` takes back.
+//! which never changes: it is the cursor of the [event stream](crate::events).
+//! The entries one command run appends form an operation, numbered by its
+//! first entry's sequence number, which `origin op log` shows and `origin
+//! undo` takes back.
 //!
 //! ```text
 //! .origin/oplog/
@@ -26,9 +27,9 @@
 //! oldest segments are deleted beyond a cap: the log keeps the latest 16 MiB
 //! of entries, and a cursor older than that has expired.
 //!
-//! **Writing.** The index comes from the entries, so every entry must be
-//! durable before a reader moves past it: a power loss could drop it
-//! otherwise, and the next entry would take its sequence number, behind
+//! **Writing.** Events and the index come from the entries, so every entry
+//! must be durable before a reader moves past it: a power loss could drop
+//! it otherwise, and the next entry would take its sequence number, behind
 //! a cursor already handed out. Each write appends its entries as a writer
 //! ([`Store::commit_logged`]): a lock file, `writers/<n>`, `n` being the
 //! sequence number of its first entry, which every entry names, and which
@@ -37,7 +38,8 @@
 //! ([`DurableWrite::sync_with`]): records and waiting landings with their
 //! files, and moves of a working copy with the `workspace` file naming the
 //! new revision. Once the write is published, the writer removes its lock
-//! file.
+//! file. A landing logs its acceptance again with the target's new head, so
+//! its event never depends on when the first entry was read.
 //!
 //! A batch of records syncs the op log in place of the index, which catches
 //! up from it, and a move syncs it beside the `workspace` file, so logging

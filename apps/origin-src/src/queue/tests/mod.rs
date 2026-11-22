@@ -23,14 +23,14 @@ use crate::tree::tests::build;
 
 /// A repository whose `policy` and `main` the node `queue` orders, with
 /// `extra` added to its `policy.toml`.
-struct Repo {
+pub(crate) struct Repo {
     _dir: tempfile::TempDir,
-    store: Store,
+    pub(crate) store: Store,
     key: NodeKey,
 }
 
 impl Repo {
-    fn new(extra: &str) -> Self {
+    pub(crate) fn new(extra: &str) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::new(dir.path().join(".origin"), Native::default());
         store.init().unwrap();
@@ -54,7 +54,7 @@ impl Repo {
     }
 
     /// Writes a snapshot of `files`, contents included.
-    fn files(&self, files: &[(&str, &str)]) -> TreeId {
+    pub(crate) fn files(&self, files: &[(&str, &str)]) -> TreeId {
         let blobs: Vec<_> = files
             .iter()
             .map(|(_, content)| EncodedObject::blob(content.as_bytes()))
@@ -63,11 +63,11 @@ impl Repo {
         build(&self.store, files)
     }
 
-    fn queue(&self) -> Queue<'_> {
+    pub(crate) fn queue(&self) -> Queue<'_> {
         Queue::new(&self.store, &self.key, PrincipalName::new("queue").unwrap())
     }
 
-    fn tip(&self, target: &TargetName) -> Head {
+    pub(crate) fn tip(&self, target: &TargetName) -> Head {
         self.store.head(target).unwrap().unwrap()
     }
 
@@ -80,7 +80,7 @@ impl Repo {
     }
 
     /// Writes a revision of `change` with `files`, made on `base`.
-    fn revision(
+    pub(crate) fn revision(
         &self,
         change: u8,
         predecessors: &[RevisionId],
@@ -105,7 +105,7 @@ impl Repo {
 
     /// A revision of a new change `change` on the tip of `main`, adding
     /// `files` to it.
-    fn change_on_main(&self, change: u8, files: &[(&str, &str)]) -> RevisionId {
+    pub(crate) fn change_on_main(&self, change: u8, files: &[(&str, &str)]) -> RevisionId {
         let base = Base::Acceptance(self.tip(&TargetName::MAIN).acceptance);
         let mut all = self.main_files();
         all.extend(
@@ -138,7 +138,7 @@ impl Repo {
             .collect()
     }
 
-    fn land(&self, change: u8) -> Vec<Landing> {
+    pub(crate) fn land(&self, change: u8) -> Vec<Landing> {
         self.queue()
             .land_change(ChangeId::from_bytes([change; 16]), &TargetName::MAIN)
             .unwrap()
@@ -161,7 +161,7 @@ fn landed(landing: &Landing) -> RevisionId {
 }
 
 /// A `ci.test` result about `subject` from `issuer`, reading `src`.
-fn ci_test(subject: RevisionId, issuer: &str) -> Statement {
+pub(crate) fn ci_test(subject: RevisionId, issuer: &str) -> Statement {
     Statement {
         subject: RecordId::Revision(subject),
         kind: Kind::new("ci.test").unwrap(),
