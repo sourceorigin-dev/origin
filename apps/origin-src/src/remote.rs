@@ -3,7 +3,7 @@
 //! A remote is a server over HTTP, `http://host[:port]/<repository>`, or a
 //! repository on a local path: a server's repository, or a working copy's.
 //! A local one is served by an in-process [`OriginService`] run by this
-//! node, so both answer the same calls, and syncing never
+//! node, so both answer the same calls, and [`sync`](crate::sync) never
 //! tells them apart. Calls block: an HTTP remote runs the SDK on a runtime
 //! of its own.
 

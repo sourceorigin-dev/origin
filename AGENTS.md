@@ -20,6 +20,8 @@ review bots read and write at the same time, written in Rust.
   server. `OriginService` (`service.rs`) is the one API over a repository:
   the HTTP routes (`http.rs`) and the command line's commands that the API
   offers only translate into its calls, so neither duplicates the other.
+  `sync.rs` shares records with a remote (`remote.rs`), which answers the
+  same calls over the SDK or, for a local path, in-process.
 - `tools/xtask`: development tasks, run with `cargo xtask`, such as timing
   origin against git (`just bench-git`).
 

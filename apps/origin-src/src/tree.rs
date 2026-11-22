@@ -2,6 +2,9 @@
 
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
+use std::fs::{self, File};
+use std::io;
+use std::path::PathBuf;
 
 use origin_platform::Platform;
 use origin_shared::{
@@ -10,7 +13,7 @@ use origin_shared::{
 };
 
 use crate::conflict::{Conflicted, Conflicts};
-use crate::store::{Store, StoreError};
+use crate::store::{Batch, Store, StoreError};
 
 /// A file that differs between two trees.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -430,6 +433,91 @@ impl<P: Platform> Store<P> {
             }
         }
         Ok(())
+    }
+}
+
+/// A snapshot being fetched, marked durably in the store's `fetching/`, so
+/// an interrupted fetch, which published trees before what they hold, is
+/// never taken for a whole snapshot: see [`Store::holds`]. Dropping it
+/// without [`Fetching::done`] leaves the mark, and fetching the snapshot
+/// again completes it.
+#[derive(Debug)]
+pub struct Fetching {
+    path: PathBuf,
+}
+
+impl Fetching {
+    /// Removes the mark, once everything fetched is durable. A crash that
+    /// loses the removal only fetches the snapshot again.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the mark cannot be removed.
+    pub fn done(self) -> Result<(), StoreError> {
+        match fs::remove_file(&self.path) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => {
+                Err(StoreError::io(&self.path, error))
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+impl<P: Platform> Store<P> {
+    /// The directory marking the snapshots being fetched.
+    const FETCHING: &str = "fetching";
+
+    fn fetching_path(&self, snapshot: TreeId) -> PathBuf {
+        self.root().join(Self::FETCHING).join(snapshot.to_hex())
+    }
+
+    /// Whether the store holds `snapshot` whole: its root, and no fetch of
+    /// it that didn't finish (see [`Fetching`]).
+    ///
+    /// # Errors
+    ///
+    /// Fails like [`Store::contains`].
+    pub fn holds(&self, snapshot: TreeId) -> Result<bool, StoreError> {
+        Ok(self.contains(snapshot.into())? && !self.fetching_path(snapshot).exists())
+    }
+
+    /// Those of `snapshots` the store [holds](Store::holds) whole, in
+    /// order.
+    ///
+    /// # Errors
+    ///
+    /// Fails like [`Store::contains`].
+    pub fn held_whole(
+        &self,
+        snapshots: impl IntoIterator<Item = TreeId>,
+    ) -> Result<Vec<TreeId>, StoreError> {
+        let mut held = Vec::new();
+        for snapshot in snapshots {
+            if self.holds(snapshot)? {
+                held.push(snapshot);
+            }
+        }
+        Ok(held)
+    }
+
+    /// Marks `snapshot` as being fetched, durably before anything `batch`
+    /// stages is published, at no sync of its own: the batch syncs the mark
+    /// with what it stages.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the mark, or the directory holding it, cannot be created.
+    pub fn fetching(&self, snapshot: TreeId, batch: &Batch<'_, P>) -> Result<Fetching, StoreError> {
+        let dir = self.root().join(Self::FETCHING);
+        if !dir.is_dir() {
+            fs::create_dir_all(&dir).map_err(|source| StoreError::io(&dir, source))?;
+            self.sync_dir(self.root())?;
+        }
+        let path = dir.join(snapshot.to_hex());
+        File::create(&path).map_err(|source| StoreError::io(&path, source))?;
+        batch.sync_first(&path);
+        batch.sync_first(dir);
+        Ok(Fetching { path })
     }
 }
 
