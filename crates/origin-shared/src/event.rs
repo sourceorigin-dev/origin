@@ -13,19 +13,25 @@ use crate::{
 };
 
 /// Something that happened, and where it is in the op log.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
 pub struct Event {
     /// The sequence number of the op log entry it comes from. Reading from
     /// it delivers the events of the entries after it.
     pub cursor: u64,
     /// What happened.
+    #[serde(flatten)]
     pub kind: EventKind,
 }
 
-/// What happened: an event's identity, which consumers deduplicate by.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+/// What happened: an event's identity, which consumers deduplicate by. In
+/// JSON, the `event` field names it, as [`EventKind::name`] does.
+#[derive(
+    Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, utoipa::ToSchema,
+)]
+#[serde(tag = "event")]
 pub enum EventKind {
     /// A statement was issued.
+    #[serde(rename = "statement.issued")]
     StatementIssued {
         /// The statement.
         statement: StatementId,
@@ -39,6 +45,7 @@ pub enum EventKind {
         issuer: Principal,
     },
     /// A revision was created.
+    #[serde(rename = "revision.created")]
     RevisionCreated {
         /// The revision.
         revision: RevisionId,
@@ -48,6 +55,7 @@ pub enum EventKind {
         author: Principal,
     },
     /// A target advanced.
+    #[serde(rename = "target.advanced")]
     TargetAdvanced {
         /// The target.
         target: TargetName,
@@ -57,6 +65,7 @@ pub enum EventKind {
         acceptance: AcceptanceId,
     },
     /// A landing waits for a statement it requires.
+    #[serde(rename = "check.requested")]
     CheckRequested {
         /// The target it lands on.
         onto: TargetName,
@@ -237,7 +246,9 @@ impl Filter {
 }
 
 /// A batch of events, and the cursor to read the next batch from.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(
+    Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, utoipa::ToSchema,
+)]
 pub struct Page {
     /// The events, oldest first.
     pub events: Vec<Event>,

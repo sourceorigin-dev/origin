@@ -41,7 +41,9 @@ impl TargetName {
 }
 
 /// The latest acceptance of a target.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, utoipa::ToSchema,
+)]
 pub struct Head {
     /// Its position in the log, from 0.
     pub seq: u64,

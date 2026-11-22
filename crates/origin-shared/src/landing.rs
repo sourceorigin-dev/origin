@@ -6,7 +6,8 @@ use crate::policy::Requirement;
 use crate::{ChangeId, Head, RecordId, RepoPath, Source, StatementId, TargetName};
 
 /// What a landing lands.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum Proposal {
     /// A change, as of its head.
     Change(ChangeId),
@@ -15,7 +16,8 @@ pub enum Proposal {
 }
 
 /// How a landing went.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum Landing {
     /// It landed.
     Landed {
@@ -33,7 +35,7 @@ pub enum Landing {
 }
 
 /// A landing that waits, kept in the queue to be listed and retried.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
 pub struct Pending {
     /// The target it lands on.
     pub onto: TargetName,
@@ -48,7 +50,8 @@ pub struct Pending {
 }
 
 /// Why a landing waits.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum Blocked {
     /// The target requires these statements about the subject.
     Evidence(Vec<Requirement>),
