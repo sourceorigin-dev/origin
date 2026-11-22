@@ -49,10 +49,12 @@
 //! some of a batch's records were published, or none; an acceptance was
 //! written but the target's head didn't move to it (the next landing on the
 //! target publishes it, and logs the acceptance again); a waiting landing
-//! wasn't kept; a working copy didn't move. Its writer's lock file is then
-//! left behind, unlocked: readers sync the segments holding its entries,
-//! which may not be durable, remove the file, and take the entries' effects
-//! as what they find published. So a crashed writer holds nothing back.
+//! wasn't kept; a working copy didn't move (see
+//! [`workspace`](crate::workspace) for how a move cut short is finished).
+//! Its writer's lock file is then left behind, unlocked: readers sync the
+//! segments holding its entries, which may not be durable, remove the file,
+//! and take the entries' effects as what they find published. So a crashed
+//! writer holds nothing back.
 //!
 //! **Damage.** A crash in the middle of an append leaves part of a frame at
 //! the end of the last segment. It never was an entry: readers skip it, and
@@ -243,6 +245,17 @@ pub enum Why {
     Command,
     /// `origin undo`, taking back this operation.
     Undo(u64),
+}
+
+impl Why {
+    /// Parses what [`Why`]'s `Display` writes.
+    pub(crate) fn parse(text: &str) -> Option<Self> {
+        Some(match text {
+            "draft" => Self::Draft,
+            "command" => Self::Command,
+            _ => Self::Undo(text.strip_prefix("undo ")?.parse().ok()?),
+        })
+    }
 }
 
 impl fmt::Display for Why {
@@ -1025,6 +1038,9 @@ mod tests {
             let frame = entry.encode();
             let payload = &frame[4..frame.len() - Frames::FRAMING + 4];
             assert_eq!(Entry::decode(payload), Ok(entry));
+        }
+        for why in [Why::Draft, Why::Command, Why::Undo(12)] {
+            assert_eq!(Why::parse(&why.to_string()), Some(why));
         }
     }
 
