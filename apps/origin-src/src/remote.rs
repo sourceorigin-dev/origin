@@ -259,6 +259,17 @@ pub enum RemoteError {
 }
 
 impl RemoteError {
+    /// Whether the remote cannot be reached for now, or failed on its side,
+    /// as a server does while it restarts: asking again later may work.
+    #[must_use]
+    pub fn is_unreachable(&self) -> bool {
+        match self {
+            Self::Http(origin_client::Error::Transport(_)) => true,
+            Self::Http(origin_client::Error::Status(status)) => *status >= 500,
+            _ => false,
+        }
+    }
+
     /// What kind of refusal this is, if the remote refused.
     #[must_use]
     pub fn code(&self) -> Option<ErrorCode> {

@@ -7,6 +7,7 @@ use clap::{Parser, Subcommand};
 use origin_ci::checks::Check;
 use origin_ci::runner::{Outcome, Runner};
 use origin_ci::state::State;
+use origin_ci::worker::Worker;
 use origin_shared::api::At;
 use origin_shared::{ChangeId, RecordId, RepoPath, RevisionId};
 use origin_src::config::UserConfig;
@@ -60,6 +61,23 @@ enum Command {
         #[arg(last = true, required = true)]
         command: Vec<String>,
     },
+    /// Run the checks a remote's landings wait for, until stopped. Its
+    /// token, in `$ORIGIN_TOKEN` or the configuration, must read the
+    /// repository and annotate `ci.*`, such as one issued with `--scope
+    /// "read /" --scope "annotate ci.*"`. Checks don't inherit
+    /// `$ORIGIN_TOKEN`, so they don't print it by accident, but they run as
+    /// the worker's user and can read whatever it can, the token included:
+    /// run the worker as a user of its own, with a token scoped as above.
+    /// Runs each check as the
+    /// `checks.toml` at the tip of the target landed on defines it, never
+    /// the candidate's. Answers the landings that wait first, and outlives
+    /// the remote going away.
+    Worker {
+        /// The repository: `http://host[:port]/<repository>`, or a path.
+        /// By default, this repository's remote.
+        #[arg(long)]
+        remote: Option<String>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -94,6 +112,18 @@ impl Cli {
                 let (runner, subject) = Self::here(context.as_ref(), &config, "exec", &rev)?;
                 let check = Check::adhoc(&name, &command, inputs, toolchain, external)?;
                 Ok(Self::report(&[runner.exec(subject, &check)?]))
+            }
+            Command::Worker { remote } => {
+                let url = match (remote, context.and_then(|context| context.remote)) {
+                    (Some(url), _) => RemoteUrl::parse(&url)?,
+                    (None, Some(url)) => url,
+                    (None, None) => bail!("give the worker a --remote"),
+                };
+                let runner = Self::runner(&url, &config)?;
+                let mut worker = Worker::new(runner, &State::open(&url)?)?;
+                println!("Answering the check requests of {url}");
+                worker.run()?;
+                Ok(ExitCode::SUCCESS)
             }
         }
     }

@@ -59,6 +59,7 @@ origin token issue --scope "write src" [--ttl 1h]  # a short-lived token for an 
 
 origin ci run [<rev>]               # run the checks of checks.toml, and issue their results
 origin ci exec lint --inputs src -- cargo clippy  # run a command as the check ci.lint, now
+origin ci worker --remote <url>     # run the checks a server's landings wait for
 ```
 
 Landing rebases a change onto the target's tip, file by file, checks the
@@ -153,7 +154,17 @@ with 0, with the last 64 KiB of its output as the payload, declaring its
 inputs, `checks.toml` always among them, command and toolchain output, so
 its result is promoted to every revision where they're the same. A check a
 result of the same issuer already covers, ran or promoted, is skipped.
-`origin ci run` reads the checks from the revision it checks.
+`origin ci run` reads the checks from the revision it checks. A worker
+reads them from the tip of the target being landed on, never from the
+candidate, so a change can't redefine the checks that guard the target: an
+edit to `checks.toml` takes effect once it has landed, after passing the
+checks in force. The worker's results declare the target's `checks.toml`
+among their inputs, not the candidate's, so a candidate that restores an
+older one doesn't bring back the results of the older checks. Nor are
+results promoted from one target to another,
+whose checks may differ: landing a target on another runs the checks of
+the one it lands on. A target without a `checks.toml` gets no
+answer from the worker.
 Each command runs in a process group of its own. On Linux, what it leaves
 running in that group is killed once it ends, or if the run was killed, by
 the next run; a process that leaves the group escapes.
@@ -167,7 +178,12 @@ check fails. `origin ci exec <name> [--rev <rev>] [--inputs <path>...]
 [--toolchain <cmd>] [--external] -- <command...>` runs a command as the
 check `ci.<name>` the same way, in a checkout of the revision, with the
 command as its definition: always, even if a result covers it, superseding
-your previous result of that kind. Its checkouts
+your previous result of that kind. `origin ci worker` answers a remote's `check.requested` events
+with a token of its own, such as one from `origin token issue --scope "read
+/" --scope "annotate ci.*"`: its statements land what waited for them. When
+it starts, once the remote is back after going away, and every minute, it
+also answers every landing that waits for a check it hasn't run, so no
+check is lost to a missed event, a restart or a failed run. Its checkouts
 live in `$XDG_STATE_HOME/origin-ci/` (or `~/.local/state/`).
 
 ## Permissions

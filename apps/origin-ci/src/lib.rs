@@ -4,10 +4,12 @@
 //!
 //! As a tool, `origin ci run` checks a revision of the repository it runs
 //! in, as the user, and `origin ci exec` runs a command given to it as a
-//! check the same way. It talks to origin only through its public API: the
-//! SDK over HTTP, or for a repository on a local path, the same service
-//! in-process.
+//! check the same way. As a worker, `origin ci worker` answers a remote's
+//! `check.requested` events, with a token that annotates `ci.*`. Both talk
+//! to origin only through its public API: the SDK over HTTP, or for a
+//! repository on a local path, the same service in-process.
 
 pub mod checks;
 pub mod runner;
 pub mod state;
+pub mod worker;
