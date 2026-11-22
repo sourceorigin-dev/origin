@@ -1,0 +1,628 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "origin API",
+    "description": "The repositories an origin server hosts: their records, targets, landing queues and events.",
+    "license": {
+      "name": "Apache-2.0"
+    },
+    "version": "v1"
+  },
+  "paths": {
+    "/api/v1/openapi.json": {
+      "get": {
+        "summary": "The OpenAPI document of this API.",
+        "operationId": "openapi_document",
+        "responses": {
+          "200": {
+            "description": "The OpenAPI document",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/repos": {
+      "get": {
+        "summary": "Lists the repositories on the server.",
+        "operationId": "list_repos",
+        "responses": {
+          "200": {
+            "description": "The repositories, by name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/RepoSummary"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/repos/{repo}/log": {
+      "get": {
+        "summary": "Lists the acceptances of a target, oldest first.",
+        "operationId": "log",
+        "parameters": [
+          {
+            "name": "repo",
+            "in": "path",
+            "description": "The repository",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "target",
+            "in": "query",
+            "description": "The target.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "description": "The position of the first acceptance to return: 0, the first, by\ndefault.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The acceptances from `since` on",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/LogEntry"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The repository or the target does not exist",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/repos/{repo}/records": {
+      "put": {
+        "summary": "Puts a batch of objects, as a pack: snapshots, revisions and\nstatements, each needing only objects the batch or the repository has,\nof the kinds it names.",
+        "operationId": "put_records",
+        "parameters": [
+          {
+            "name": "repo",
+            "in": "path",
+            "description": "The repository",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "The objects, as a pack",
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "$ref": "#/components/schemas/Binary"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The objects are durable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Stored"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The pack is invalid, holds an acceptance, or needs objects the repository doesn't have, or has as another kind",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The repository does not exist",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/repos/{repo}/records/fetch": {
+      "post": {
+        "summary": "Fetches objects by id, as a pack.",
+        "operationId": "fetch_records",
+        "parameters": [
+          {
+            "name": "repo",
+            "in": "path",
+            "description": "The repository",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FetchRecords"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The objects, in the order asked, as a pack: each a 32-byte id, a little-endian u64 length and the object's encoding",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/Binary"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The repository or an object does not exist",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/repos/{repo}/targets": {
+      "get": {
+        "summary": "Lists the targets, with their tips, authorities and requirements.",
+        "operationId": "targets",
+        "parameters": [
+          {
+            "name": "repo",
+            "in": "path",
+            "description": "The repository",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The targets, by name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TargetInfo"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The repository does not exist",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Acceptance": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/AcceptanceBody"
+          },
+          {
+            "type": "object",
+            "required": [
+              "signature"
+            ],
+            "properties": {
+              "signature": {
+                "type": "string"
+              }
+            }
+          }
+        ],
+        "description": "One landing on a target, signed by the target's authority.\n\nAcceptances form a hash chain per target: each names the one before it,\nand its sequence number is its position in the target's log.\n\nIn JSON, the body's fields and the signature, in hex."
+      },
+      "AcceptanceBody": {
+        "type": "object",
+        "description": "An acceptance without its signature.",
+        "required": [
+          "target",
+          "seq",
+          "state",
+          "landed",
+          "evidence"
+        ],
+        "properties": {
+          "evidence": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StatementId"
+            },
+            "description": "The statements the policy relied on."
+          },
+          "landed": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Source"
+            },
+            "description": "What landed."
+          },
+          "policy": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/AcceptanceId",
+                "description": "The acceptance of the `policy` target in force when this one landed.\nAbsent only for the first acceptance of `policy`, which nothing\nprecedes."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "prev": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/AcceptanceId",
+                "description": "The acceptance before this one, absent only for the first."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The position in the target's log, from 0.",
+            "minimum": 0
+          },
+          "state": {
+            "$ref": "#/components/schemas/TreeId",
+            "description": "The target's snapshot after this landing."
+          },
+          "target": {
+            "$ref": "#/components/schemas/TargetId",
+            "description": "The target landed on."
+          }
+        }
+      },
+      "AcceptanceId": {
+        "type": "string",
+        "examples": [
+          "48fc721fbbc172e0925fa27af1671de225ba927134802998b10a1568a188652b"
+        ]
+      },
+      "ApiError": {
+        "type": "object",
+        "description": "What went wrong with a request.",
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "$ref": "#/components/schemas/ErrorCode",
+            "description": "The kind of failure."
+          },
+          "message": {
+            "type": "string",
+            "description": "A human-readable explanation."
+          }
+        }
+      },
+      "Binary": {
+        "type": "string",
+        "contentMediaType": "application/octet-stream"
+      },
+      "ErrorCode": {
+        "type": "string",
+        "description": "The kind of an [`ApiError`].",
+        "enum": [
+          "bad_request",
+          "not_found",
+          "conflict",
+          "expired",
+          "internal"
+        ]
+      },
+      "FetchRecords": {
+        "type": "object",
+        "description": "Asks for records, and any other objects, by id.",
+        "required": [
+          "ids"
+        ],
+        "properties": {
+          "ids": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ObjectId"
+            },
+            "description": "The objects, returned in this order."
+          }
+        }
+      },
+      "Head": {
+        "type": "object",
+        "description": "The latest acceptance of a target.",
+        "required": [
+          "seq",
+          "acceptance"
+        ],
+        "properties": {
+          "acceptance": {
+            "$ref": "#/components/schemas/AcceptanceId",
+            "description": "The acceptance."
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Its position in the log, from 0.",
+            "minimum": 0
+          }
+        }
+      },
+      "Kind": {
+        "type": "string",
+        "examples": [
+          "ci.test"
+        ]
+      },
+      "LogEntry": {
+        "type": "object",
+        "description": "One acceptance of a target's log.",
+        "required": [
+          "id",
+          "acceptance"
+        ],
+        "properties": {
+          "acceptance": {
+            "$ref": "#/components/schemas/Acceptance",
+            "description": "The acceptance, whose `seq` is its position in the log."
+          },
+          "id": {
+            "$ref": "#/components/schemas/AcceptanceId",
+            "description": "Its id."
+          }
+        }
+      },
+      "ObjectId": {
+        "type": "string",
+        "examples": [
+          "48fc721fbbc172e0925fa27af1671de225ba927134802998b10a1568a188652b"
+        ]
+      },
+      "PrincipalName": {
+        "type": "string",
+        "examples": [
+          "alice"
+        ]
+      },
+      "Principals": {
+        "type": "string",
+        "examples": [
+          "group:runners"
+        ]
+      },
+      "RepoName": {
+        "type": "string",
+        "description": "The name of a repository on a server: ASCII letters, digits, `.`, `_`\nand `-`, not starting with `.`.",
+        "example": "origin"
+      },
+      "RepoSummary": {
+        "type": "object",
+        "description": "A repository, as listed by the server.",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "$ref": "#/components/schemas/RepoName",
+            "description": "The repository's name."
+          }
+        }
+      },
+      "Requirement": {
+        "type": "object",
+        "description": "A statement that landing needs: of `kind`, with `verdict`, from one of\n`issuer`, about what lands.",
+        "required": [
+          "kind",
+          "verdict",
+          "issuer"
+        ],
+        "properties": {
+          "issuer": {
+            "$ref": "#/components/schemas/Principals",
+            "description": "Who may issue it."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/Kind",
+            "description": "The statement's kind."
+          },
+          "verdict": {
+            "$ref": "#/components/schemas/Verdict",
+            "description": "Its verdict."
+          }
+        }
+      },
+      "RevisionId": {
+        "type": "string",
+        "examples": [
+          "48fc721fbbc172e0925fa27af1671de225ba927134802998b10a1568a188652b"
+        ]
+      },
+      "Source": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "A revision of a change.",
+            "required": [
+              "revision"
+            ],
+            "properties": {
+              "revision": {
+                "$ref": "#/components/schemas/RevisionId",
+                "description": "A revision of a change."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Another target, as of one of its acceptances.",
+            "required": [
+              "target"
+            ],
+            "properties": {
+              "target": {
+                "$ref": "#/components/schemas/AcceptanceId",
+                "description": "Another target, as of one of its acceptances."
+              }
+            }
+          }
+        ],
+        "description": "What an acceptance landed."
+      },
+      "StatementId": {
+        "type": "string",
+        "examples": [
+          "48fc721fbbc172e0925fa27af1671de225ba927134802998b10a1568a188652b"
+        ]
+      },
+      "Stored": {
+        "type": "object",
+        "description": "What putting a batch of records did.",
+        "required": [
+          "new"
+        ],
+        "properties": {
+          "new": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many of the objects the repository didn't have yet.",
+            "minimum": 0
+          }
+        }
+      },
+      "TargetId": {
+        "type": "string",
+        "examples": [
+          "48fc721fbbc172e0925fa27af1671de225ba927134802998b10a1568a188652b"
+        ]
+      },
+      "TargetInfo": {
+        "type": "object",
+        "description": "A target, where it is, and who orders it under the policy in force.",
+        "required": [
+          "name",
+          "head",
+          "requirements"
+        ],
+        "properties": {
+          "authority": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/PrincipalName",
+                "description": "The node that orders it, if the policy names one."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "head": {
+            "$ref": "#/components/schemas/Head",
+            "description": "Its latest acceptance."
+          },
+          "name": {
+            "$ref": "#/components/schemas/TargetName",
+            "description": "The target's name."
+          },
+          "requirements": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Requirement"
+            },
+            "description": "The statements landing on it needs."
+          }
+        }
+      },
+      "TargetName": {
+        "type": "string",
+        "examples": [
+          "main"
+        ]
+      },
+      "TreeId": {
+        "type": "string",
+        "examples": [
+          "48fc721fbbc172e0925fa27af1671de225ba927134802998b10a1568a188652b"
+        ]
+      },
+      "Verdict": {
+        "type": "string",
+        "examples": [
+          "pass"
+        ]
+      }
+    }
+  }
+}
