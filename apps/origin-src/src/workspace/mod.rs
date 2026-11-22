@@ -8,12 +8,15 @@
 //!   workspace                  the revision the working copy is
 //!   state                      the stat cache of the last snapshot
 //!   moving                     the move in progress, if a checkout is
+//!   lock                       held by the command working in the working copy
 //! ```
 //!
 //! A repository can have several working copies, its workspaces, which
-//! share its store and op log. The others have only `workspace`, `state`
-//! and `moving` in their `.origin`, and a `repository` file naming the main
-//! one's.
+//! share its store and op log. The others have only `workspace`, `state`,
+//! `moving` and `lock` in their `.origin`, and a `repository` file naming
+//! the main one's. Commands in different workspaces run at once; in one,
+//! each waits for the one before, except `watch`, which never touches the
+//! working copy, and `workspace rm`, which opens the workspace it removes.
 //!
 //! The working copy is always on a revision of the current change. Every
 //! command that reads it snapshots it first. The files the snapshot finds
@@ -78,7 +81,7 @@ use std::mem;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
-use origin_platform::{LockedFile, Native};
+use origin_platform::{LockMode, LockedFile, Native};
 use origin_shared::api::{LogQuery, RevisionEntry, Revisions};
 use origin_shared::{
     AcceptanceId, Base, BlobId, ChangeId, EncodedObject, Kind, Principal, Record, RecordId,
@@ -118,6 +121,9 @@ pub struct Workspace {
     unreadable_move: Option<PathBuf>,
     /// The repository's remote, once opened: see [`Workspace::remote`].
     remote: OnceLock<Option<Remote>>,
+    /// Held while the command that opened the working copy works in it,
+    /// so only one at a time does: see [`Workspace::open`].
+    lock: Option<LockedFile>,
 }
 
 /// The working copy as of a snapshot.
@@ -235,6 +241,10 @@ impl Workspace {
     /// in progress: see [`Moving`].
     const MOVING: &str = "moving";
 
+    /// The file in [`Workspace::META_DIR`] held locked by the command
+    /// working in the working copy.
+    const LOCK: &str = "lock";
+
     /// `origin init`: creates a repository in `root`, with the `policy`
     /// target naming this node the authority of `policy` and `main`, an
     /// empty `main`, and a first change on top of it.
@@ -303,10 +313,19 @@ impl Workspace {
 
     /// Opens the working copy at `root`: the main one, whose `.origin` holds
     /// the store, or another workspace, whose `.origin/repository` names
-    /// the main one's. Finishes a move a crash cut short first.
+    /// the main one's. Waits for the command working in it, if any, then
+    /// finishes a move a crash cut short.
     fn open(root: &Path, config: UserConfig, actor: &Actor) -> Result<Self, WorkspaceError> {
         let root = &Self::canonical(root)?;
         let meta = root.join(Self::META_DIR);
+        // Held until the command is done, so `moving` is only ever found
+        // once the move it records was cut short.
+        let lock = LockedFile::open(
+            &Native::default(),
+            &meta.join(Self::LOCK),
+            LockMode::Exclusive,
+        )
+        .map_err(StoreError::from)?;
         let repository = meta.join(Self::REPOSITORY);
         let store = match Self::read_path(&repository) {
             Ok(store) if store.is_dir() => store,
@@ -320,7 +339,10 @@ impl Workspace {
             Self::read_pointer(root)?.ok_or_else(|| WorkspaceError::Incomplete(root.to_owned()))?;
         let store = Store::open_writable(store, Native::default())?;
         let store = store.with_actor(actor.in_workspace(root));
-        let mut workspace = Self::at(root.to_owned(), store, config, revision);
+        let mut workspace = Self {
+            lock: Some(lock),
+            ..Self::at(root.to_owned(), store, config, revision)
+        };
         workspace.finish_move()?;
         Ok(workspace)
     }
@@ -336,6 +358,7 @@ impl Workspace {
             unlogged: None,
             unreadable_move: None,
             remote: OnceLock::new(),
+            lock: None,
         }
     }
 

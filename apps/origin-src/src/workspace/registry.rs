@@ -3,8 +3,8 @@
 //!
 //! The main working copy's `.origin/workspaces/` has a file for each other
 //! workspace, named by the hash of its root and holding that root. Records
-//! are immutable, and only target chains and the index are locked, so
-//! commands run concurrently in different workspaces.
+//! are immutable, and only target chains, the index and each working copy
+//! are locked, so commands run concurrently in different workspaces.
 //!
 //! Creating a workspace registers it, checks out its files, and only then
 //! publishes its `.origin/workspace`, so a crash never leaves partial files
@@ -115,7 +115,10 @@ impl Workspace {
     /// Fails if `path` is the main working copy or no workspace, if the
     /// workspace is behind its change with edits, which no revision holds
     /// then, or if it cannot be snapshotted or deleted.
-    pub fn remove_workspace(&self, path: &Path) -> Result<(), WorkspaceError> {
+    pub fn remove_workspace(&mut self, path: &Path) -> Result<(), WorkspaceError> {
+        // It works in the workspace it removes, which may be this one, and
+        // opening it takes its lock.
+        self.lock = None;
         let root = Self::canonical(path)?;
         if root == self.main_root() {
             return Err(WorkspaceError::RemoveMain(root));
