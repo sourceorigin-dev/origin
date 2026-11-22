@@ -6,7 +6,8 @@
 //! - records written: revisions, statements and acceptances, with what the
 //!   [index](crate::index) keeps of them, so also every landing on a target;
 //! - targets advanced: a head naming a new acceptance;
-//! - landings left waiting in a queue.
+//! - landings left waiting in a queue;
+//! - working copies moved, by recording a draft or by a command.
 //!
 //! Each entry has a sequence number, one more than the entry before it,
 //! which never changes. The entries one command run appends form an
@@ -25,20 +26,21 @@
 //! of entries, and a cursor older than that has expired.
 //!
 //! **Writing.** The index comes from the entries, so every entry must be
-//! durable before a reader moves past it: a power loss could drop it otherwise,
-//! and the next entry would take its sequence number, behind a cursor already
-//! handed out. Each write appends its entries as a writer
+//! durable before a reader moves past it: a power loss could drop it
+//! otherwise, and the next entry would take its sequence number, behind
+//! a cursor already handed out. Each write appends its entries as a writer
 //! ([`Store::commit_logged`]): a lock file, `writers/<n>`, `n` being the
-//! sequence number of its first entry, which every entry names, and which is
-//! created and locked before that entry is appended. The entries are appended
-//! just before the write is committed, and synced with it
+//! sequence number of its first entry, which every entry names, and which
+//! is created and locked before that entry is appended. The entries are
+//! appended just before the write is committed, and synced with it
 //! ([`DurableWrite::sync_with`]): records and waiting landings with their
-//! files, and a target's head with its new acceptance. Once the write is
-//! published, the writer removes its lock file.
+//! files, and moves of a working copy with the `workspace` file naming the
+//! new revision. Once the write is published, the writer removes its lock
+//! file.
 //!
 //! A batch of records syncs the op log in place of the index, which catches
-//! up from it, so logging costs little: on Linux, a batch of up to two
-//! files syncs them at once.
+//! up from it, and a move syncs it beside the `workspace` file, so logging
+//! costs little: on Linux, a batch of up to two files syncs them at once.
 //!
 //! **Reading.** Readers read up to the entry before the first one whose
 //! writer still holds its lock ([`OpLog::settled`]): every entry up to there
@@ -47,10 +49,10 @@
 //! some of a batch's records were published, or none; an acceptance was
 //! written but the target's head didn't move to it (the next landing on the
 //! target publishes it, and logs the acceptance again); a waiting landing
-//! wasn't kept. Its writer's lock file is then left behind, unlocked:
-//! readers sync the segments holding its entries, which may not be durable,
-//! remove the file, and take the entries' effects as what they find
-//! published. So a crashed writer holds nothing back.
+//! wasn't kept; a working copy didn't move. Its writer's lock file is then
+//! left behind, unlocked: readers sync the segments holding its entries,
+//! which may not be durable, remove the file, and take the entries' effects
+//! as what they find published. So a crashed writer holds nothing back.
 //!
 //! **Damage.** A crash in the middle of an append leaves part of a frame at
 //! the end of the last segment. It never was an entry: readers skip it, and
@@ -65,14 +67,14 @@
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io;
-use std::iter;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
+use std::{fmt, iter};
 
 use origin_platform::{DurableWrite, LockMode, LockedFile, Platform};
 use origin_shared::object::{DecodeError, Reader};
-use origin_shared::{AcceptanceId, ChangeId, ObjectId, TargetName};
+use origin_shared::{AcceptanceId, ChangeId, ObjectId, RevisionId, TargetName};
 
 use crate::frames::{Frames, Tail, Writer};
 use crate::index;
@@ -208,6 +210,8 @@ pub enum Effect {
         /// What lands.
         proposal: Proposal,
     },
+    /// The entry's workspace's working copy moved.
+    Moved(Move),
     /// A target's head named a new acceptance.
     Advanced {
         /// The target.
@@ -219,9 +223,42 @@ pub enum Effect {
     },
 }
 
+/// A working copy moving.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Move {
+    /// The revision it was, or `None` for a new workspace.
+    pub from: Option<RevisionId>,
+    /// The revision it became.
+    pub to: RevisionId,
+    /// What moved it.
+    pub why: Why,
+}
+
+/// What moved a working copy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Why {
+    /// A command recorded the working copy's draft as a new revision.
+    Draft,
+    /// A command, such as `new` or `edit`.
+    Command,
+    /// `origin undo`, taking back this operation.
+    Undo(u64),
+}
+
+impl fmt::Display for Why {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Draft => f.write_str("draft"),
+            Self::Command => f.write_str("command"),
+            Self::Undo(op) => write!(f, "undo {op}"),
+        }
+    }
+}
+
 impl Entry {
     const WROTE: u8 = 1;
     const WAITING: u8 = 2;
+    const MOVED: u8 = 3;
     const ADVANCED: u8 = 4;
 
     /// Encodes the entry's frame: its sequence number, operation, writer,
@@ -288,6 +325,19 @@ impl Effect {
                     }
                 }
             }
+            Self::Moved(moved) => {
+                out.u8(Entry::MOVED);
+                out.option(moved.from.as_ref().map(RevisionId::as_bytes));
+                out.bytes(moved.to.as_bytes());
+                match moved.why {
+                    Why::Draft => out.u8(0),
+                    Why::Command => out.u8(1),
+                    Why::Undo(op) => {
+                        out.u8(2);
+                        out.u64(op);
+                    }
+                }
+            }
             Self::Advanced {
                 target,
                 seq,
@@ -305,6 +355,7 @@ impl Effect {
         let target = |reader: &mut Reader<'_>| -> Result<TargetName, DecodeError> {
             Ok(TargetName::new(reader.prefixed_str()?.to_owned())?)
         };
+        let revision = |bytes| RevisionId::from(ObjectId::from_bytes(bytes));
         let unknown = |field, tag| Err(DecodeError::UnknownTag { field, tag });
         Ok(match reader.u8()? {
             Entry::WROTE => {
@@ -322,6 +373,16 @@ impl Effect {
                     tag => return unknown("proposal", tag),
                 },
             },
+            Entry::MOVED => Self::Moved(Move {
+                from: reader.option(Reader::array)?.map(revision),
+                to: revision(reader.array()?),
+                why: match reader.u8()? {
+                    0 => Why::Draft,
+                    1 => Why::Command,
+                    2 => Why::Undo(reader.u64()?),
+                    tag => return unknown("move reason", tag),
+                },
+            }),
             Entry::ADVANCED => Self::Advanced {
                 target: target(reader)?,
                 seq: reader.u64()?,
@@ -925,6 +986,7 @@ mod tests {
 
     #[test]
     fn entries_round_trip() {
+        let revision = |seed| RevisionId::from(ObjectId::from_bytes([seed; 32]));
         let effects = [
             wrote(1),
             Effect::Waiting {
@@ -935,6 +997,16 @@ mod tests {
                 onto: TargetName::new("release/v3").unwrap(),
                 proposal: Proposal::Target(TargetName::MAIN),
             },
+            Effect::Moved(Move {
+                from: None,
+                to: revision(4),
+                why: Why::Command,
+            }),
+            Effect::Moved(Move {
+                from: Some(revision(4)),
+                to: revision(5),
+                why: Why::Undo(7),
+            }),
             Effect::Advanced {
                 target: TargetName::MAIN,
                 seq: 3,
