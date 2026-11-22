@@ -17,6 +17,10 @@ fn missing_evidence_waits_and_promoted_results_count() {
         panic!("{waiting:?}")
     };
     assert!(matches!(&pending.blocked, Blocked::Evidence(missing) if missing.len() == 1));
+    assert_eq!(
+        Queue::pending(&repo.store).unwrap(),
+        std::slice::from_ref(pending)
+    );
 
     // A user outside the group doesn't count; the runner does.
     let annotations = Annotations::open(&repo.store).unwrap();
@@ -34,6 +38,7 @@ fn missing_evidence_waits_and_promoted_results_count() {
         .unwrap();
     assert_eq!(landed(landing), code);
     assert_eq!(acceptance.body().evidence, [result]);
+    assert_eq!(Queue::pending(&repo.store).unwrap(), []);
 
     // The docs change is rebased onto `src` as tested, so the result is
     // promoted to it, and counts as the runner's.

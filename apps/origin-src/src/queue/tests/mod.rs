@@ -10,13 +10,13 @@ use origin_platform::Native;
 use origin_shared::{
     AcceptanceBody, Base, BlobId, ChangeId, Digest, EncodedObject, Inputs, Kind, NodeKey,
     PrincipalName, Record, RecordId, RepoPath, Revision, RevisionId, Source, Statement,
-    StatementId, TargetName, TreeId, Verdict,
+    StatementId, TargetName, Tree, TreeId, Verdict,
 };
 
 use super::*;
 use crate::annotations::Annotations;
 use crate::conflict::Conflicts;
-use crate::policy::{Policy, PolicyError};
+use crate::policy::{Policy, PolicyError, Requirement};
 use crate::store::Store;
 use crate::targets::Head;
 use crate::tree::tests::build;

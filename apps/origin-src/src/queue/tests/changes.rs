@@ -1,9 +1,10 @@
-//! Landing changes: rebasing, stacks, and who may land.
+//! Landing changes: rebasing, stacks, who may land, and keeping a
+//! landing that waits.
 
 use std::sync::Mutex;
 use std::thread;
 
-use origin_shared::Statement;
+use origin_shared::{Statement, Verdict};
 
 use super::*;
 
@@ -147,6 +148,31 @@ fn concurrent_landings_serialize() {
 }
 
 #[test]
+fn pending_landings_round_trip() {
+    let pending = Pending {
+        onto: TargetName::new("release/v3").unwrap(),
+        proposal: Proposal::Target(TargetName::MAIN),
+        subject: RecordId::Snapshot(Tree::default().encode().id().into()),
+        blocked: Blocked::Evidence(vec![Requirement {
+            kind: Kind::new("ci.test").unwrap(),
+            verdict: Verdict::Pass,
+            issuer: "group:runners".parse().unwrap(),
+        }]),
+    };
+    assert_eq!(Pending::decode(&pending.encode()), Some(pending.clone()));
+    let conflict = Pending {
+        proposal: change(9),
+        blocked: Blocked::Conflict {
+            statement: EncodedObject::blob(b"conflict").id().into(),
+            paths: Vec::new(),
+        },
+        ..pending
+    };
+    assert_eq!(Pending::decode(&conflict.encode()), Some(conflict));
+    assert_eq!(Pending::decode("origin pending 2\n"), None);
+}
+
+#[test]
 fn only_the_creator_of_a_change_abandons_it() {
     let repo = Repo::new("[targets.main]\nauthority = \"node:queue\"\n");
     let revision = repo.change_on_main(1, &[("file", "work")]);
@@ -164,4 +190,35 @@ fn only_the_creator_of_a_change_abandons_it() {
         .write_all(&[abandon("user:eve").encode()])
         .unwrap();
     assert!(matches!(repo.land(1)[..], [Landing::Landed { .. }]));
+}
+
+#[test]
+fn a_waiting_stack_lands_whole_once_it_can() {
+    let repo = requiring_ci();
+    let lower = repo.change_on_main(1, &[("a", "a")]);
+    repo.revision(2, &[], Base::Revision(lower), &[("a", "a"), ("b", "b")]);
+    let [Landing::Pending(pending)] = &repo.land(2)[..] else {
+        panic!("the lower change waits")
+    };
+    assert_eq!(pending.subject, RecordId::Revision(lower));
+    assert_eq!(
+        Queue::pending(&repo.store).unwrap(),
+        [Pending {
+            proposal: change(2),
+            ..pending.clone()
+        }],
+        "kept as the landing of the whole stack"
+    );
+
+    // Retrying it, as once the evidence arrives, lands both: the result
+    // is promoted to the upper change, which doesn't change `src`.
+    let annotations = Annotations::open(&repo.store).unwrap();
+    annotations.issue(&ci_test(lower, "user:ci"), None).unwrap();
+    let landings = repo.land(2);
+    assert_eq!(landed(&landings[0]), lower);
+    assert!(
+        matches!(landings[1], Landing::Landed { proposal: ref p, .. } if *p == change(2)),
+        "{landings:?}"
+    );
+    assert_eq!(Queue::pending(&repo.store).unwrap(), []);
 }
