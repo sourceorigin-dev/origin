@@ -25,6 +25,7 @@
 //! a power loss could take back, so none is reused. Entries lost to damage
 //! deliver nothing, and the damage is reported on stderr.
 
+use std::sync::{Condvar, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -42,6 +43,40 @@ use crate::store::{Store, StoreError};
 #[derive(Debug)]
 pub struct Events<'a, P = Native> {
     store: &'a Store<P>,
+    /// What [`Events::wait`] waits on between reads, if not just the time.
+    wakeup: Option<&'a Wakeup>,
+}
+
+/// Wakes the readers waiting for events in this process as soon as it
+/// writes, rather than at their next read of the op log. Writes from other
+/// processes still wait for that read.
+#[derive(Debug, Default)]
+pub struct Wakeup {
+    /// How many writes this process made.
+    writes: Mutex<u64>,
+    written: Condvar,
+}
+
+impl Wakeup {
+    /// Wakes every reader waiting: this process wrote.
+    pub fn notify(&self) {
+        *self.writes.lock().unwrap_or_else(PoisonError::into_inner) += 1;
+        self.written.notify_all();
+    }
+
+    /// How many writes this process made so far.
+    fn writes(&self) -> u64 {
+        *self.writes.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Waits up to `timeout`, or until a write after the first `seen`.
+    fn sleep(&self, seen: u64, timeout: Duration) {
+        let writes = self.writes.lock().unwrap_or_else(PoisonError::into_inner);
+        let _woken = self
+            .written
+            .wait_timeout_while(writes, timeout, |writes| *writes == seen)
+            .unwrap_or_else(PoisonError::into_inner);
+    }
 }
 
 impl<'a, P: Platform> Events<'a, P> {
@@ -50,7 +85,19 @@ impl<'a, P: Platform> Events<'a, P> {
 
     /// The events of `store`.
     pub fn new(store: &'a Store<P>) -> Self {
-        Self { store }
+        Self {
+            store,
+            wakeup: None,
+        }
+    }
+
+    /// The events, with [`Events::wait`] also woken by `wakeup`.
+    #[must_use]
+    pub fn waking_on(self, wakeup: &'a Wakeup) -> Self {
+        Self {
+            wakeup: Some(wakeup),
+            ..self
+        }
     }
 
     /// The cursor after every event so far: reading from it delivers only
@@ -101,7 +148,8 @@ impl<'a, P: Platform> Events<'a, P> {
     }
 
     /// Like [`Events::after`], but waits up to `timeout` for events, reading
-    /// the op log every [`Events::POLL`]. The page is empty if none came.
+    /// the op log every [`Events::POLL`], and whenever the
+    /// [`Wakeup`] says this process wrote. The page is empty if none came.
     ///
     /// # Errors
     ///
@@ -116,6 +164,8 @@ impl<'a, P: Platform> Events<'a, P> {
         let start = Instant::now();
         let mut cursor = cursor;
         loop {
+            // Read before the op log, so no write after it is missed.
+            let seen = self.wakeup.map(Wakeup::writes);
             let page = self.after(cursor, filter, limit)?;
             let left = timeout.saturating_sub(start.elapsed());
             if !page.events.is_empty() || left.is_zero() {
@@ -123,7 +173,11 @@ impl<'a, P: Platform> Events<'a, P> {
             }
             // Entries with no matching events are read past.
             cursor = page.next;
-            thread::sleep(Self::POLL.min(left));
+            let pause = Self::POLL.min(left);
+            match (self.wakeup, seen) {
+                (Some(wakeup), Some(seen)) => wakeup.sleep(seen, pause),
+                _ => thread::sleep(pause),
+            }
         }
     }
 

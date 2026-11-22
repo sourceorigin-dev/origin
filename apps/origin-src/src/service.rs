@@ -8,7 +8,8 @@
 //!
 //! A service is meant to live as long as its process: it keeps the record
 //! index open, catching it up with the op log before each use instead of
-//! reading it whole. Calls don't wait for each other to use the index: each takes
+//! reading it whole, and wakes the event long-polls waiting on it whenever
+//! it writes. Calls don't wait for each other to use the index: each takes
 //! one of the indexes kept open, or opens another if they're all in use.
 //! Landings on one target still go one at a time, through the target's
 //! queue lock.
@@ -20,12 +21,14 @@ use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use origin_platform::Native;
 use origin_shared::api::{
-    Annotation, ErrorCode, LandRequest, Landings, LogEntry, NewTarget, RevisionEntry, Revisions,
-    Stored, TargetInfo,
+    Annotation, ErrorCode, EventsQuery, LandRequest, Landings, LogEntry, NewTarget, RevisionEntry,
+    Revisions, Stored, TargetInfo,
 };
+use origin_shared::event::{Filter, Page};
 use origin_shared::landing::{Pending, Proposal};
 use origin_shared::object::DecodeError;
 use origin_shared::pack::Pack;
@@ -35,6 +38,7 @@ use origin_shared::{
 };
 
 use crate::annotations::{AnnotateError, Annotations};
+use crate::events::{Events, Wakeup};
 use crate::index::Index;
 use crate::policy::{Policy, PolicyError};
 use crate::queue::{LandError, Queue};
@@ -74,9 +78,16 @@ pub struct OriginService {
     node: Node,
     /// The record indexes kept open, but those in use: see the module.
     indexes: Mutex<Vec<Index>>,
+    wakeup: Wakeup,
 }
 
 impl OriginService {
+    /// The most events a page holds, and how many by default.
+    const MAX_EVENTS: u32 = 1024;
+
+    /// The longest an event long-poll waits.
+    pub const MAX_WAIT: Duration = Duration::from_mins(1);
+
     /// The most indexes kept open for calls to take.
     const KEPT_INDEXES: usize = 8;
 
@@ -87,6 +98,7 @@ impl OriginService {
             store,
             node,
             indexes: Mutex::default(),
+            wakeup: Wakeup::default(),
         }
     }
 
@@ -294,6 +306,7 @@ impl OriginService {
                 Ok(())
             })?;
         }
+        self.wakeup.notify();
         Ok(Stored { new: new as u64 })
     }
 
@@ -422,7 +435,7 @@ impl OriginService {
     /// cannot be read or written.
     pub fn land(&self, _caller: &Caller, request: &LandRequest) -> Result<Landings, ServiceError> {
         let queue = Queue::new(&self.store, &self.node.key, self.node.name.clone());
-        self.annotations(|annotations| {
+        let landed = self.annotations(|annotations| {
             let landed = match &request.proposal {
                 Proposal::Change(change) => {
                     let onto = match &request.onto {
@@ -442,7 +455,11 @@ impl OriginService {
                 }
             };
             Ok(landed)
-        })
+        });
+        // Even a failed landing may have written records, such as a
+        // conflict.
+        self.wakeup.notify();
+        landed
     }
 
     /// The target the stack of `change` is on: that of the acceptance at
@@ -496,7 +513,35 @@ impl OriginService {
         request: &NewTarget,
     ) -> Result<Head, ServiceError> {
         let queue = Queue::new(&self.store, &self.node.key, self.node.name.clone());
-        Ok(queue.create_target(&request.name, &request.from)?)
+        let head = queue.create_target(&request.name, &request.from)?;
+        self.wakeup.notify();
+        Ok(head)
+    }
+
+    /// The events after the query's cursor that pass its filter, waiting
+    /// up to its `wait`, at most [`OriginService::MAX_WAIT`], for some to
+    /// come. Without a cursor, only events from now on come.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the op log no longer keeps the events after the cursor, or
+    /// it or a record cannot be read.
+    pub fn events(&self, _caller: &Caller, query: &EventsQuery) -> Result<Page, ServiceError> {
+        let events = Events::new(&self.store).waking_on(&self.wakeup);
+        let cursor = match query.cursor {
+            Some(cursor) => cursor,
+            None => events.end()?,
+        };
+        let filter = Filter {
+            kinds: query.kind.0.clone(),
+            subjects: query.subject.0.clone(),
+        };
+        let limit = query
+            .limit
+            .unwrap_or(Self::MAX_EVENTS)
+            .min(Self::MAX_EVENTS) as usize;
+        let wait = query.wait.map_or(Duration::ZERO, |wait| wait.0);
+        Ok(events.wait(cursor, &filter, limit, wait.min(Self::MAX_WAIT))?)
     }
 }
 
