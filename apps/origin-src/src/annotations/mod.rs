@@ -453,11 +453,24 @@ mod tests {
         predecessors: &[RevisionId],
         files: &[(&str, &str)],
     ) -> RevisionId {
+        revision_on_state(store, target, &[], change, predecessors, files)
+    }
+
+    /// Writes a revision like [`revision_on`], on a first acceptance whose
+    /// state holds `state`.
+    pub(super) fn revision_on_state(
+        store: &Store,
+        target: &TargetName,
+        state: &[(&str, &str)],
+        change: u8,
+        predecessors: &[RevisionId],
+        files: &[(&str, &str)],
+    ) -> RevisionId {
         let acceptance = AcceptanceBody {
             target: target.id(),
             seq: 0,
             prev: None,
-            state: build(store, &[]),
+            state: build(store, state),
             landed: Vec::new(),
             evidence: Vec::new(),
             policy: None,
@@ -496,6 +509,7 @@ mod tests {
                     .iter()
                     .map(|path| RepoPath::new(path).unwrap())
                     .collect(),
+                target_paths: Vec::new(),
                 definition: Digest::of(kind.as_bytes()),
                 toolchain: Digest::of(b"rustc 1.99.0"),
                 external,

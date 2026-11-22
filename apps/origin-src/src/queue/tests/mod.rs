@@ -180,6 +180,7 @@ pub(crate) fn ci_test(subject: RevisionId, issuer: &str) -> Statement {
         issuer: issuer.parse().unwrap(),
         inputs: Some(Inputs {
             paths: vec![RepoPath::new("src").unwrap()],
+            target_paths: Vec::new(),
             definition: Digest::of(b"cargo test"),
             toolchain: Digest::of(b"rustc"),
             external: false,

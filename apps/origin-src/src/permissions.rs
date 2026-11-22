@@ -1482,6 +1482,7 @@ grants = { all = "none", "user:ada" = "write" }
             verdict: Some(origin_shared::Verdict::Pass),
             inputs: Some(origin_shared::Inputs {
                 paths: vec![path("README.md")],
+                target_paths: Vec::new(),
                 definition: origin_shared::Digest::of(b"test"),
                 toolchain: origin_shared::Digest::of(b""),
                 external: false,

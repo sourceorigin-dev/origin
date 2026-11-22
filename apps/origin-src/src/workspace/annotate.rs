@@ -182,9 +182,10 @@ impl Workspace {
                 subject.describe()
             );
         }
-        if let (Some(inputs), RecordId::Revision(revision)) = (&statement.inputs, subject) {
-            let snapshot = self.store.get(revision)?.snapshot;
-            let digest = Snapshots::new(&self.store).input_digest(snapshot, inputs)?;
+        if let (Some(inputs), Some(mut trees)) =
+            (&statement.inputs, self.store.input_trees(subject)?)
+            && let Some(digest) = Snapshots::new(&self.store).input_digest(&mut trees, inputs)?
+        {
             println!("Input digest: {}", digest.short());
         }
         Ok(())
@@ -293,7 +294,16 @@ impl Workspace {
                 );
             }
             if let Some(inputs) = &statement.inputs {
-                let paths: Vec<_> = inputs.paths.iter().map(ToString::to_string).collect();
+                let on_target = inputs
+                    .target_paths
+                    .iter()
+                    .map(|path| format!("{path} on the target"));
+                let paths: Vec<_> = inputs
+                    .paths
+                    .iter()
+                    .map(ToString::to_string)
+                    .chain(on_target)
+                    .collect();
                 let external = if inputs.external {
                     ", and external"
                 } else {
