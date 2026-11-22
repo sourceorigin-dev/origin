@@ -7,6 +7,7 @@ mod id;
 pub mod landing;
 mod name;
 pub mod object;
+pub mod pack;
 mod path;
 pub mod policy;
 mod principal;
