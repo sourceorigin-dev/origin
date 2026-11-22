@@ -36,7 +36,7 @@ use std::time::{Duration, SystemTime};
 
 use origin_platform::{DurableWrite, LockMode, LockedFile, Native, Platform, WritableError};
 use origin_shared::object::{DecodeError, IdMismatch};
-use origin_shared::{EncodedObject, Head, ObjectId, TargetName, TypedId};
+use origin_shared::{AttachmentId, EncodedObject, Head, ObjectId, TargetName, TypedId};
 
 use crate::index::Entry;
 use crate::oplog::{Actor, Effect};
@@ -506,6 +506,25 @@ impl<P: Platform> Store<P> {
         };
         let content = object
             .blob_content()
+            .map_err(|source| StoreError::Decode { id, source })?;
+        Ok(Some(content.to_vec()))
+    }
+
+    /// Reads an attachment's content, or `None` if the store does not have
+    /// it.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the object cannot be read, is corrupt, or isn't an
+    /// attachment, such as a blob whose id a record names as its
+    /// attachment.
+    pub fn try_attachment(&self, id: AttachmentId) -> Result<Option<Vec<u8>>, StoreError> {
+        let id = id.into();
+        let Some(object) = self.try_read(id)? else {
+            return Ok(None);
+        };
+        let content = object
+            .attachment_content()
             .map_err(|source| StoreError::Decode { id, source })?;
         Ok(Some(content.to_vec()))
     }

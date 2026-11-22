@@ -68,8 +68,8 @@ calls! {
     fn targets() -> Vec<TargetInfo> = targets(), targets();
     /// The acceptances of a target, oldest first.
     fn log(query: &LogQuery) -> Vec<LogEntry> = log(query), log(query);
-    /// Records by id, each followed by the blob it carries: those up to the
-    /// last record of the part, if it stops short.
+    /// Records by id, each followed by the attachment it carries: those up
+    /// to the last record of the part, if it stops short.
     fn records(request: &FetchRecords) -> Part = fetch_records(request), records(&request.ids);
     /// The trees and blobs of a snapshot that the request's snapshots lack,
     /// in parts.

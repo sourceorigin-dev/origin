@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use origin_shared::{
-    BlobId, EncodedObject, Inputs, Kind, Principal, RecordId, Revision, RevisionId, Statement,
-    StatementId, Verdict,
+    AttachmentId, EncodedObject, Inputs, Kind, Principal, RecordId, Revision, RevisionId,
+    Statement, StatementId, Verdict,
 };
 
 use super::{WorkingCopy, Workspace, WorkspaceError};
@@ -73,18 +73,18 @@ pub enum Payload {
 }
 
 impl Payload {
-    /// The blob holding the details.
-    fn blob(&self) -> Result<EncodedObject, WorkspaceError> {
+    /// The attachment holding the details.
+    fn attachment(&self) -> Result<EncodedObject, WorkspaceError> {
         match self {
-            Self::Text(text) => Ok(EncodedObject::blob(text.as_bytes())),
+            Self::Text(text) => Ok(EncodedObject::attachment(text.as_bytes())),
             Self::File(path) if path == Path::new("-") => {
-                EncodedObject::read_blob(io::stdin().lock(), 0)
+                EncodedObject::read_attachment(io::stdin().lock(), 0)
                     .map_err(|source| WorkspaceError::io(path, source))
             }
             Self::File(path) => File::open(path)
                 .and_then(|file| {
                     let len = file.metadata()?.len();
-                    EncodedObject::read_blob(file, usize::try_from(len).unwrap_or(0))
+                    EncodedObject::read_attachment(file, usize::try_from(len).unwrap_or(0))
                 })
                 .map_err(|source| WorkspaceError::io(path, source)),
         }
@@ -140,7 +140,7 @@ impl Workspace {
         let working_copy = self.refresh()?;
         let subject = working_copy.find_record(annotated)?;
         let mut annotations = Annotations::new(&self.store, working_copy.index);
-        let payload = payload.map(Payload::blob).transpose()?;
+        let payload = payload.map(Payload::attachment).transpose()?;
         let statement = Statement {
             subject,
             supersedes: None,
@@ -310,8 +310,8 @@ impl Workspace {
     /// A payload's first line if it's text, its size otherwise, or that this
     /// repository doesn't have it: retention may have dropped it, or it
     /// never came here.
-    fn payload_summary(&self, payload: BlobId) -> Result<String, WorkspaceError> {
-        let Some(content) = self.store.try_blob(payload.into())? else {
+    fn payload_summary(&self, payload: AttachmentId) -> Result<String, WorkspaceError> {
+        let Some(content) = self.store.try_attachment(payload)? else {
             return Ok("unavailable here".to_owned());
         };
         Ok(

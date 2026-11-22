@@ -1,5 +1,5 @@
 use super::{ObjectKind, Record, fields, tagged};
-use crate::{AcceptanceId, BlobId, ChangeId, Principal, RevisionId, TreeId};
+use crate::{AcceptanceId, AttachmentId, ChangeId, Principal, RevisionId, TreeId};
 
 /// One immutable version of a change.
 ///
@@ -21,7 +21,7 @@ pub struct Revision {
     /// The root tree of the files.
     pub snapshot: TreeId,
     /// The intent, written for humans and agents.
-    pub description: BlobId,
+    pub description: AttachmentId,
     /// Who wrote the revision.
     pub author: Principal,
 }

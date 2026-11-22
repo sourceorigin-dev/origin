@@ -15,8 +15,8 @@ use origin_shared::api::{EventsQuery, FetchRecords, LandRequest, List};
 use origin_shared::landing::{Landing, Proposal};
 use origin_shared::pack::Pack;
 use origin_shared::{
-    Base, BlobId, ChangeId, EncodedObject, EntryKind, EntryName, Kind, NodeKey, Period, Record,
-    RecordId, Revision, RevisionId, Statement, TargetName, Tree, TreeEntry, Verdict,
+    AttachmentId, Base, ChangeId, EncodedObject, EntryKind, EntryName, Kind, NodeKey, Period,
+    Record, RecordId, Revision, RevisionId, Statement, TargetName, Tree, TreeEntry, Verdict,
 };
 use origin_src::http::Api;
 use origin_src::policy::Policy;
@@ -72,7 +72,7 @@ impl Hosted {
             },
         );
         let tree = tree.encode();
-        let description = EncodedObject::blob(b"");
+        let description = EncodedObject::attachment(b"");
         let mut change = [0; 16];
         change[..8].copy_from_slice(&n.to_le_bytes());
         let revision = Revision {
@@ -81,7 +81,7 @@ impl Hosted {
             base: Base::Acceptance(tip),
             deps: Vec::new(),
             snapshot: tree.id().into(),
-            description: BlobId::from(description.id()),
+            description: AttachmentId::from(description.id()),
             author: "user:bench".parse().unwrap(),
         }
         .encode();

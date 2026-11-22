@@ -815,7 +815,7 @@ impl<'a> Sync<'a> {
     /// those of `skip`, with the records they refer to, recursively: a
     /// revision's base and dependencies, a statement's subject and the
     /// statements it supersedes or promotes, but not their snapshots. Each
-    /// comes with the blob it carries. Those this node has are made durable
+    /// comes with the attachment it carries. Those this node has are made durable
     /// by `held`, which must commit before anything refers to them.
     fn closure(
         &self,
@@ -1474,7 +1474,7 @@ mod tests {
                 .iter()
                 .map(|(_, content)| EncodedObject::blob(content.as_bytes()))
                 .collect();
-            let description = EncodedObject::blob(b"work");
+            let description = EncodedObject::attachment(b"work");
             let revision = Revision {
                 change: ChangeId::from_bytes([change; 16]),
                 predecessors: predecessors.to_vec(),
@@ -2161,7 +2161,7 @@ mod tests {
                     base: main_tip(&client.store),
                     deps: Vec::new(),
                     snapshot: build(&client.store, &[("a", "gone")]),
-                    description: EncodedObject::blob(b"").id().into(),
+                    description: EncodedObject::attachment(b"").id().into(),
                     author: "user:ada".parse().unwrap(),
                 };
                 client
@@ -2178,8 +2178,8 @@ mod tests {
                     .collect();
                 let room = Pack::LIMIT
                     - wire(content)
-                    - wire(vec![revision.encode(), EncodedObject::blob(b"")]);
-                let description = EncodedObject::blob(&vec![b'x'; room]);
+                    - wire(vec![revision.encode(), EncodedObject::attachment(b"")]);
+                let description = EncodedObject::attachment(&vec![b'x'; room]);
                 revision.description = description.id().into();
                 let revision = revision.encode();
                 client

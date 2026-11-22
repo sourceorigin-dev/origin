@@ -2,7 +2,7 @@
 
 use std::thread;
 
-use origin_shared::{BlobId, Statement};
+use origin_shared::{AttachmentId, Statement};
 
 use super::*;
 
@@ -109,7 +109,7 @@ fn policy_landings_keep_a_valid_policy() {
         base: tip,
         deps: Vec::new(),
         snapshot: repo.files(&[("policy.toml", &requiring)]),
-        description: BlobId::from(EncodedObject::blob(b"").id()),
+        description: AttachmentId::from(EncodedObject::attachment(b"").id()),
         author: "user:ada".parse().unwrap(),
     }
     .encode();

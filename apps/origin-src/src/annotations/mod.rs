@@ -267,7 +267,7 @@ impl<'a, P: Platform> Annotations<'a, P> {
             .iter()
             .map(|head| head.to_hex() + "\n")
             .collect::<String>();
-        let payload = EncodedObject::blob(list.as_bytes());
+        let payload = EncodedObject::attachment(list.as_bytes());
         let statement = Statement {
             subject: RecordId::Revision(heads[0]),
             kind: Kind::DIVERGENT,
@@ -388,7 +388,7 @@ mod tests {
     use std::thread;
 
     use origin_shared::{
-        Base, BlobId, Digest, Inputs, ObjectId, RepoPath, Revision, RevisionId, Verdict,
+        AttachmentId, Base, Digest, Inputs, ObjectId, RepoPath, Revision, RevisionId, Verdict,
     };
 
     use super::*;
@@ -419,7 +419,7 @@ mod tests {
             base: Base::Acceptance(ObjectId::from_bytes([0; 32]).into()),
             deps: Vec::new(),
             snapshot: build(store, files),
-            description: BlobId::from(EncodedObject::blob(b"").id()),
+            description: AttachmentId::from(EncodedObject::attachment(b"").id()),
             author: principal("user:alice"),
         }
         .encode();
@@ -596,7 +596,7 @@ mod tests {
         assert_eq!(about.len(), 1);
         assert_eq!(about[0].statement.kind, Kind::DIVERGENT);
         let heads = store
-            .try_blob(about[0].statement.payload.unwrap().into())
+            .try_attachment(about[0].statement.payload.unwrap())
             .unwrap()
             .unwrap();
         let mut expected = [left, right];

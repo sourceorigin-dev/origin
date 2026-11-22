@@ -151,7 +151,7 @@ fn land(service: &OriginService, snapshot: TreeId) -> Base {
 /// A revision of a new change with `snapshot`, on `base`, and its
 /// description.
 fn revision(base: Base, snapshot: TreeId) -> (EncodedObject, EncodedObject) {
-    let description = EncodedObject::blob(b"bench");
+    let description = EncodedObject::attachment(b"bench");
     let revision = Revision {
         change: ChangeId::random().unwrap(),
         predecessors: Vec::new(),
@@ -250,7 +250,7 @@ static HISTORY_SETUP: LazyLock<History> = LazyLock::new(|| {
     let service = OriginService::create(server.path().join("demo"), node.clone(), &policy).unwrap();
     let tip = service.store().head(&TargetName::MAIN).unwrap().unwrap();
     let state = service.store().get(tip.acceptance).unwrap().body().state;
-    let description = EncodedObject::blob(b"bench");
+    let description = EncodedObject::attachment(b"bench");
     let mut objects = vec![description.clone()];
     let mut changes = Vec::new();
     for change in 0..HISTORY {

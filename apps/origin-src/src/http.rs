@@ -187,7 +187,7 @@ impl IntoResponse for PackResponse {
     }
 }
 
-/// Fetches records by id, each with the blob it carries, as a pack.
+/// Fetches records by id, each with the attachment it carries, as a pack.
 #[utoipa::path(
     post,
     path = "/api/v1/repos/{repo}/records/fetch",
@@ -196,7 +196,7 @@ impl IntoResponse for PackResponse {
     request_body = FetchRecords,
     responses(
         (status = 200, description = "The records, in the order asked, each followed by its description or payload if the repository has it, as a pack: each object a 32-byte id, a little-endian u64 length and the object's encoding. At most 64 MiB, but for a record alone", content_type = "application/octet-stream", body = Binary, headers(("origin-more" = bool, description = "Present if the pack stopped short: ask again for the records after the last it holds"))),
-        (status = 400, description = "An object is a blob or a tree, which only leave by walking a snapshot", body = ApiError),
+        (status = 400, description = "An object is a blob, a tree or an attachment, which only leave by walking a snapshot or with the record carrying them", body = ApiError),
         (status = 404, description = "The repository or a record does not exist", body = ApiError)
     )
 )]

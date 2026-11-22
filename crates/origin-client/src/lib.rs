@@ -67,9 +67,9 @@ endpoints! {
 
     impl Repo {
         /// Fetches records by id, in the order asked, each followed by the
-        /// blob it carries if the server has it: a revision's description,
-        /// a statement's payload. A part that stops short holds those up to
-        /// the last record it has.
+        /// attachment it carries if the server has it: a revision's
+        /// description, a statement's payload. A part that stops short
+        /// holds those up to the last record it has.
         fn fetch_records(request: &FetchRecords) -> Part =
             POST "records/fetch", json(request) => part;
         /// Fetches the trees and blobs of a snapshot that none of the

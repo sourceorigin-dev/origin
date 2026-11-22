@@ -123,8 +123,11 @@ ids! {
 }
 
 object_ids! {
-    /// Identifies a blob: file contents, a description or a payload.
+    /// Identifies a blob: a file's content.
     BlobId;
+    /// Identifies an attachment: a revision's description or a statement's
+    /// payload.
+    AttachmentId;
     /// Identifies a tree, the root of which is a snapshot.
     TreeId => Tree;
     /// Identifies a revision.

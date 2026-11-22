@@ -101,14 +101,15 @@ pub struct RepoSummary {
 pub const MORE: &str = "origin-more";
 
 /// Asks for records by id: revisions, statements and acceptances. Each
-/// comes with the blob it carries, if the repository has it: a revision's
-/// description, a statement's payload. Snapshots are fetched with
-/// [`FetchSnapshot`] instead.
+/// comes with the attachment it carries, if the repository has it: a
+/// revision's description, a statement's payload. Snapshots are fetched
+/// with [`FetchSnapshot`] instead.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct FetchRecords {
-    /// The records, returned in this order, each followed by its blob. A
-    /// response that stops short, with the [`MORE`] header, holds those up
-    /// to the last record it has: ask again for those after it.
+    /// The records, returned in this order, each followed by its
+    /// attachment. A response that stops short, with the [`MORE`] header,
+    /// holds those up to the last record it has: ask again for those after
+    /// it.
     pub ids: Vec<ObjectId>,
 }
 
