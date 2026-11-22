@@ -147,6 +147,9 @@ impl<P: Platform> Session<'_, '_, P> {
                 revision: None,
             });
         }
+        // Held until the rebased revision is published, so no push makes
+        // the change diverge meanwhile.
+        let _publishing = self.publishing(revision.change, id)?;
         let rebased = Revision {
             predecessors: vec![id],
             base: tip,
@@ -165,6 +168,18 @@ impl<P: Platform> Session<'_, '_, P> {
             trees: merge.trees,
             revision: Some(rebased),
         })
+    }
+
+    /// Takes the lock every publication of revisions takes (see
+    /// [`Store::lock_pushes`]), once `head` is still the only head of
+    /// `change`.
+    fn publishing(&mut self, change: ChangeId, head: RevisionId) -> Result<LockedFile, LandError> {
+        let lock = self.store().lock_pushes()?;
+        self.annotations.refresh()?;
+        if self.annotations.index().heads(change) != [head] {
+            return Err(LandError::Moved(change));
+        }
+        Ok(lock)
     }
 
     /// Checks the policy for `candidate`, and lands it if its evidence is

@@ -26,8 +26,9 @@ use std::time::Duration;
 
 use origin_platform::Native;
 use origin_shared::api::{
-    Annotation, ErrorCode, EventsQuery, FetchSnapshot, LandRequest, Landings, LogEntry, NewTarget,
-    RevisionEntry, Revisions, Stored, TargetInfo,
+    Annotation, ErrorCode, EventsQuery, Expected, FetchSnapshot, Inventory, InventoryRequest,
+    LandRequest, Landings, LogEntry, LogQuery, NewTarget, RevisionEntry, Revisions, Stored,
+    TargetInfo,
 };
 use origin_shared::event::{Filter, Page};
 use origin_shared::landing::{Pending, Proposal};
@@ -278,6 +279,45 @@ impl OriginService {
         })
     }
 
+    /// What the repository holds of each change: its revisions and heads,
+    /// and the statements about them, by id. A change it never heard of
+    /// has none.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the index cannot be read.
+    pub fn inventory(
+        &self,
+        _caller: &Caller,
+        request: &InventoryRequest,
+    ) -> Result<Vec<Inventory>, ServiceError> {
+        self.annotations(|annotations| {
+            let index = annotations.index();
+            Ok(request
+                .changes
+                .iter()
+                .map(|&change| {
+                    let revisions = index.revisions(change).to_vec();
+                    let mut subjects: Vec<_> =
+                        revisions.iter().copied().map(RecordId::Revision).collect();
+                    let mut statements = Vec::new();
+                    while let Some(subject) = subjects.pop() {
+                        for &statement in index.statements(subject) {
+                            statements.push(statement);
+                            subjects.push(RecordId::Statement(statement));
+                        }
+                    }
+                    Inventory {
+                        change,
+                        heads: index.heads(change),
+                        revisions,
+                        statements,
+                    }
+                })
+                .collect())
+        })
+    }
+
     /// Writes the objects of `pack`: snapshots, revisions and statements.
     /// Each must be well formed, and the repository must have, or the
     /// pack hold, everything it needs, of the kind it names: a tree's
@@ -296,10 +336,29 @@ impl OriginService {
     ///
     /// Fails if an object is malformed, an acceptance, or needs an object
     /// neither the pack nor the repository has, or one of another kind, if
-    /// a promotion doesn't
-    /// match its original, which leaves the other records stored, or if
-    /// the objects cannot be written.
-    pub fn put_records(&self, _caller: &Caller, pack: Pack) -> Result<Stored, ServiceError> {
+    /// a promotion doesn't match its original, which leaves the other
+    /// records stored, or if the objects cannot be written.
+    pub fn put_records(&self, caller: &Caller, pack: Pack) -> Result<Stored, ServiceError> {
+        self.push(caller, pack, &[])
+    }
+
+    /// Puts `pack` like [`OriginService::put_records`], if each change of
+    /// `expect` has the heads it names when its records are published: a
+    /// compare-and-swap, which every other publication of revisions waits
+    /// for, puts and the landing queue's rebases alike. So of two pushes
+    /// made from the same view of a change, or a push and a rebase, the
+    /// second is refused instead of making it diverge.
+    ///
+    /// # Errors
+    ///
+    /// Fails like [`OriginService::put_records`], or if a change of
+    /// `expect` moved, which publishes no record, only snapshots.
+    pub fn push(
+        &self,
+        _caller: &Caller,
+        pack: Pack,
+        expect: &[Expected],
+    ) -> Result<Stored, ServiceError> {
         // Objects this finds stored stay until what refers to them is.
         let _held = self.store.hold_objects()?;
         let held: HashMap<ObjectId, Option<ObjectKind>> = pack
@@ -361,10 +420,22 @@ impl OriginService {
         self.check_kinds(&stored)?;
         dependencies.commit()?;
         let mut new = 0;
+        if !snapshots.is_empty() {
+            new += self.store.write_all(&snapshots)?;
+        }
+        // Held until the records are published, so nothing else moves the
+        // changes in between: see `Store::lock_pushes`.
+        let _pushing = if !revisions.is_empty() || !expect.is_empty() {
+            let lock = self.store.lock_pushes()?;
+            self.check_heads(expect)?;
+            Some(lock)
+        } else {
+            None
+        };
         // Each layer durable before the next, as a workspace writes them:
         // statements before the revisions they're about, so a crash never
         // publishes a revision without its `core.conflict`.
-        for layer in [snapshots, statements, revisions] {
+        for layer in [statements, revisions] {
             if !layer.is_empty() {
                 new += self.store.write_all(&layer)?;
             }
@@ -394,6 +465,23 @@ impl OriginService {
         }
         self.wakeup.notify();
         Ok(Stored { new: new as u64 })
+    }
+
+    /// Checks that each change of `expect` has the heads it names.
+    fn check_heads(&self, expect: &[Expected]) -> Result<(), ServiceError> {
+        self.annotations(|annotations| {
+            for expected in expect {
+                let heads = annotations.index().heads(expected.change);
+                let now: HashSet<_> = heads.iter().collect();
+                if now != expected.heads.iter().collect() {
+                    return Err(ServiceError::Moved {
+                        change: expected.change,
+                        heads,
+                    });
+                }
+            }
+            Ok(())
+        })
     }
 
     /// Checks that each object of `stored`, which the repository has, is of
@@ -481,24 +569,23 @@ impl OriginService {
         Ok(targets)
     }
 
-    /// The acceptances of `target` from position `since` on, oldest first.
+    /// The acceptances of the query's target from position `since` on,
+    /// oldest first, up to its `limit`.
     ///
     /// # Errors
     ///
     /// Fails if the target doesn't exist, or its log or an acceptance
     /// cannot be read.
-    pub fn log(
-        &self,
-        _caller: &Caller,
-        target: &TargetName,
-        since: u64,
-    ) -> Result<Vec<LogEntry>, ServiceError> {
+    pub fn log(&self, _caller: &Caller, query: &LogQuery) -> Result<Vec<LogEntry>, ServiceError> {
+        let target = &query.target;
         if self.store.head(target)?.is_none() {
             return Err(ServiceError::UnknownTarget(target.clone()));
         }
-        self.store
-            .log_since(target, since)?
-            .into_iter()
+        let mut ids = self.store.log_since(target, query.since)?;
+        if let Some(limit) = query.limit {
+            ids.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
+        }
+        ids.into_iter()
             .map(|id| {
                 Ok(LogEntry {
                     id,
@@ -742,6 +829,19 @@ pub enum ServiceError {
         /// The kind it must be.
         kind: ObjectKind,
     },
+    /// A push expected a change's heads to be where they no longer are.
+    #[error(
+        "change {} moved on the remote since it was fetched: run `origin fetch`, then \
+         `origin converge {}` if it diverged",
+        change.short(),
+        change.short()
+    )]
+    Moved {
+        /// The change.
+        change: ChangeId,
+        /// Its heads now.
+        heads: Vec<origin_shared::RevisionId>,
+    },
     /// A statement put isn't one the repository accepts: a promotion that
     /// doesn't match its original.
     #[error("statement {} cannot be put", .id.short())]
@@ -781,6 +881,7 @@ impl ServiceError {
                 AnnotateError::Store(error) => Self::store_code(error),
                 _ => ErrorCode::BadRequest,
             },
+            Self::Moved { .. } => ErrorCode::Conflict,
             Self::Land(error) => match error {
                 LandError::UnknownTarget(_) | LandError::UnknownChange(_) => ErrorCode::NotFound,
                 LandError::TargetExists(_)
@@ -789,6 +890,7 @@ impl ServiceError {
                 | LandError::NotAuthority { .. }
                 | LandError::WrongKey(_)
                 | LandError::Divergent { .. }
+                | LandError::Moved(_)
                 | LandError::Abandoned(_)
                 | LandError::Unresolved { .. }
                 | LandError::InvalidPolicy(_) => ErrorCode::Conflict,

@@ -15,9 +15,9 @@ use axum::response::{IntoResponse, Response};
 use origin_shared::ChangeId;
 use origin_shared::Head;
 use origin_shared::api::{
-    Annotation, ApiError, ErrorCode, EventsQuery, FetchRecords, FetchSnapshot, LandRequest,
-    Landings, LogEntry, LogQuery, MORE, NewTarget, RepoName, RepoSummary, Revisions,
-    StatementsQuery, Stored, TargetInfo,
+    Annotation, ApiError, ErrorCode, EventsQuery, FetchRecords, FetchSnapshot, Inventory,
+    InventoryRequest, LandRequest, Landings, LogEntry, LogQuery, MORE, NewTarget, PutQuery,
+    RepoName, RepoSummary, Revisions, StatementsQuery, Stored, TargetInfo,
 };
 use origin_shared::event::Page;
 use origin_shared::landing::Pending;
@@ -45,7 +45,10 @@ type Repos = State<Arc<Repositories>>;
 pub struct Api;
 
 impl Api {
-    /// The largest request accepted, which bounds a batch of records put.
+    /// The largest request accepted, which bounds an object put: clients
+    /// split larger pushes into requests of at most
+    /// [`Pack::LIMIT`](origin_shared::pack::Pack::LIMIT), so only a single
+    /// object larger than that takes a request of its own this large.
     const MAX_REQUEST: usize = 1 << 30;
 
     fn documented() -> OpenApiRouter<Arc<Repositories>> {
@@ -54,6 +57,7 @@ impl Api {
             .routes(routes!(fetch_records))
             .routes(routes!(fetch_snapshot))
             .routes(routes!(put_records))
+            .routes(routes!(inventory))
             .routes(routes!(statements))
             .routes(routes!(revisions))
             .routes(routes!(targets, create_target))
@@ -237,28 +241,57 @@ async fn fetch_snapshot(
 
 /// Puts a batch of objects, as a pack: snapshots, revisions and
 /// statements, each needing only objects the batch or the repository has,
-/// of the kinds it names.
+/// of the kinds it names. With `expect`, only if the changes it names have
+/// the heads it says when the records are published.
 #[utoipa::path(
     put,
     path = "/api/v1/repos/{repo}/records",
     operation_id = "put_records",
-    params(("repo" = String, Path, description = "The repository")),
+    params(("repo" = String, Path, description = "The repository"), PutQuery),
     request_body(content = Binary, content_type = "application/octet-stream", description = "The objects, as a pack"),
     responses(
         (status = 200, description = "The objects are durable", body = Stored),
         (status = 400, description = "The pack is invalid, holds an acceptance, or needs objects the repository doesn't have, or has as another kind", body = ApiError),
-        (status = 404, description = "The repository does not exist", body = ApiError)
+        (status = 404, description = "The repository does not exist", body = ApiError),
+        (status = 409, description = "A change of `expect` has other heads now", body = ApiError)
     )
 )]
 async fn put_records(
     repos: Repos,
     Path(repo): Path<RepoName>,
+    Query(query): Query<PutQuery>,
     caller: Caller,
     body: Bytes,
 ) -> Result<Json<Stored>, HttpError> {
     let pack = Pack::decode(&body).map_err(HttpError::Pack)?;
     call(repos, repo, caller, move |service, caller| {
-        service.put_records(caller, pack)
+        service.push(caller, pack, &query.expect.0)
+    })
+    .await
+    .map(Json)
+}
+
+/// Lists what the repository holds of some changes: their revisions,
+/// heads and statements, by id.
+#[utoipa::path(
+    post,
+    path = "/api/v1/repos/{repo}/changes/inventory",
+    operation_id = "inventory",
+    params(("repo" = String, Path, description = "The repository")),
+    request_body = InventoryRequest,
+    responses(
+        (status = 200, description = "An inventory for each change, in the order asked: empty for a change the repository never heard of", body = Vec<Inventory>),
+        (status = 404, description = "The repository does not exist", body = ApiError)
+    )
+)]
+async fn inventory(
+    repos: Repos,
+    Path(repo): Path<RepoName>,
+    caller: Caller,
+    Json(request): Json<InventoryRequest>,
+) -> Result<Json<Vec<Inventory>>, HttpError> {
+    call(repos, repo, caller, move |service, caller| {
+        service.inventory(caller, &request)
     })
     .await
     .map(Json)
@@ -380,7 +413,7 @@ async fn log(
     Query(query): Query<LogQuery>,
 ) -> Result<Json<Vec<LogEntry>>, HttpError> {
     call(repos, repo, caller, move |service, caller| {
-        service.log(caller, &query.target, query.since)
+        service.log(caller, &query)
     })
     .await
     .map(Json)

@@ -78,7 +78,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use origin_platform::{LockedFile, Native};
-use origin_shared::api::{RevisionEntry, Revisions};
+use origin_shared::api::{LogQuery, RevisionEntry, Revisions};
 use origin_shared::{
     AcceptanceId, Base, BlobId, ChangeId, EncodedObject, Kind, Principal, Record, RecordId,
     RepoPath, Revision, RevisionId, Source, Statement, StatementId, TargetId, TargetName, Tree,
@@ -1275,7 +1275,14 @@ impl Workspace {
             (Some(limit), Some(head)) => (head.seq + 1).saturating_sub(limit as u64),
             _ => 0,
         };
-        let log = self.service(None)?.log(&Caller::Owner, &target, since)?;
+        // Bounded too, so acceptances landed since reading the head aren't
+        // printed.
+        let query = LogQuery {
+            target: target.clone(),
+            since,
+            limit: limit.map(|limit| u64::try_from(limit).unwrap_or(u64::MAX)),
+        };
+        let log = self.service(None)?.log(&Caller::Owner, &query)?;
         if target.id() == on {
             for (id, revision) in &stack {
                 let marker = if *id == working_copy.id { '@' } else { '○' };

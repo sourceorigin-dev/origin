@@ -362,6 +362,29 @@ impl<P: Platform> Store<P> {
         Ok(LockedFile::open(&self.platform, &path, LockMode::Shared)?)
     }
 
+    /// The file whose lock makes checking a change's heads and publishing
+    /// revisions that move them one step.
+    const PUSH_LOCK: &str = "push";
+
+    /// Waits for the publication of revisions in progress, and keeps
+    /// others waiting while it's held: every put of revisions takes it,
+    /// checking the heads a push expects first (see
+    /// [`OriginService::push`](crate::service::OriginService::push)), and
+    /// the landing queue, checking that the head it rebases still is the
+    /// change's only one.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the lock file cannot be opened.
+    pub fn lock_pushes(&self) -> Result<LockedFile, StoreError> {
+        let path = self.root.join(Self::PUSH_LOCK);
+        Ok(LockedFile::open(
+            &self.platform,
+            &path,
+            LockMode::Exclusive,
+        )?)
+    }
+
     /// Waits for the writers holding objects, and keeps new ones waiting
     /// while it's held: garbage collection holds it while it finds what
     /// nothing refers to, and deletes it.

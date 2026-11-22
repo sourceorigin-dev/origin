@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 
 use origin_client::{Client, Error, Repo};
 use origin_shared::api::{
-    ErrorCode, EventsQuery, FetchRecords, FetchSnapshot, LandRequest, List, LogQuery, NewTarget,
-    RepoName, StatementsQuery,
+    ErrorCode, EventsQuery, Expected, FetchRecords, FetchSnapshot, InventoryRequest, LandRequest,
+    List, LogQuery, NewTarget, PutQuery, RepoName, StatementsQuery,
 };
 use origin_shared::event::EventKind;
 use origin_shared::landing::{Blocked, Landing, Proposal};
@@ -236,6 +236,7 @@ async fn puts_and_fetches_records() {
         .log(&LogQuery {
             target: TargetName::MAIN,
             since: 0,
+            limit: None,
         })
         .await
         .unwrap();
@@ -320,6 +321,43 @@ async fn puts_refuse_objects_named_as_another_kind() {
     .into_iter()
     .collect();
     assert_eq!(refused(vec![tree.encode()]).await, ErrorCode::BadRequest);
+}
+
+#[tokio::test]
+async fn pushes_compare_and_swap_the_heads_they_saw() {
+    let server = Server::start().await;
+    let repo = &server.demo;
+    let base = main_tip(repo).await;
+    let expect = |heads: &[RevisionId]| PutQuery {
+        expect: List(vec![Expected {
+            change: change(1),
+            heads: heads.to_vec(),
+        }]),
+    };
+    let first = Made::revision(change(1), base, Vec::new(), &[("a", "first")]);
+    repo.push_records(&first.pack(), &expect(&[]))
+        .await
+        .unwrap();
+
+    // Two pushes made from the same view of the change: the second is
+    // refused, and publishes no record.
+    let left = Made::revision(change(1), base, vec![first.id], &[("a", "left")]);
+    let right = Made::revision(change(1), base, vec![first.id], &[("a", "right")]);
+    repo.push_records(&left.pack(), &expect(&[first.id]))
+        .await
+        .unwrap();
+    let error = repo
+        .push_records(&right.pack(), &expect(&[first.id]))
+        .await
+        .unwrap_err();
+    assert_eq!(code(error), ErrorCode::Conflict);
+    let request = InventoryRequest {
+        changes: vec![change(1)],
+    };
+    assert_eq!(repo.inventory(&request).await.unwrap()[0].heads, [left.id]);
+    repo.push_records(&right.pack(), &expect(&[left.id]))
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -478,6 +516,24 @@ async fn reads_statements_and_revisions() {
 
     let error = repo.revisions(change(9)).await.unwrap_err();
     assert_eq!(code(error), ErrorCode::NotFound);
+
+    let inventories = repo
+        .inventory(&InventoryRequest {
+            changes: vec![change(1), change(9)],
+        })
+        .await
+        .unwrap();
+    let [known, unknown] = &inventories[..] else {
+        panic!("{inventories:?}")
+    };
+    assert_eq!(known.revisions, ids);
+    assert_eq!(known.heads, [left.id, right.id]);
+    let mut statements = known.statements.clone();
+    statements.sort();
+    let mut expected = vec![statement.id().into(), flagged[0].id];
+    expected.sort();
+    assert_eq!(statements, expected);
+    assert!(unknown.revisions.is_empty() && unknown.statements.is_empty());
 }
 
 #[tokio::test]
@@ -512,6 +568,7 @@ async fn lands_changes_and_targets() {
         .log(&LogQuery {
             target: TargetName::MAIN,
             since: 1,
+            limit: Some(1),
         })
         .await
         .unwrap();
