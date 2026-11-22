@@ -6,8 +6,8 @@ use std::str::FromStr;
 use super::{DecodeError, Field, ObjectKind, Reader, Record, fields, tagged};
 use crate::name::names;
 use crate::{
-    AcceptanceId, BlobId, Digest, InvalidName, ObjectId, Principal, RepoPath, RevisionId,
-    StatementId, TreeEntry, TreeId,
+    AcceptanceId, BlobId, Digest, InvalidName, ObjectId, ParseIdError, Principal, RepoPath,
+    RevisionId, StatementId, TreeEntry, TreeId,
 };
 
 /// An attributable claim about another record: a check result, a review, a
@@ -170,6 +170,41 @@ impl From<RecordId> for ObjectId {
             RecordId::Statement(id) => id.into(),
             RecordId::Acceptance(id) => id.into(),
         }
+    }
+}
+
+/// `revision:<id>`: the record's kind, then its full id. A snapshot is
+/// `snapshot:<id>`.
+impl fmt::Display for RecordId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let kind = match self {
+            Self::Snapshot(_) => "snapshot",
+            Self::Revision(_) => "revision",
+            Self::Statement(_) => "statement",
+            Self::Acceptance(_) => "acceptance",
+        };
+        write!(f, "{kind}:{}", ObjectId::from(*self))
+    }
+}
+
+/// Parses what [`RecordId`] displays as.
+impl FromStr for RecordId {
+    type Err = ParseIdError;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        let invalid = || ParseIdError {
+            what: "record",
+            input: input.to_owned(),
+        };
+        let (kind, id) = input.split_once(':').ok_or_else(invalid)?;
+        let id: ObjectId = id.parse().map_err(|_| invalid())?;
+        Ok(match kind {
+            "snapshot" => Self::Snapshot(id.into()),
+            "revision" => Self::Revision(id.into()),
+            "statement" => Self::Statement(id.into()),
+            "acceptance" => Self::Acceptance(id.into()),
+            _ => return Err(invalid()),
+        })
     }
 }
 

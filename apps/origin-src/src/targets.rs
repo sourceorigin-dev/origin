@@ -17,7 +17,6 @@
 //! log ahead of the head, or a partial line at its end, the next append
 //! repairs it first, syncing the log before publishing what it holds.
 
-use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::FileExt;
@@ -26,40 +25,16 @@ use std::slice;
 
 use origin_platform::{DurableWrite, LockMode, LockedFile, Platform};
 use origin_shared::{
-    Acceptance, AcceptanceId, Base, Record, Revision, RevisionId, Source, TargetId, TargetName,
+    Acceptance, AcceptanceId, Base, Head, Record, Revision, RevisionId, Source, TargetId,
+    TargetName,
 };
 
 use crate::oplog::Effect;
 use crate::store::{Store, StoreError};
 
-/// The latest acceptance of a target.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Head {
-    /// Its position in the log, from 0.
-    pub seq: u64,
-    /// The acceptance.
-    pub acceptance: AcceptanceId,
-}
-
-impl Head {
-    /// Describes where a target is, for error messages.
-    pub(crate) fn describe(head: Option<Self>) -> String {
-        head.map_or_else(|| "nothing".to_owned(), |head| head.to_string())
-    }
-
-    fn parse(line: &str) -> Option<Self> {
-        let (seq, acceptance) = line.strip_suffix('\n')?.split_once(' ')?;
-        Some(Self {
-            seq: seq.parse().ok()?,
-            acceptance: acceptance.parse().ok()?,
-        })
-    }
-}
-
-impl fmt::Display for Head {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "acceptance {} ({})", self.seq, self.acceptance.short())
-    }
+/// Describes where a target is, for error messages.
+pub(crate) fn describe(head: Option<Head>) -> String {
+    head.map_or_else(|| "nothing".to_owned(), |head| head.to_string())
 }
 
 /// The files of one target.
@@ -100,9 +75,18 @@ impl TargetFiles {
         };
         str::from_utf8(&bytes)
             .ok()
-            .and_then(Head::parse)
+            .and_then(Self::parse_head)
             .map(Some)
             .ok_or(StoreError::Malformed(path))
+    }
+
+    /// Parses `head`'s `<seq> <id>` line.
+    fn parse_head(line: &str) -> Option<Head> {
+        let (seq, acceptance) = line.strip_suffix('\n')?.split_once(' ')?;
+        Some(Head {
+            seq: seq.parse().ok()?,
+            acceptance: acceptance.parse().ok()?,
+        })
     }
 
     /// Parses the complete lines of a log, ignoring a partial last one.

@@ -1,7 +1,9 @@
 //! Types shared by every origin component: the object model, the wire
 //! formats, and the API contracts.
 
+pub mod event;
 mod id;
+pub mod landing;
 mod name;
 pub mod object;
 mod path;
@@ -22,5 +24,5 @@ pub use object::{
 };
 pub use path::RepoPath;
 pub use principal::{Principal, PrincipalName};
-pub use target::TargetName;
+pub use target::{Head, TargetName};
 pub use text::{InvalidPeriod, Period};

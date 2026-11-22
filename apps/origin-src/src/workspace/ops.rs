@@ -20,13 +20,14 @@
 use std::collections::{BTreeMap, HashSet};
 use std::time::Duration;
 
+use origin_shared::event::Filter;
+use origin_shared::landing::Proposal;
 use origin_shared::{Record, RecordId, Revision, RevisionId};
 
 use super::{Workspace, WorkspaceError};
-use crate::events::{Events, Filter};
+use crate::events::Events;
 use crate::index;
 use crate::oplog::{Effect, Entry, Move, Why};
-use crate::queue::Proposal;
 
 impl Workspace {
     /// `origin op log [-n <limit>]`: prints the latest operations of every

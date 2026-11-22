@@ -159,7 +159,10 @@ fn pending_landings_round_trip() {
             issuer: "group:runners".parse().unwrap(),
         }]),
     };
-    assert_eq!(Pending::decode(&pending.encode()), Some(pending.clone()));
+    assert_eq!(
+        PendingFile::decode(&PendingFile::encode(&pending)),
+        Some(pending.clone())
+    );
     let conflict = Pending {
         proposal: change(9),
         blocked: Blocked::Conflict {
@@ -168,8 +171,11 @@ fn pending_landings_round_trip() {
         },
         ..pending
     };
-    assert_eq!(Pending::decode(&conflict.encode()), Some(conflict));
-    assert_eq!(Pending::decode("origin pending 2\n"), None);
+    assert_eq!(
+        PendingFile::decode(&PendingFile::encode(&conflict)),
+        Some(conflict)
+    );
+    assert_eq!(PendingFile::decode("origin pending 2\n"), None);
 }
 
 #[test]

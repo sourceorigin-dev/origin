@@ -8,10 +8,11 @@ use std::io;
 use std::path::PathBuf;
 
 use origin_platform::{LockedFile, Platform};
+use origin_shared::landing::{Blocked, Landing, Pending, Proposal};
 use origin_shared::policy::Requirement;
 use origin_shared::{
-    AcceptanceBody, AcceptanceId, Base, ChangeId, EncodedObject, Kind, Record, RecordId, Revision,
-    RevisionId, Source, StatementId, TargetName, TreeId,
+    AcceptanceBody, AcceptanceId, Base, ChangeId, EncodedObject, Head, Kind, Record, RecordId,
+    Revision, RevisionId, Source, StatementId, TargetName, TreeId,
 };
 
 use crate::ancestry::Ancestry;
@@ -20,9 +21,9 @@ use crate::conflict::Conflicts;
 use crate::oplog::Effect;
 use crate::policy::{Policy, PolicyError};
 use crate::store::{Store, StoreError};
-use crate::targets::Head;
 
-use super::{Blocked, LandError, Landing, Pending, Proposal, Queue};
+use super::pending::PendingFile;
+use super::{LandError, Queue};
 
 /// Landings onto one target, holding its queue's lock.
 pub(super) struct Session<'q, 'a, P> {
@@ -328,7 +329,7 @@ impl<P: Platform> Session<'_, '_, P> {
         let write = self.store().durable_write();
         write.stage(
             self.pending_path(&pending.proposal)?,
-            pending.encode().as_bytes(),
+            PendingFile::encode(pending).as_bytes(),
         )?;
         let waiting = Effect::Waiting {
             onto: pending.onto.clone(),

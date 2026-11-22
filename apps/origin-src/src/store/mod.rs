@@ -36,11 +36,11 @@ use std::time::{Duration, SystemTime};
 
 use origin_platform::{DurableWrite, LockMode, LockedFile, Native, Platform, WritableError};
 use origin_shared::object::{DecodeError, IdMismatch};
-use origin_shared::{EncodedObject, ObjectId, TargetName, TypedId};
+use origin_shared::{EncodedObject, Head, ObjectId, TargetName, TypedId};
 
 use crate::index::Entry;
 use crate::oplog::{Actor, Effect};
-use crate::targets::Head;
+use crate::targets;
 
 pub use packs::Compaction;
 use packs::Packs;
@@ -646,7 +646,7 @@ pub enum StoreError {
     /// got there first.
     #[error(
         "target `{target}` moved: expected acceptance {expected} to follow {}",
-        Head::describe(*actual)
+        targets::describe(*actual)
     )]
     Conflict {
         /// The target.

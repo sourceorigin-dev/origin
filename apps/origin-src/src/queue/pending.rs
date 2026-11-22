@@ -2,11 +2,13 @@
 //! until it can continue.
 
 use origin_shared::RecordId;
+use origin_shared::landing::{Blocked, Pending, Proposal};
 use origin_shared::policy::Requirement;
 
-use super::{Blocked, Pending, Proposal};
+/// The format of the files keeping waiting landings.
+pub(super) struct PendingFile;
 
-impl Pending {
+impl PendingFile {
     /// The first line of every file keeping a waiting landing.
     const HEADER: &str = "origin pending 1";
 
@@ -14,20 +16,20 @@ impl Pending {
     /// <id>` or `target <name>`, `subject <kind> <id>`, then a `missing
     /// <kind> <verdict> <issuer>` line for each requirement it lacks, or
     /// `conflict <statement>`, whose payload lists the paths.
-    pub(super) fn encode(&self) -> String {
-        let mut lines = vec![Self::HEADER.to_owned(), format!("onto {}", self.onto)];
-        lines.push(match &self.proposal {
+    pub(super) fn encode(pending: &Pending) -> String {
+        let mut lines = vec![Self::HEADER.to_owned(), format!("onto {}", pending.onto)];
+        lines.push(match &pending.proposal {
             Proposal::Change(change) => format!("change {change}"),
             Proposal::Target(target) => format!("target {target}"),
         });
-        let (kind, id) = match self.subject {
+        let (kind, id) = match pending.subject {
             RecordId::Snapshot(id) => ("snapshot", id.to_hex()),
             RecordId::Revision(id) => ("revision", id.to_hex()),
             RecordId::Statement(id) => ("statement", id.to_hex()),
             RecordId::Acceptance(id) => ("acceptance", id.to_hex()),
         };
         lines.push(format!("subject {kind} {id}"));
-        match &self.blocked {
+        match &pending.blocked {
             Blocked::Evidence(missing) => lines.extend(missing.iter().map(|requirement| {
                 format!(
                     "missing {} {} {}",
@@ -39,9 +41,9 @@ impl Pending {
         lines.join("\n") + "\n"
     }
 
-    /// Decodes what [`Pending::encode`] wrote, without the conflicting
+    /// Decodes what [`PendingFile::encode`] wrote, without the conflicting
     /// paths, or `None` if it's malformed.
-    pub(super) fn decode(text: &str) -> Option<Self> {
+    pub(super) fn decode(text: &str) -> Option<Pending> {
         let mut lines = text.lines();
         if lines.next()? != Self::HEADER {
             return None;
@@ -82,7 +84,7 @@ impl Pending {
             },
             None => Blocked::Evidence(missing),
         };
-        Some(Self {
+        Some(Pending {
             onto,
             proposal,
             subject,
