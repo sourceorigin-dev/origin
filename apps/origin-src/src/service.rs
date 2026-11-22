@@ -787,20 +787,27 @@ impl OriginService {
             if self.store.contains(*id)? {
                 continue;
             }
-            let Object::Statement(statement) = record else {
-                continue;
-            };
-            if !Policy::authorizes_admin(batch, statement, admin(&statement.issuer))? {
-                return Err(ServiceError::Statement {
-                    id: (*id).into(),
-                    source: Box::new(AnnotateError::Reserved {
-                        kind: statement.kind.clone(),
-                        issuer: statement.issuer.clone(),
-                    }),
-                });
-            }
-            if let Some(writer) = &mut writer {
-                writer.statement(statement)?;
+            match record {
+                Object::Revision(revision) => {
+                    if let Some(writer) = &mut writer {
+                        writer.revision((*id).into(), revision)?;
+                    }
+                }
+                Object::Statement(statement) => {
+                    if !Policy::authorizes_admin(batch, statement, admin(&statement.issuer))? {
+                        return Err(ServiceError::Statement {
+                            id: (*id).into(),
+                            source: Box::new(AnnotateError::Reserved {
+                                kind: statement.kind.clone(),
+                                issuer: statement.issuer.clone(),
+                            }),
+                        });
+                    }
+                    if let Some(writer) = &mut writer {
+                        writer.statement(statement)?;
+                    }
+                }
+                _ => {}
             }
         }
         Ok(())

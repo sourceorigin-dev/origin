@@ -14,12 +14,15 @@
 //! names for every caller; and they must see what it's about, and for a promotion, its original: so no
 //! one copies a result they can't read.
 //!
-//! No one reads an attachment by naming its id: a record that carries one
+//! A revision evolves only from revisions they see. It may only hold
+//! content they supply or that a snapshot it refers to holds at the same
+//! path (see [`Store::unsupplied`]): so no one reads a file by placing its
+//! id where they may read. Nor an attachment: a record that carries one
 //! the repository has, as a description or a payload, brings it, but for
 //! a promotion, which carries its original's. The records of a batch are
-//! read before the store's (see [`Batch`]), so a batch may hold revisions
-//! and statements about them; those it brings anew are the caller's to
-//! see, but not one the store had.
+//! read before the store's (see [`Batch`]), so a batch may hold a stack of
+//! revisions and statements about them; those it brings anew are the
+//! caller's to see, but not one the store had.
 
 use std::collections::{HashMap, HashSet};
 use std::iter;
@@ -28,7 +31,7 @@ use origin_platform::Platform;
 use origin_shared::access::{Capability, PathAccess, Rights};
 use origin_shared::event::EventKind;
 use origin_shared::{
-    Kind, Object, ObjectId, Principal, RecordId, RepoPath, Revision, RevisionId, Statement,
+    Base, Kind, Object, ObjectId, Principal, RecordId, RepoPath, Revision, RevisionId, Statement,
 };
 
 use crate::annotations::RevisionView;
@@ -275,6 +278,45 @@ impl<'a, P: Platform> Writer<'a, P> {
         }
         Ok(())
     }
+
+    /// Checks a revision put, whose objects are written.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the caller isn't its author; they don't see a revision it
+    /// evolves from; or it holds content they neither supplied nor share
+    /// with a snapshot it refers to; or if a tree cannot be read.
+    pub fn revision(&mut self, id: RevisionId, revision: &Revision) -> Result<(), PutError> {
+        if revision.author != *self.principal {
+            return Err(Forbidden::NotYours {
+                record: "revision",
+                by: revision.author.clone(),
+                caller: self.principal.clone(),
+            }
+            .into());
+        }
+        let base = match revision.base {
+            Base::Revision(id) => self.batch.revision(id)?.snapshot,
+            Base::Acceptance(_) => self.batch.store.base_snapshot(revision.base)?,
+        };
+        let mut references = vec![base];
+        for &id in &revision.predecessors {
+            if !self.sees(RecordId::Revision(id))? {
+                return Err(PutError::Unseen(RecordId::Revision(id)));
+            }
+            references.push(self.batch.revision(id)?.snapshot);
+        }
+        self.brings("revision", revision.description.into())?;
+        if !self.rights.paths.reads_all() {
+            let store = self.batch.store;
+            let unsupplied =
+                store.unsupplied(revision.snapshot, &references, &self.batch.supplied)?;
+            if let Some(path) = unsupplied {
+                return Err(Forbidden::Unsupplied { revision: id, path }.into());
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Something a caller may not do.
@@ -302,6 +344,19 @@ pub enum Forbidden {
     /// A path the caller may not read.
     #[error("you may not read `{0}`")]
     Read(RepoPath),
+    /// A revision holds content its writer didn't supply, at a path where
+    /// no snapshot it refers to has it.
+    #[error(
+        "revision {} holds content at `{path}` that it neither brings nor shares with a \
+         snapshot it refers to",
+        revision.short()
+    )]
+    Unsupplied {
+        /// The revision.
+        revision: RevisionId,
+        /// The path.
+        path: RepoPath,
+    },
     /// A record carries an attachment the repository has, as a revision's
     /// description or a statement's payload, that its writer didn't bring.
     #[error("the {record} carries attachment {attachment}, which it doesn't bring")]
@@ -335,16 +390,20 @@ pub enum PutError {
 mod tests {
     use std::sync::Arc;
 
+    use origin_platform::Native;
+    use origin_shared::api::{FetchSnapshot, LandRequest};
+    use origin_shared::landing::{Landing, Proposal};
     use origin_shared::pack::Pack;
     use origin_shared::{
-        AttachmentId, Base, ChangeId, EncodedObject, NodeKey, ObjectKind, Record, Revision,
-        Statement, TargetName, TreeEntry, TreeId,
+        AttachmentId, Base, ChangeId, EncodedObject, EntryKind, EntryName, NodeKey, ObjectKind,
+        Record, Revision, Statement, TargetName, Tree, TreeEntry, TreeId,
     };
 
     use super::*;
     use crate::queue::tests::Repo;
     use crate::service::{Node, OriginService, ServiceError};
     use crate::tree::Snapshots;
+    use crate::tree::tests::build;
 
     /// Ada writes everything and changes the rules. Eve reads all but
     /// `secrets`, writes only `src`, and issues reviews and checks. Both
@@ -406,6 +465,21 @@ grants = { all = "none", "user:ada" = "write" }
             self.repo.store.base_snapshot(self.tip(target)).unwrap()
         }
 
+        /// The objects of a snapshot of `files`, and its id, without
+        /// writing them.
+        fn objects(files: &[(&str, &str)]) -> (TreeId, Vec<EncodedObject>) {
+            let dir = tempfile::tempdir().unwrap();
+            let scratch = Store::new(dir.path().join(".origin"), Native::default());
+            scratch.init().unwrap();
+            let blobs: Vec<_> = files
+                .iter()
+                .map(|(_, content)| EncodedObject::blob(content.as_bytes()))
+                .collect();
+            scratch.write_all(&blobs).unwrap();
+            let tree = build(&scratch, files);
+            (tree, scratch.read_all(&scratch.ids().unwrap()).unwrap())
+        }
+
         /// A revision of `change` by `author` with `snapshot` on `base`, and
         /// its description.
         fn revision(
@@ -433,6 +507,14 @@ grants = { all = "none", "user:ada" = "write" }
             self.service
                 .put_records(caller, Pack { objects })
                 .map(|_| ())
+        }
+
+        fn land(&self, caller: &Caller, proposal: Proposal) -> Result<Vec<Landing>, ServiceError> {
+            let request = LandRequest {
+                proposal,
+                onto: Some(TargetName::MAIN),
+            };
+            Ok(self.service.land(caller, &request)?.landings)
         }
 
         /// What `main` holds at `path`.
@@ -522,6 +604,104 @@ grants = { all = "none", "user:ada" = "write" }
             .unwrap();
         let fetched = fixture.service.records(&eve, &[crafted.id()]).unwrap();
         assert_eq!(fetched.pack.objects, [crafted]);
+    }
+
+    #[test]
+    fn pushes_cannot_place_unreadable_objects_where_they_read() {
+        let fixture = Fixture::new();
+        let eve = caller("user:eve");
+        let base = fixture.tip(&TargetName::MAIN);
+        let state = fixture.state(&TargetName::MAIN);
+        let secret = fixture.at_main("secrets/key").unwrap();
+        let store = &fixture.repo.store;
+
+        // `main`, with the secret's blob placed in `src`, which eve writes.
+        let mut src: Tree = store
+            .get(fixture.at_main("src").unwrap().subtree().unwrap())
+            .unwrap();
+        src.insert(EntryName::new("stolen").unwrap(), secret);
+        let src = src.encode();
+        let mut root: Tree = store.get(state).unwrap();
+        let entry = TreeEntry {
+            kind: EntryKind::Tree,
+            id: src.id(),
+        };
+        root.insert(EntryName::new("src").unwrap(), entry);
+        let root = root.encode();
+        let (id, records) = Fixture::revision(2, "user:eve", base, Vec::new(), root.id().into());
+        let mut objects = vec![src, root];
+        objects.extend(records);
+        let error = forbidden(fixture.put(&eve, objects));
+        assert_eq!(
+            error,
+            Forbidden::Unsupplied {
+                revision: id,
+                path: path("src/stolen"),
+            }
+        );
+        assert!(!store.contains(id.into()).unwrap());
+
+        // Nor walk a tree within a snapshot as if it were one.
+        let request = FetchSnapshot {
+            of: RecordId::Snapshot(fixture.at_main("secrets").unwrap().subtree().unwrap()),
+            have: Vec::new(),
+            paths: Vec::new(),
+            skip: 0,
+        };
+        assert!(matches!(
+            fixture.service.snapshot(&eve, &request),
+            Err(ServiceError::NotASnapshot(_))
+        ));
+
+        // Content eve brings herself is hers to place.
+        let mut files = vec![("README.md", "hello"), ("src/lib.rs", "fn a() {}")];
+        files.push(("src/own.rs", "hunter2"));
+        let (tree, mut objects) = Fixture::objects(&files);
+        // The paths eve can't read stay as they are.
+        let (tree, trees) = {
+            let mut root: Tree = objects
+                .iter()
+                .find(|object| object.id() == tree.into())
+                .unwrap()
+                .decode_as()
+                .unwrap();
+            for kept in ["secrets", "protected"] {
+                root.insert(
+                    EntryName::new(kept).unwrap(),
+                    fixture.at_main(kept).unwrap(),
+                );
+            }
+            let root = root.encode();
+            (TreeId::from(root.id()), vec![root])
+        };
+        objects.extend(trees);
+        let (_, records) = Fixture::revision(3, "user:eve", base, Vec::new(), tree);
+        objects.extend(records);
+        fixture.put(&eve, objects).unwrap();
+    }
+
+    #[test]
+    fn only_those_who_see_a_revision_succeed_it() {
+        let fixture = Fixture::new();
+        let adas = fixture
+            .repo
+            .change_on_main(30, &[("secrets/key", "rotated")]);
+        let base = fixture.tip(&TargetName::MAIN);
+        // Eve, who doesn't read `secrets`, makes the head of ada's change
+        // her own, changing nothing, to abandon it.
+        let state = fixture.state(&TargetName::MAIN);
+        let (eves, mut objects) = Fixture::revision(30, "user:eve", base, vec![adas], state);
+        objects.push(statement(RecordId::Revision(eves), "core.abandon", "user:eve").encode());
+        let blind = scoped("user:eve", &[], in_a_week());
+        assert!(fixture.put(&blind, objects.clone()).is_err());
+        let put = fixture.put(&caller("user:eve"), objects);
+        assert!(
+            matches!(put, Err(ServiceError::UnknownRecord(record)) if record == RecordId::Revision(adas)),
+            "{put:?}"
+        );
+        let change = Proposal::Change(ChangeId::from_bytes([30; 16]));
+        let landed = fixture.land(&caller("user:ada"), change).unwrap();
+        assert!(matches!(landed[..], [Landing::Landed { .. }]), "{landed:?}");
     }
 
     #[test]
@@ -691,6 +871,30 @@ grants = { all = "none", "user:ada" = "write" }
         let mut batch = records;
         batch.push(abandon(RecordId::Revision(mine)));
         fixture.put(&eve, batch).unwrap();
+    }
+
+    #[test]
+    fn batches_hold_stacks_and_statements_about_them() {
+        let fixture = Fixture::new();
+        let main = fixture.tip(&TargetName::MAIN);
+        let files = [
+            ("README.md", "hello"),
+            ("src/lib.rs", "fn a() {}"),
+            ("secrets/key", "hunter2"),
+            ("protected/file", "keep"),
+        ];
+        let (lower_tree, mut objects) =
+            Fixture::objects(&[&files[..], &[("src/a.rs", "a")]].concat());
+        let (lower, records) = Fixture::revision(2, "user:eve", main, Vec::new(), lower_tree);
+        objects.extend(records);
+        let (upper_tree, more) =
+            Fixture::objects(&[&files[..], &[("src/a.rs", "a"), ("src/b.rs", "b")]].concat());
+        objects.extend(more);
+        let (upper, records) =
+            Fixture::revision(3, "user:eve", Base::Revision(lower), Vec::new(), upper_tree);
+        objects.extend(records);
+        objects.push(statement(RecordId::Revision(upper), "review", "user:eve").encode());
+        fixture.put(&caller("user:eve"), objects).unwrap();
     }
 
     #[test]
