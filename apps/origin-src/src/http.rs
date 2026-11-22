@@ -18,9 +18,10 @@ use origin_shared::ChangeId;
 use origin_shared::Head;
 use origin_shared::access::{InvalidToken, Rights};
 use origin_shared::api::{
-    Annotation, ApiError, ErrorCode, EventsQuery, FetchRecords, FetchSnapshot, Inventory,
-    InventoryRequest, IssuedToken, LandRequest, Landings, LogEntry, LogQuery, MORE, NewTarget,
-    PutQuery, RepoName, RepoSummary, Revisions, StatementsQuery, Stored, TargetInfo, TokenRequest,
+    Annotation, ApiError, BrowseQuery, ErrorCode, EventsQuery, FetchRecords, FetchSnapshot,
+    Inventory, InventoryRequest, IssuedToken, LandRequest, Landings, Listing, LogEntry, LogQuery,
+    MORE, NewTarget, PutQuery, RepoName, RepoSummary, Revisions, StatementsQuery, Stored,
+    TargetInfo, TokenRequest,
 };
 use origin_shared::event::Page;
 use origin_shared::landing::Pending;
@@ -70,6 +71,8 @@ impl Api {
             .routes(routes!(events))
             .routes(routes!(whoami))
             .routes(routes!(issue_token))
+            .routes(routes!(tree))
+            .routes(routes!(file))
             .routes(routes!(openapi_document))
     }
 
@@ -572,6 +575,63 @@ async fn issue_token(
     })
     .await
     .map(Json)
+}
+
+/// Lists a directory of a snapshot: a target's tip, or a revision's or an
+/// acceptance's. Withheld entries keep their place.
+#[utoipa::path(
+    get,
+    path = "/api/v1/repos/{repo}/tree",
+    operation_id = "tree",
+    params(("repo" = String, Path, description = "The repository"), BrowseQuery),
+    responses(
+        (status = 200, description = "The directory's entries", body = Listing),
+        (status = 400, description = "The path is a file, or the record has no snapshot", body = ApiError),
+        (status = 403, description = "The caller reads nothing under the path", body = ApiError),
+        (status = 404, description = "The repository, the target, the record or the path does not exist", body = ApiError)
+    )
+)]
+async fn tree(
+    repos: Repos,
+    Path(repo): Path<RepoName>,
+    caller: Caller,
+    Query(query): Query<BrowseQuery>,
+) -> Result<Json<Listing>, HttpError> {
+    call(repos, repo, caller, move |service, caller| {
+        service.tree(caller, &query)
+    })
+    .await
+    .map(Json)
+}
+
+/// Reads a file of a snapshot, as `tree` finds it.
+#[utoipa::path(
+    get,
+    path = "/api/v1/repos/{repo}/file",
+    operation_id = "file",
+    params(("repo" = String, Path, description = "The repository"), BrowseQuery),
+    responses(
+        (status = 200, description = "The file's content", content_type = "application/octet-stream", body = Binary),
+        (status = 400, description = "The path is a directory, or the record has no snapshot", body = ApiError),
+        (status = 403, description = "The caller may not read the file", body = ApiError),
+        (status = 404, description = "The repository, the target, the record or the path does not exist", body = ApiError)
+    )
+)]
+async fn file(
+    repos: Repos,
+    Path(repo): Path<RepoName>,
+    caller: Caller,
+    Query(query): Query<BrowseQuery>,
+) -> Result<Response, HttpError> {
+    let content = call(repos, repo, caller, move |service, caller| {
+        service.file(caller, &query)
+    })
+    .await?;
+    Ok((
+        [(header::CONTENT_TYPE, "application/octet-stream")],
+        content,
+    )
+        .into_response())
 }
 
 /// The OpenAPI document of this API.

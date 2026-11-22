@@ -144,6 +144,9 @@ pub enum Forbidden {
     /// The owner has no principal to issue a token for.
     #[error("only a signed-in caller gets a token, for themselves")]
     NoPrincipal,
+    /// A path the caller may not read.
+    #[error("you may not read `{0}`")]
+    Read(RepoPath),
     /// A token's scope reaches beyond its issuer's rights.
     #[error("a token may only narrow your rights, which don't include `{0}`")]
     Scope(Capability),

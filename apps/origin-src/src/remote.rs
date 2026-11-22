@@ -14,9 +14,9 @@ use origin_client::Client;
 use origin_shared::Head;
 use origin_shared::access::Rights;
 use origin_shared::api::{
-    ErrorCode, EventsQuery, FetchRecords, FetchSnapshot, Inventory, InventoryRequest, IssuedToken,
-    LandRequest, Landings, LogEntry, LogQuery, NewTarget, PutQuery, RepoName, Stored, TargetInfo,
-    TokenRequest,
+    BrowseQuery, ErrorCode, EventsQuery, FetchRecords, FetchSnapshot, Inventory, InventoryRequest,
+    IssuedToken, LandRequest, Landings, Listing, LogEntry, LogQuery, NewTarget, PutQuery, RepoName,
+    Stored, TargetInfo, TokenRequest,
 };
 use origin_shared::event::Page;
 use origin_shared::landing::Pending;
@@ -99,6 +99,10 @@ calls! {
     /// Issues a token acting for the user, with a narrower scope.
     fn issue_token(request: &TokenRequest) -> IssuedToken =
         issue_token(request), issue_token(request);
+    /// Lists a directory of a snapshot.
+    fn tree(query: &BrowseQuery) -> Listing = tree(query), tree(query);
+    /// Reads a file of a snapshot.
+    fn file(query: &BrowseQuery) -> Vec<u8> = file(query), file(query);
 }
 
 impl Remote {

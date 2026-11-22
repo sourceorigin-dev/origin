@@ -265,6 +265,83 @@
         }
       }
     },
+    "/api/v1/repos/{repo}/file": {
+      "get": {
+        "summary": "Reads a file of a snapshot, as `tree` finds it.",
+        "operationId": "file",
+        "parameters": [
+          {
+            "name": "repo",
+            "in": "path",
+            "description": "The repository",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "at",
+            "in": "query",
+            "description": "The snapshot: a target, such as `main`, or `revision:<id>` or\n`acceptance:<id>`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "description": "The directory or file: the root by default.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The file's content",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/Binary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The path is a directory, or the record has no snapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read the file",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The repository, the target, the record or the path does not exist",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/repos/{repo}/land": {
       "post": {
         "summary": "Submits a change, or a target's tip, to a target's landing queue, run\nby this server.",
@@ -861,6 +938,83 @@
         }
       }
     },
+    "/api/v1/repos/{repo}/tree": {
+      "get": {
+        "summary": "Lists a directory of a snapshot: a target's tip, or a revision's or an\nacceptance's. Withheld entries keep their place.",
+        "operationId": "tree",
+        "parameters": [
+          {
+            "name": "repo",
+            "in": "path",
+            "description": "The repository",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "at",
+            "in": "query",
+            "description": "The snapshot: a target, such as `main`, or `revision:<id>` or\n`acceptance:<id>`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "description": "The directory or file: the root by default.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The directory's entries",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Listing"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The path is a file, or the record has no snapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller reads nothing under the path",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The repository, the target, the record or the path does not exist",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/repos/{repo}/whoami": {
       "get": {
         "summary": "Tells the caller who they are and what they may do in the repository.",
@@ -1161,6 +1315,18 @@
         "type": "string",
         "examples": [
           "48fc721fbbc172e0925fa27af1671de225ba927134802998b10a1568a188652b"
+        ]
+      },
+      "EntryKind": {
+        "type": "string",
+        "examples": [
+          "file"
+        ]
+      },
+      "EntryName": {
+        "type": "string",
+        "examples": [
+          "main.rs"
         ]
       },
       "ErrorCode": {
@@ -1648,6 +1814,60 @@
           "read",
           "write"
         ]
+      },
+      "Listed": {
+        "type": "object",
+        "description": "An entry of a [`Listing`].",
+        "required": [
+          "name",
+          "kind",
+          "id",
+          "withheld"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/ObjectId",
+            "description": "Its object."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/EntryKind",
+            "description": "A file, an executable, a symlink or a directory."
+          },
+          "name": {
+            "$ref": "#/components/schemas/EntryName",
+            "description": "Its name."
+          },
+          "withheld": {
+            "type": "boolean",
+            "description": "Whether its content is withheld from the caller: it keeps its\nplace, but can't be read."
+          }
+        }
+      },
+      "Listing": {
+        "type": "object",
+        "description": "A directory of a snapshot.",
+        "required": [
+          "snapshot",
+          "path",
+          "entries"
+        ],
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Listed"
+            },
+            "description": "Its entries, sorted by name."
+          },
+          "path": {
+            "$ref": "#/components/schemas/RepoPath",
+            "description": "The directory."
+          },
+          "snapshot": {
+            "$ref": "#/components/schemas/TreeId",
+            "description": "The snapshot's root tree."
+          }
+        }
       },
       "LogEntry": {
         "type": "object",

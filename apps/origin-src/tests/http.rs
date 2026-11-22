@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 
 use origin_client::{Client, Error, Repo};
 use origin_shared::api::{
-    ErrorCode, EventsQuery, Expected, FetchRecords, FetchSnapshot, InventoryRequest, LandRequest,
-    List, LogQuery, NewTarget, PutQuery, RepoName, StatementsQuery, TokenRequest,
+    BrowseQuery, ErrorCode, EventsQuery, Expected, FetchRecords, FetchSnapshot, InventoryRequest,
+    LandRequest, List, LogQuery, NewTarget, PutQuery, RepoName, StatementsQuery, TokenRequest,
 };
 use origin_shared::event::EventKind;
 use origin_shared::landing::{Blocked, Landing, Proposal};
@@ -867,6 +867,69 @@ async fn tells_callers_what_they_may_do_and_issues_narrower_tokens() {
         .await
         .unwrap_err();
     assert_eq!(code(error), ErrorCode::Forbidden);
+}
+
+#[tokio::test]
+async fn browses_snapshots_without_their_history() {
+    let server = Server::start().await;
+    let made = land_on_strict(
+        &server,
+        1,
+        &[
+            ("README.md", "hello"),
+            ("secrets/key", "hunter2"),
+            ("src/lib.rs", "fn a() {}"),
+        ],
+    )
+    .await;
+    let at = |at: &str, path: &str| BrowseQuery {
+        at: at.parse().unwrap(),
+        path: RepoPath::new(path).unwrap(),
+    };
+    let root = server.strict.tree(&at("main", "/")).await.unwrap();
+    let names: Vec<_> = root
+        .entries
+        .iter()
+        .map(|entry| (entry.name.as_str(), entry.kind, entry.withheld))
+        .collect();
+    assert_eq!(
+        names,
+        [
+            ("README.md", EntryKind::File, false),
+            ("secrets", EntryKind::Tree, false),
+            ("src", EntryKind::Tree, false),
+        ]
+    );
+    let revision = format!("revision:{}", made.id);
+    assert_eq!(
+        server
+            .strict
+            .file(&at(&revision, "secrets/key"))
+            .await
+            .unwrap(),
+        b"hunter2"
+    );
+
+    // Others see that the secret is there, but not what it is.
+    let anonymous = &server.anonymous;
+    let root = anonymous.tree(&at("main", "")).await.unwrap();
+    assert!(root.entries[1].withheld, "{root:?}");
+    assert_eq!(
+        anonymous.file(&at("main", "README.md")).await.unwrap(),
+        b"hello"
+    );
+    for path in ["secrets/key", "secrets"] {
+        let error = anonymous.file(&at("main", path)).await.unwrap_err();
+        assert_eq!(code(error), ErrorCode::Forbidden, "{path}");
+    }
+    let error = anonymous.tree(&at("main", "secrets")).await.unwrap_err();
+    assert_eq!(code(error), ErrorCode::Forbidden);
+    let error = anonymous.tree(&at("main", "README.md")).await.unwrap_err();
+    assert_eq!(code(error), ErrorCode::BadRequest);
+    let error = anonymous.file(&at("main", "missing")).await.unwrap_err();
+    assert_eq!(code(error), ErrorCode::NotFound);
+    let error = anonymous.tree(&at("nowhere", "")).await.unwrap_err();
+    assert_eq!(code(error), ErrorCode::NotFound);
 }
 
 #[tokio::test]

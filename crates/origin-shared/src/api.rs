@@ -12,8 +12,9 @@ use crate::landing::{Landing, Proposal};
 use crate::policy::{KindPattern, Requirement};
 use crate::text::Period;
 use crate::{
-    Acceptance, AcceptanceId, ChangeId, Head, ObjectId, Principal, PrincipalName, RecordId,
-    RepoPath, Revision, RevisionId, Statement, StatementId, TargetName, TreeId,
+    Acceptance, AcceptanceId, ChangeId, EntryKind, EntryName, Head, ObjectId, Principal,
+    PrincipalName, RecordId, RepoPath, Revision, RevisionId, Statement, StatementId, TargetName,
+    TreeId,
 };
 
 /// The name of a repository on a server: ASCII letters, digits, `.`, `_`
@@ -437,6 +438,82 @@ pub struct IssuedToken {
     pub principal: Principal,
     /// When it expires, in seconds since the Unix epoch.
     pub expires: u64,
+}
+
+/// A snapshot to browse: a target's tip, `main`, or a record's,
+/// `revision:<id>` or `acceptance:<id>`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum At {
+    /// The tip of a target.
+    Target(TargetName),
+    /// The snapshot of a revision or an acceptance.
+    Record(RecordId),
+}
+
+impl FromStr for At {
+    type Err = String;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        if input.contains(':') {
+            input
+                .parse()
+                .map(Self::Record)
+                .map_err(|error: crate::ParseIdError| error.to_string())
+        } else {
+            input
+                .parse()
+                .map(Self::Target)
+                .map_err(|error: crate::InvalidName| error.to_string())
+        }
+    }
+}
+
+impl fmt::Display for At {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Target(target) => target.fmt(f),
+            Self::Record(record) => record.fmt(f),
+        }
+    }
+}
+
+/// Asks for a directory or a file of a snapshot.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct BrowseQuery {
+    /// The snapshot: a target, such as `main`, or `revision:<id>` or
+    /// `acceptance:<id>`.
+    #[param(value_type = String)]
+    pub at: At,
+    /// The directory or file: the root by default.
+    #[serde(default)]
+    #[param(value_type = Option<String>)]
+    pub path: RepoPath,
+}
+
+/// A directory of a snapshot.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct Listing {
+    /// The snapshot's root tree.
+    pub snapshot: TreeId,
+    /// The directory.
+    pub path: RepoPath,
+    /// Its entries, sorted by name.
+    pub entries: Vec<Listed>,
+}
+
+/// An entry of a [`Listing`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct Listed {
+    /// Its name.
+    pub name: EntryName,
+    /// A file, an executable, a symlink or a directory.
+    pub kind: EntryKind,
+    /// Its object.
+    pub id: ObjectId,
+    /// Whether its content is withheld from the caller: it keeps its
+    /// place, but can't be read.
+    pub withheld: bool,
 }
 
 /// What went wrong with a request.

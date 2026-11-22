@@ -29,9 +29,9 @@ use std::time::Duration;
 use origin_platform::Native;
 use origin_shared::access::{PathAccess, Rights, Token};
 use origin_shared::api::{
-    Annotation, ErrorCode, EventsQuery, Expected, FetchSnapshot, Inventory, InventoryRequest,
-    IssuedToken, LandRequest, Landings, LogEntry, LogQuery, NewTarget, RevisionEntry, Revisions,
-    Stored, TargetInfo, TokenRequest,
+    Annotation, At, BrowseQuery, ErrorCode, EventsQuery, Expected, FetchSnapshot, Inventory,
+    InventoryRequest, IssuedToken, LandRequest, Landings, Listed, Listing, LogEntry, LogQuery,
+    NewTarget, RevisionEntry, Revisions, Stored, TargetInfo, TokenRequest,
 };
 use origin_shared::event::{EventKind, Filter, Page};
 use origin_shared::landing::{Pending, Proposal};
@@ -39,7 +39,7 @@ use origin_shared::object::DecodeError;
 use origin_shared::pack::{Pack, Packer, Part};
 use origin_shared::{
     AcceptanceId, Base, ChangeId, Head, Kind, NodeKey, Object, ObjectId, ObjectKind, Principal,
-    PrincipalName, RecordId, RepoPath, Statement, StatementId, TargetName, TreeId,
+    PrincipalName, RecordId, RepoPath, Statement, StatementId, TargetName, TreeEntry, TreeId,
 };
 
 use crate::annotations::{AnnotateError, Annotations};
@@ -50,6 +50,7 @@ use crate::permissions::{Forbidden, Reader};
 use crate::policy::{Policy, PolicyError};
 use crate::queue::{LandError, Queue};
 use crate::store::{Store, StoreError};
+use crate::tree::Snapshots;
 
 /// A node: its name, and the key it signs acceptances with as the
 /// authority of the targets its repositories' policies name it for. A
@@ -448,6 +449,89 @@ impl OriginService {
             return Ok(None);
         }
         Ok(Some(&rights.paths))
+    }
+
+    /// What `query` names, a directory or file of a snapshot the caller
+    /// sees, the snapshot, and what it withholds from the caller.
+    fn browse(
+        &self,
+        caller: &Caller,
+        query: &BrowseQuery,
+    ) -> Result<(Option<PathAccess>, TreeId, TreeEntry), ServiceError> {
+        let rights = self.rights(caller)?;
+        let record = match &query.at {
+            At::Target(target) => {
+                let head = self
+                    .store
+                    .head(target)?
+                    .ok_or_else(|| ServiceError::UnknownTarget(target.clone()))?;
+                RecordId::Acceptance(head.acceptance)
+            }
+            &At::Record(record) => record,
+        };
+        let snapshot = self.snapshot_of(&mut Reader::new(&self.store, &rights.paths), record)?;
+        let withheld = self.filter(&rights, record)?.cloned();
+        let entry = Snapshots::new(&self.store)
+            .entry_at(snapshot, &query.path)?
+            .ok_or_else(|| ServiceError::NoSuchPath(query.path.clone()))?;
+        if withheld
+            .as_ref()
+            .is_some_and(|access| !access.reads_entry(&query.path, &entry))
+        {
+            return Err(Forbidden::Read(query.path.clone()).into());
+        }
+        Ok((withheld, snapshot, entry))
+    }
+
+    /// Lists a directory of a snapshot: of a target's tip, or of a revision
+    /// or an acceptance the caller sees. Entries whose content is withheld
+    /// from the caller keep their place, marked.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the target or record doesn't exist or isn't seen, the path
+    /// isn't a directory, the caller reads nothing under it, or a tree
+    /// cannot be read.
+    pub fn tree(&self, caller: &Caller, query: &BrowseQuery) -> Result<Listing, ServiceError> {
+        let (withheld, snapshot, entry) = self.browse(caller, query)?;
+        let tree = entry
+            .subtree()
+            .ok_or_else(|| ServiceError::NotADirectory(query.path.clone()))?;
+        let entries = self
+            .store
+            .get(tree)?
+            .iter()
+            .map(|(name, &entry)| Listed {
+                name: name.clone(),
+                kind: entry.kind,
+                id: entry.id,
+                withheld: withheld
+                    .as_ref()
+                    .is_some_and(|access| !access.reads_entry(&query.path.join(name), &entry)),
+            })
+            .collect();
+        Ok(Listing {
+            snapshot,
+            path: query.path.clone(),
+            entries,
+        })
+    }
+
+    /// The content of a file of a snapshot, as [`OriginService::tree`]
+    /// finds it, which the caller must read.
+    ///
+    /// # Errors
+    ///
+    /// Fails like [`OriginService::tree`], or if the path isn't a file.
+    pub fn file(&self, caller: &Caller, query: &BrowseQuery) -> Result<Vec<u8>, ServiceError> {
+        let (_, _, entry) = self.browse(caller, query)?;
+        if entry.kind.is_tree() {
+            return Err(ServiceError::NotAFile(query.path.clone()));
+        }
+        Ok(self
+            .store
+            .try_blob(entry.id)?
+            .ok_or(StoreError::NotFound(entry.id))?)
     }
 
     /// What the repository holds of each change that the caller sees: its
@@ -1072,6 +1156,15 @@ pub enum ServiceError {
     /// A snapshot was asked of a record that has none.
     #[error("{0} has no snapshot: name a revision or an acceptance")]
     NotASnapshot(RecordId),
+    /// A snapshot has nothing at a path.
+    #[error("nothing is at `{0}`")]
+    NoSuchPath(RepoPath),
+    /// A path listed is a file.
+    #[error("`{0}` is not a directory")]
+    NotADirectory(RepoPath),
+    /// A path read is a directory.
+    #[error("`{0}` is not a file")]
+    NotAFile(RepoPath),
     /// An object put refers to one as an object of another kind: a
     /// snapshot that isn't a tree, a file that is one, a description that
     /// isn't an attachment.
@@ -1156,10 +1249,13 @@ impl ServiceError {
             | Self::UnknownChange(_)
             | Self::UnknownTarget(_)
             | Self::UnknownSnapshot(_)
-            | Self::UnknownRecord(_) => ErrorCode::NotFound,
+            | Self::UnknownRecord(_)
+            | Self::NoSuchPath(_) => ErrorCode::NotFound,
             Self::NoTarget
             | Self::NotARecord(_)
             | Self::NotASnapshot(_)
+            | Self::NotADirectory(_)
+            | Self::NotAFile(_)
             | Self::WrongKind { .. }
             | Self::Malformed { .. }
             | Self::Acceptance(_)
