@@ -611,7 +611,9 @@ impl OriginService {
     /// may only change what they write, as
     /// [`permissions`](crate::permissions) explains. Records are read from
     /// the pack before the repository, so a pack may hold a stack. The blobs and trees
-    /// are durable before the records that refer to them, statements before
+    /// are durable before the records that refer to them, each tree once
+    /// the trees it holds are, so the repository never has a tree without
+    /// what it holds, which a later pack may rely on, statements before
     /// the revisions they're about, and promotions come last, each checked
     /// against its original by [`Store::claim`],
     /// once the original and both subjects are stored. Issues
@@ -666,7 +668,7 @@ impl OriginService {
         // The dependencies the repository has, whose kinds are read once
         // every object is checked otherwise.
         let mut stored: HashMap<ObjectId, (ObjectId, ObjectKind)> = HashMap::new();
-        let mut snapshots = Vec::new();
+        let mut snapshots = SnapshotLayers::default();
         let mut statements = Vec::new();
         let mut revisions = Vec::new();
         let mut promotions = Vec::new();
@@ -709,7 +711,9 @@ impl OriginService {
             })?;
             match record {
                 Object::Acceptance(_) => return Err(ServiceError::Acceptance(id.into())),
-                Object::Blob(_) | Object::Tree(_) | Object::Attachment(_) => snapshots.push(object),
+                Object::Blob(_) | Object::Tree(_) | Object::Attachment(_) => {
+                    snapshots.add(object, &record);
+                }
                 Object::Revision(ref revision) => {
                     if !revision.predecessors.is_empty() {
                         changes.insert(revision.change);
@@ -731,10 +735,7 @@ impl OriginService {
         }
         self.check_kinds(&stored)?;
         dependencies.commit()?;
-        let mut new = 0;
-        if !snapshots.is_empty() {
-            new += self.store.write_all(&snapshots)?;
-        }
+        let mut new = self.store.write_layers(&snapshots.layers())?;
         self.check_writes(caller, &held, &decoded)?;
         let pushing = self.lock_heads(caller, !revisions.is_empty(), expect)?;
         // In layers, each durable before the next, as a workspace writes
@@ -1303,6 +1304,67 @@ impl OriginService {
     }
 }
 
+/// The blobs, trees and attachments of a pack, which
+/// [`OriginService::push`] writes in layers: blobs and attachments first,
+/// then each tree after the trees of the pack it holds. So neither a crash
+/// nor a failed write leaves the repository a tree without what it holds,
+/// which a later pack needing the tree would rely on.
+#[derive(Debug, Default)]
+struct SnapshotLayers {
+    objects: Vec<EncodedObject>,
+    /// The subtrees of each tree of `objects`.
+    subtrees: HashMap<ObjectId, Vec<ObjectId>>,
+}
+
+impl SnapshotLayers {
+    /// Adds `object`, which decodes as `record`.
+    fn add(&mut self, object: EncodedObject, record: &Object) {
+        if let Object::Tree(tree) = record {
+            let subtrees = tree
+                .iter()
+                .filter_map(|(_, entry)| entry.subtree())
+                .map(ObjectId::from)
+                .collect();
+            self.subtrees.insert(object.id(), subtrees);
+        }
+        self.objects.push(object);
+    }
+
+    /// The objects by layer: a tree's is one past the highest of its
+    /// subtrees the pack holds, and a blob's or an attachment's, the first.
+    fn layers(self) -> Vec<Vec<EncodedObject>> {
+        let mut heights: HashMap<ObjectId, usize> = HashMap::new();
+        // Depth first, without recursing: a pack may nest trees deeply.
+        let mut stack: Vec<ObjectId> = self.subtrees.keys().copied().collect();
+        while let Some(&id) = stack.last() {
+            if heights.contains_key(&id) {
+                stack.pop();
+                continue;
+            }
+            let subtrees = &self.subtrees[&id];
+            let before = stack.len();
+            stack.extend(subtrees.iter().filter(|&subtree| {
+                self.subtrees.contains_key(subtree) && !heights.contains_key(subtree)
+            }));
+            if stack.len() == before {
+                let highest = subtrees
+                    .iter()
+                    .filter_map(|subtree| heights.get(subtree))
+                    .max();
+                heights.insert(id, highest.map_or(1, |height| height + 1));
+                stack.pop();
+            }
+        }
+        let mut layers: Vec<Vec<_>> = iter::repeat_with(Vec::new)
+            .take(heights.values().max().map_or(1, |height| height + 1))
+            .collect();
+        for object in self.objects {
+            layers[heights.get(&object.id()).copied().unwrap_or(0)].push(object);
+        }
+        layers
+    }
+}
+
 /// What an object needs the repository to have for it to be usable, as
 /// [`OriginService::put_records`] lists, and the kind each must be: the
 /// records it refers to, and the content, snapshots and blobs. A
@@ -1563,8 +1625,8 @@ impl ServiceError {
 
 #[cfg(test)]
 mod tests {
-    use origin_shared::Record;
     use origin_shared::landing::Landing;
+    use origin_shared::{EntryKind, Record, Tree};
 
     use super::*;
     use crate::permissions::Scope;
@@ -1650,6 +1712,36 @@ mod tests {
             .put_records(&Caller::Owner, Pack { objects: without })
             .unwrap();
         assert!(repo.store.contains(conflict.id()).unwrap());
+    }
+
+    #[test]
+    fn trees_are_written_after_the_trees_they_hold() {
+        let tree = |entries: &[(&str, EntryKind, ObjectId)]| {
+            let mut tree = Tree::default();
+            for &(name, kind, id) in entries {
+                tree.insert(name.parse().unwrap(), TreeEntry { kind, id });
+            }
+            tree.encode()
+        };
+        let blob = EncodedObject::blob(b"file");
+        let leaf = tree(&[("file", EntryKind::File, blob.id())]);
+        let middle = tree(&[("leaf", EntryKind::Tree, leaf.id())]);
+        let stored = Tree::default().encode();
+        // The root holds the leaf too, and a tree the pack doesn't.
+        let root = tree(&[
+            ("leaf", EntryKind::Tree, leaf.id()),
+            ("middle", EntryKind::Tree, middle.id()),
+            ("stored", EntryKind::Tree, stored.id()),
+        ]);
+
+        let mut snapshots = SnapshotLayers::default();
+        for object in [&root, &blob, &middle, &leaf] {
+            snapshots.add(object.clone(), &object.decode().unwrap());
+        }
+        assert_eq!(
+            snapshots.layers(),
+            [vec![blob], vec![leaf], vec![middle], vec![root]]
+        );
     }
 
     #[test]

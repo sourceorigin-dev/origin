@@ -264,8 +264,27 @@ impl<P: Platform> Store<P> {
     /// Fails if an object cannot be written. Objects written before the
     /// failure may not be durable.
     pub fn write_all(&self, objects: &[EncodedObject]) -> Result<usize, StoreError> {
+        self.write_layers(&[objects])
+    }
+
+    /// Writes `layers` like [`Store::write_all`], in one batch that
+    /// publishes each layer once those before it are durable: so a crash or
+    /// a failed write never leaves an object without one of an earlier
+    /// layer.
+    ///
+    /// # Errors
+    ///
+    /// Fails like [`Store::write_all`]. Only objects of the layer that
+    /// failed, and the layers before it, may have been written.
+    pub fn write_layers(
+        &self,
+        layers: &[impl AsRef<[EncodedObject]>],
+    ) -> Result<usize, StoreError> {
         let batch = self.batch();
-        let written = batch.stage_all(objects)?;
+        let mut written = 0;
+        for (layer, objects) in layers.iter().enumerate() {
+            written += batch.stage_in(layer, objects.as_ref())?;
+        }
         batch.commit()?;
         Ok(written)
     }
@@ -653,6 +672,16 @@ impl<P: Platform> Batch<'_, P> {
     /// Fails if the object is a record that doesn't decode, or if it cannot
     /// be compressed or written.
     pub fn write(&self, object: &EncodedObject) -> Result<bool, StoreError> {
+        self.write_in(0, object)
+    }
+
+    /// Stages an object like [`Batch::write`], in `layer`: it is published
+    /// once the objects of the layers before it are durable.
+    ///
+    /// # Errors
+    ///
+    /// Fails like [`Batch::write`].
+    pub fn write_in(&self, layer: usize, object: &EncodedObject) -> Result<bool, StoreError> {
         let id = object.id();
         let path = self.store.path(id);
         if self.hold(&path, || self.packed(id))? {
@@ -661,7 +690,8 @@ impl<P: Platform> Batch<'_, P> {
         let entry = Entry::of(object).map_err(|source| StoreError::Decode { id, source })?;
         let compressed = zstd::bulk::compress(object.bytes(), Store::<P>::COMPRESSION_LEVEL)
             .map_err(|source| StoreError::io(&path, source))?;
-        self.write.stage(path, &compressed)?;
+        self.write
+            .stage_in(layer, path, |file| file.write_all(&compressed))?;
         if let Some(entry) = entry {
             self.entries
                 .lock()
@@ -741,9 +771,19 @@ impl<P: Platform> Batch<'_, P> {
     ///
     /// Fails like [`Batch::write`].
     pub fn stage_all(&self, objects: &[EncodedObject]) -> Result<usize, StoreError> {
+        self.stage_in(0, objects)
+    }
+
+    /// Stages `objects` like [`Batch::stage_all`], in `layer`, as
+    /// [`Batch::write_in`] does.
+    ///
+    /// # Errors
+    ///
+    /// Fails like [`Batch::write`].
+    pub fn stage_in(&self, layer: usize, objects: &[EncodedObject]) -> Result<usize, StoreError> {
         Store::<P>::on_every_core(objects, |chunk| {
             chunk.iter().try_fold(0, |written, object| {
-                Ok(written + usize::from(self.write(object)?))
+                Ok(written + usize::from(self.write_in(layer, object)?))
             })
         })
         .into_iter()
