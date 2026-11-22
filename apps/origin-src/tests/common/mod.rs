@@ -398,7 +398,7 @@ impl Server {
     }
 
     /// Runs `origin serve` with `config`, returning it and its base URL
-    /// once it listens.
+    /// once it listens. Kills it if it says nothing else first.
     fn serve(config: &Path) -> (Child, String) {
         let mut child = Command::new(origin())
             .args(["serve", "--config"])
@@ -408,14 +408,13 @@ impl Server {
             .spawn()
             .unwrap();
         let mut line = String::new();
-        BufReader::new(child.stdout.take().unwrap())
-            .read_line(&mut line)
-            .unwrap();
-        let base = line
-            .trim()
-            .strip_prefix("Listening on ")
-            .unwrap()
-            .to_owned();
+        let read = BufReader::new(child.stdout.take().unwrap()).read_line(&mut line);
+        let Some(base) = line.trim().strip_prefix("Listening on ") else {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("`origin serve` printed {line:?} ({read:?}), not its address");
+        };
+        let base = base.to_owned();
         (child, base)
     }
 
