@@ -653,7 +653,7 @@ impl TryFrom<BTreeMap<String, String>> for Retention {
         let rules = table
             .into_iter()
             .map(|(pattern, period)| {
-                let Period(duration) = period.parse()?;
+                let duration = period.parse::<Period>()?.duration();
                 let pattern: KindPattern = pattern.parse()?;
                 if pattern.is_reserved() {
                     return Err(RetentionError::Reserved(pattern));

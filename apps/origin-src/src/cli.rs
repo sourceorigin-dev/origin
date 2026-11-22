@@ -545,7 +545,7 @@ impl Cli {
             }) => {
                 println!(
                     "{}",
-                    ServerConfig::load(&config)?.issue_token(principal, scope, ttl.0)?
+                    ServerConfig::load(&config)?.issue_token(principal, scope, ttl.duration())?
                 );
                 return Ok(());
             }

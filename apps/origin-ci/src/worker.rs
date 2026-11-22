@@ -54,7 +54,7 @@ pub struct Worker {
 
 impl Worker {
     /// How long each long-poll waits.
-    pub const WAIT: Duration = Duration::from_secs(30);
+    pub const WAIT: Period = Period::from_secs(30);
 
     /// How often the worker answers every landing that waits, whatever the
     /// events said.
@@ -120,7 +120,7 @@ impl Worker {
     /// # Errors
     ///
     /// Fails like [`Worker::poll`], but for a remote that can't be reached.
-    pub fn next(&mut self, wait: Duration) -> Result<Vec<Answer>, WorkerError> {
+    pub fn next(&mut self, wait: Period) -> Result<Vec<Answer>, WorkerError> {
         let mut retry = Self::FIRST_RETRY;
         loop {
             match self.poll(wait) {
@@ -145,7 +145,7 @@ impl Worker {
     /// # Errors
     ///
     /// Fails if the remote cannot be reached or refuses.
-    pub fn poll(&mut self, wait: Duration) -> Result<Vec<Answer>, WorkerError> {
+    pub fn poll(&mut self, wait: Period) -> Result<Vec<Answer>, WorkerError> {
         let cursor = match self.cursor {
             Some(cursor) if self.reconciled.elapsed() < Self::RECONCILE => cursor,
             _ => return self.reconcile(),
@@ -220,10 +220,10 @@ impl Worker {
 
     /// The `check.requested` events after `cursor`, or from now, waiting up
     /// to `wait` for some.
-    fn events(&self, cursor: Option<u64>, wait: Option<Duration>) -> Result<Page, RemoteError> {
+    fn events(&self, cursor: Option<u64>, wait: Option<Period>) -> Result<Page, RemoteError> {
         self.runner.remote().events(&EventsQuery {
             cursor,
-            wait: wait.map(Period),
+            wait,
             kind: List(vec![KindPattern::Exact(
                 Kind::new("check.requested").expect("a valid kind"),
             )]),

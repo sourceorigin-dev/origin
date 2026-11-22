@@ -184,7 +184,7 @@ fn long_poll_wakeup(bencher: Bencher<'_, '_>) {
                 .next;
             let query = EventsQuery {
                 cursor: Some(cursor),
-                wait: Some(Period(Duration::from_secs(30))),
+                wait: Some(Period::from_secs(30)),
                 kind: List(vec!["statement.issued".parse().unwrap()]),
                 ..EventsQuery::default()
             };
@@ -225,7 +225,7 @@ fn long_poll_wakeup_from_another_process(bencher: Bencher<'_, '_>) {
                 .next;
             let query = EventsQuery {
                 cursor: Some(cursor),
-                wait: Some(Period(Duration::from_secs(30))),
+                wait: Some(Period::from_secs(30)),
                 kind: List(vec!["statement.issued".parse().unwrap()]),
                 ..EventsQuery::default()
             };

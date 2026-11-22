@@ -10,7 +10,6 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
-use std::time::Duration;
 
 use divan::Bencher;
 use origin_ci::runner::{Outcome, Runner};
@@ -20,8 +19,8 @@ use origin_shared::api::{At, LandRequest};
 use origin_shared::landing::{Landing, Proposal};
 use origin_shared::pack::Pack;
 use origin_shared::{
-    AttachmentId, Base, ChangeId, EncodedObject, EntryKind, EntryName, Kind, NodeKey, Principal,
-    Record, RecordId, Revision, RevisionId, TargetName, Tree, TreeEntry,
+    AttachmentId, Base, ChangeId, EncodedObject, EntryKind, EntryName, Kind, NodeKey, Period,
+    Principal, Record, RecordId, Revision, RevisionId, TargetName, Tree, TreeEntry,
 };
 use origin_src::auth::{Credentials, StaticTokens};
 use origin_src::http::Api;
@@ -100,7 +99,7 @@ impl Hosted {
         let outcomes = hosted.runner.check(first, &At::Record(first), None);
         assert!(matches!(outcomes.unwrap()[..], [Outcome::Ran { .. }]));
         // Takes the cursor.
-        hosted.worker.poll(Duration::ZERO).unwrap();
+        hosted.worker.poll(Period::from_secs(0)).unwrap();
         hosted
     }
 
@@ -186,7 +185,11 @@ fn check_requested_to_statement(bencher: Bencher) {
             hosted.borrow_mut().submit();
         })
         .bench_local_values(|()| {
-            let answers = hosted.borrow_mut().worker.poll(Duration::ZERO).unwrap();
+            let answers = hosted
+                .borrow_mut()
+                .worker
+                .poll(Period::from_secs(0))
+                .unwrap();
             assert!(matches!(&answers[..], [answer] if answer.result.is_ok()));
         });
 }

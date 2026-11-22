@@ -231,7 +231,7 @@ impl Workspace {
         let mut query = EventsQuery {
             cursor: since,
             generation: None,
-            wait: Some(Period(OriginService::MAX_WAIT)),
+            wait: Some(Period::from_secs(OriginService::MAX_WAIT.as_secs())),
             limit: Some(256),
             kind: List(kinds),
             subject: List(subjects),

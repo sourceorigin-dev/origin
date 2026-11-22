@@ -1735,7 +1735,7 @@ grants = { all = "none", "user:ada" = "write" }
         let parent = scoped("user:eve", &["annotate review", "land *"], expires);
         let request = origin_shared::api::TokenRequest {
             scope: vec!["annotate review".parse().unwrap()],
-            ttl: origin_shared::Period(OriginService::MAX_TOKEN_TTL),
+            ttl: origin_shared::Period::from_secs(OriginService::MAX_TOKEN_TTL.as_secs()),
         };
         let issued = fixture.service.issue_token(&parent, &request).unwrap();
         assert_eq!(issued.expires, expires);

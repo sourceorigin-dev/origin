@@ -289,7 +289,7 @@ impl OriginService {
         let mut token = Token::new(
             principal.clone(),
             request.scope.clone(),
-            request.ttl.0.min(Self::MAX_TOKEN_TTL),
+            request.ttl.duration().min(Self::MAX_TOKEN_TTL),
         );
         if let Caller::Principal {
             scope: Some(scope), ..
@@ -1312,7 +1312,9 @@ impl OriginService {
             .limit
             .unwrap_or(Self::MAX_EVENTS)
             .min(Self::MAX_EVENTS) as usize;
-        let wait = query.wait.map_or(Duration::ZERO, |wait| wait.0);
+        let wait = query
+            .wait
+            .map_or(Duration::ZERO, origin_shared::Period::duration);
         let accept = |event: &EventKind| Ok(filter.matches(event) && reader.sees_event(event)?);
         let page = events.wait(cursor, accept, limit, wait.min(Self::MAX_WAIT))?;
         Ok(Page { generation, ..page })

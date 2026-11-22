@@ -82,14 +82,27 @@ as_text! {
 }
 
 /// A length of time, written as a whole number of seconds (`s`), minutes
-/// (`m`), hours (`h`) or days (`d`), such as `90d` or `30s`.
+/// (`m`), hours (`h`) or days (`d`), such as `90d` or `30s`. It holds whole
+/// seconds only, so it always displays as what it is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Period(pub Duration);
+pub struct Period(u64);
 
 impl Period {
     /// The units, longest first, so a period displays in the largest one
     /// that divides it.
     const UNITS: [(char, u64); 4] = [('d', 24 * 60 * 60), ('h', 60 * 60), ('m', 60), ('s', 1)];
+
+    /// A period of `seconds`.
+    #[must_use]
+    pub const fn from_secs(seconds: u64) -> Self {
+        Self(seconds)
+    }
+
+    /// The period's length.
+    #[must_use]
+    pub const fn duration(self) -> Duration {
+        Duration::from_secs(self.0)
+    }
 }
 
 impl FromStr for Period {
@@ -103,15 +116,14 @@ impl FromStr for Period {
             .find(|(name, _)| *name == unit)
             .ok_or_else(invalid)?;
         let count: u64 = period[..period.len() - 1].parse().map_err(|_| invalid())?;
-        let total = count.checked_mul(seconds).ok_or_else(invalid)?;
-        Ok(Self(Duration::from_secs(total)))
+        count.checked_mul(seconds).map(Self).ok_or_else(invalid)
     }
 }
 
 /// In whole seconds, in the largest unit that divides them.
 impl fmt::Display for Period {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let seconds = self.0.as_secs();
+        let seconds = self.0;
         let (unit, size) = Self::UNITS
             .into_iter()
             .find(|&(_, size)| seconds.is_multiple_of(size) && seconds >= size)
@@ -138,11 +150,11 @@ mod tests {
             ("45s", 45),
         ] {
             let period: Period = text.parse().unwrap();
-            assert_eq!(period.0, Duration::from_secs(seconds));
+            assert_eq!(period.duration(), Duration::from_secs(seconds));
             assert_eq!(period.to_string(), text);
         }
-        assert_eq!(Period(Duration::from_secs(120)).to_string(), "2m");
-        assert_eq!(Period(Duration::ZERO).to_string(), "0s");
+        assert_eq!(Period::from_secs(120).to_string(), "2m");
+        assert_eq!(Period::from_secs(0).to_string(), "0s");
         for invalid in ["", "d", "5", "5w", "-1s", "1.5h"] {
             assert!(invalid.parse::<Period>().is_err(), "{invalid:?}");
         }

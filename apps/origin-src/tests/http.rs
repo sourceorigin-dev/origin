@@ -837,7 +837,7 @@ async fn events_long_poll() {
 
     let query = EventsQuery {
         cursor: Some(now.next),
-        wait: Some(Period(Duration::from_secs(30))),
+        wait: Some(Period::from_secs(30)),
         kind: List(vec!["revision.created".parse().unwrap()]),
         ..EventsQuery::default()
     };
@@ -919,7 +919,7 @@ async fn tells_callers_what_they_may_do_and_issues_narrower_tokens() {
             .iter()
             .map(|capability| capability.parse().unwrap())
             .collect(),
-        ttl: Period(Duration::from_hours(1)),
+        ttl: Period::from_secs(60 * 60),
     };
     let issued = server
         .strict
