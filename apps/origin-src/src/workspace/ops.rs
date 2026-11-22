@@ -133,7 +133,7 @@ impl Workspace {
     /// Fails if there is nothing to undo, the latest operation created the
     /// workspace, or the working copy cannot be snapshotted or moved.
     pub fn undo(&mut self) -> Result<(), WorkspaceError> {
-        let working_copy = self.refresh()?;
+        let mut working_copy = self.refresh()?;
         let (op, command, from) = self.last_undoable(working_copy.id)?;
         let revision: Revision = self.store.get(from)?;
         let heads = working_copy.index.heads(revision.change);
@@ -142,7 +142,7 @@ impl Workspace {
         } else {
             // A newer revision of the change exists: restore this one's
             // contents, and its unresolved conflicts, in a revision after it.
-            let conflicts = self.conflicts(from, &revision)?;
+            let conflicts = self.conflicts(&mut working_copy.index, from, &revision)?;
             let restored = Revision {
                 predecessors: heads,
                 author: self.config.user(),

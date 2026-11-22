@@ -35,7 +35,8 @@ pub(super) struct Session<'q, 'a, P> {
     /// The target's latest acceptance, and its snapshot.
     pub(super) tip: Head,
     pub(super) state: TreeId,
-    pub(super) annotations: Annotations<'a, P>,
+    /// The statements, through an index caught up once the lock was taken.
+    pub(super) annotations: &'q mut Annotations<'a, P>,
     pub(super) _lock: LockedFile,
 }
 

@@ -81,7 +81,11 @@ fn unresolved_conflicts_never_land() {
     );
     let error = repo
         .queue()
-        .land_change(ChangeId::from_bytes([1; 16]), &TargetName::MAIN)
+        .land_change(
+            &mut repo.annotations(),
+            ChangeId::from_bytes([1; 16]),
+            &TargetName::MAIN,
+        )
         .unwrap_err();
     assert!(
         matches!(&error, LandError::Unresolved { paths, .. } if *paths == [path.clone()]),

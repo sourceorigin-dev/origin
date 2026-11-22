@@ -65,6 +65,22 @@ impl<'a, P: Platform> Annotations<'a, P> {
         &self.index
     }
 
+    /// Gives the index back, for the next to use it.
+    #[must_use]
+    pub fn into_index(self) -> Index {
+        self.index
+    }
+
+    /// Catches the index up with the records written since it was read,
+    /// see [`Index::refresh`].
+    ///
+    /// # Errors
+    ///
+    /// Fails like [`Index::refresh`].
+    pub fn refresh(&mut self) -> Result<(), StoreError> {
+        self.index.refresh(self.store)
+    }
+
     /// Writes a statement and its payload. Issuing a statement the store
     /// has is a no-op.
     ///

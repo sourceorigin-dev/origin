@@ -16,12 +16,15 @@
 //! the working copy doesn't land until they change or are accepted with
 //! `origin resolve` (see [`conflict`](crate::conflict)).
 
+use std::mem;
+
 use origin_shared::landing::{Blocked, Landing, Pending, Proposal};
 use origin_shared::{
     Base, ChangeId, EncodedObject, Record, Revision, RevisionId, Source, TargetName, TreeId,
 };
 
 use super::{Behind, WorkingCopy, Workspace, WorkspaceError};
+use crate::annotations::Annotations;
 use crate::conflict::Conflicts;
 use crate::index::Index;
 use crate::oplog::Why;
@@ -50,8 +53,12 @@ impl Workspace {
             None => self.target_of(Self::single_head(&working_copy.index, change)?)?,
         };
         let key = self.config.node_key()?;
-        let landings =
-            Queue::new(&self.store, &key, self.config.node().clone()).land_change(change, &onto)?;
+        let mut annotations = Annotations::new(&self.store, mem::take(&mut working_copy.index));
+        let landings = Queue::new(&self.store, &key, self.config.node().clone()).land_change(
+            &mut annotations,
+            change,
+            &onto,
+        )?;
         for landing in &landings {
             self.print_landing(landing, &onto)?;
         }
@@ -63,9 +70,9 @@ impl Workspace {
         let unchanged = Landing::Unchanged(Proposal::Change(working_copy.revision.change));
         if landings.contains(&unchanged) {
             let base = working_copy.revision.snapshot;
-            self.start_on(&working_copy, &onto, "", base)?;
+            self.start_on(&mut working_copy, &onto, "", base)?;
         } else {
-            self.follow(&working_copy)?;
+            self.follow(&mut working_copy)?;
         }
         Ok(())
     }
@@ -79,8 +86,11 @@ impl Workspace {
     /// `onto`, or the records cannot be read or written.
     pub fn land_target(&self, from: &TargetName, onto: &TargetName) -> Result<(), WorkspaceError> {
         let key = self.config.node_key()?;
-        let landing =
-            Queue::new(&self.store, &key, self.config.node().clone()).land_target(from, onto)?;
+        let landing = Queue::new(&self.store, &key, self.config.node().clone()).land_target(
+            &mut Annotations::open(&self.store)?,
+            from,
+            onto,
+        )?;
         self.print_landing(&landing, onto)
     }
 
@@ -159,8 +169,9 @@ impl Workspace {
     /// snapshotted or is behind its change, or the change cannot be written
     /// or checked out.
     pub fn new_on(&mut self, target: &TargetName, description: &str) -> Result<(), WorkspaceError> {
-        let working_copy = self.refresh()?;
-        self.start_on(&working_copy, target, description, working_copy.files)
+        let mut working_copy = self.refresh()?;
+        let files = working_copy.files;
+        self.start_on(&mut working_copy, target, description, files)
     }
 
     /// `origin pull`: moves the working copy where its change went without
@@ -174,8 +185,8 @@ impl Workspace {
     /// Fails if the working copy cannot be snapshotted, a file was edited
     /// while it moved, or the records cannot be read or written.
     pub fn pull(&mut self) -> Result<(), WorkspaceError> {
-        let working_copy = self.save_draft()?;
-        if self.follow(&working_copy)? {
+        let mut working_copy = self.save_draft()?;
+        if self.follow(&mut working_copy)? {
             return Ok(());
         }
         let Base::Acceptance(base) = working_copy.revision.base else {
@@ -192,7 +203,7 @@ impl Workspace {
             return Ok(());
         }
         let files = self.base_tree(working_copy.revision.base)?;
-        self.rebase_onto_tip(&working_copy, files, &target)
+        self.rebase_onto_tip(&mut working_copy, files, &target)
     }
 
     /// Starts a change described by `description` on the tip of `target`,
@@ -200,7 +211,7 @@ impl Workspace {
     /// checks it out over them, as the module explains.
     fn start_on(
         &mut self,
-        working_copy: &WorkingCopy,
+        working_copy: &mut WorkingCopy,
         target: &TargetName,
         description: &str,
         base: TreeId,
@@ -246,7 +257,7 @@ impl Workspace {
     /// the edits made since, or rebases the working copy onto the tip once
     /// the change below it landed, as the module explains. Returns whether
     /// it moved.
-    fn follow(&mut self, working_copy: &WorkingCopy) -> Result<bool, WorkspaceError> {
+    fn follow(&mut self, working_copy: &mut WorkingCopy) -> Result<bool, WorkspaceError> {
         match &working_copy.behind {
             Some(Behind::Landed { target, .. }) => {
                 let base = working_copy.revision.snapshot;
@@ -292,7 +303,7 @@ impl Workspace {
     /// it, with the edits made since in a revision after it.
     fn move_onto(
         &mut self,
-        working_copy: &WorkingCopy,
+        working_copy: &mut WorkingCopy,
         rebased: RevisionId,
     ) -> Result<(), WorkspaceError> {
         let theirs: Revision = self.store.get(rebased)?;
@@ -326,7 +337,7 @@ impl Workspace {
     /// the module explains.
     fn rebase_onto_tip(
         &mut self,
-        working_copy: &WorkingCopy,
+        working_copy: &mut WorkingCopy,
         base: TreeId,
         onto: &TargetName,
     ) -> Result<(), WorkspaceError> {
@@ -369,7 +380,7 @@ impl Workspace {
     /// checked out.
     fn write_merge(
         &self,
-        working_copy: &WorkingCopy,
+        working_copy: &mut WorkingCopy,
         merge: Merge,
         with: Vec<EncodedObject>,
         revision: &EncodedObject,

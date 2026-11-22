@@ -65,7 +65,11 @@ fn collection_applies_a_policy_landed_while_it_waits() {
         repo.revision(2, &[], tip, &[("policy.toml", &longer)]);
         let landed = repo
             .queue()
-            .land_change(ChangeId::from_bytes([2; 16]), &TargetName::POLICY)
+            .land_change(
+                &mut repo.annotations(),
+                ChangeId::from_bytes([2; 16]),
+                &TargetName::POLICY,
+            )
             .unwrap();
         assert!(matches!(landed[..], [Landing::Landed { .. }]), "{landed:?}");
         drop(held);
@@ -81,9 +85,11 @@ fn policy_landings_keep_a_valid_policy() {
     let tip = Base::Acceptance(repo.tip(&policy).acceptance);
     for (change, toml) in [(1, "not = [valid"), (2, "[nodes]\n")] {
         repo.revision(change, &[], tip, &[("policy.toml", toml)]);
-        let result = repo
-            .queue()
-            .land_change(ChangeId::from_bytes([change; 16]), &policy);
+        let result = repo.queue().land_change(
+            &mut repo.annotations(),
+            ChangeId::from_bytes([change; 16]),
+            &policy,
+        );
         assert!(
             matches!(
                 result,
@@ -112,7 +118,11 @@ fn policy_landings_keep_a_valid_policy() {
         .unwrap();
     let landings = repo
         .queue()
-        .land_change(ChangeId::from_bytes([3; 16]), &policy)
+        .land_change(
+            &mut repo.annotations(),
+            ChangeId::from_bytes([3; 16]),
+            &policy,
+        )
         .unwrap();
     assert!(
         matches!(landings[..], [Landing::Landed { .. }]),
@@ -145,7 +155,11 @@ fn each_policy_landing_is_governed_by_the_one_before() {
     repo.revision(2, &[], Base::Revision(first), &[("policy.toml", &open)]);
     let landings = repo
         .queue()
-        .land_change(ChangeId::from_bytes([2; 16]), &policy)
+        .land_change(
+            &mut repo.annotations(),
+            ChangeId::from_bytes([2; 16]),
+            &policy,
+        )
         .unwrap();
     assert_eq!(landed(&landings[0]), first);
     assert!(matches!(landings[1], Landing::Pending(_)), "{landings:?}");

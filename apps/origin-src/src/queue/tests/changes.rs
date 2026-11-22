@@ -79,7 +79,11 @@ fn refuses_divergent_and_abandoned_changes() {
     let main = TargetName::MAIN;
     let error = repo
         .queue()
-        .land_change(ChangeId::from_bytes([1; 16]), &main)
+        .land_change(
+            &mut repo.annotations(),
+            ChangeId::from_bytes([1; 16]),
+            &main,
+        )
         .unwrap_err();
     assert!(matches!(error, LandError::Divergent { .. }), "{error}");
 
@@ -97,7 +101,11 @@ fn refuses_divergent_and_abandoned_changes() {
     repo.store.write_all(&[abandon.encode()]).unwrap();
     let error = repo
         .queue()
-        .land_change(ChangeId::from_bytes([2; 16]), &main)
+        .land_change(
+            &mut repo.annotations(),
+            ChangeId::from_bytes([2; 16]),
+            &main,
+        )
         .unwrap_err();
     assert!(matches!(error, LandError::Abandoned(_)), "{error}");
 }
@@ -108,12 +116,16 @@ fn only_the_authority_lands() {
     repo.change_on_main(1, &[("a", "a")]);
     let change = ChangeId::from_bytes([1; 16]);
     let other = Queue::new(&repo.store, &repo.key, PrincipalName::new("other").unwrap());
-    let error = other.land_change(change, &TargetName::MAIN).unwrap_err();
+    let error = other
+        .land_change(&mut repo.annotations(), change, &TargetName::MAIN)
+        .unwrap_err();
     assert!(matches!(error, LandError::NotAuthority { .. }), "{error}");
 
     let impostor = NodeKey::from_bytes(&[8; 32]);
     let queue = Queue::new(&repo.store, &impostor, PrincipalName::new("queue").unwrap());
-    let error = queue.land_change(change, &TargetName::MAIN).unwrap_err();
+    let error = queue
+        .land_change(&mut repo.annotations(), change, &TargetName::MAIN)
+        .unwrap_err();
     assert!(matches!(error, LandError::WrongKey(_)), "{error}");
     assert_eq!(repo.tip(&TargetName::MAIN).seq, 0);
 }
