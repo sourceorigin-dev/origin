@@ -14,7 +14,21 @@
 //! names for every caller; and they must see what it's about, and for a promotion, its original: so no
 //! one copies a result they can't read.
 //!
-//! A revision evolves only from revisions they see. It may only hold
+//! A revision must extend its change's history: only a new change gets a
+//! root, and a successor evolves only from revisions of its change, which
+//! they see. So no one makes a change diverge with a root of their own,
+//! or becomes one of its creators, who [abandon](crate::annotations::RevisionView::authorizes) it.
+//! Where they may not write, a revision has an *effect*: each file it
+//! changes there, from its base's entry to its own. A root has none. A
+//! successor has exactly each predecessor's, on the same change below if
+//! it's on one, and lists exactly their unresolved conflicts there in its
+//! `core.conflict` (see [`conflict`](crate::conflict)), which only a
+//! `core.conflict` supersedes; a root lists those of the revision it's on.
+//! So whatever base it picks, a successor never reverts, replaces or
+//! resolves someone else's edits where its writer may not, nor adds a
+//! conflict there, nor brings a stack that would land with it; a rebase
+//! onto a newer tip keeps the effect, and one who takes a change over edits
+//! what they write and hands it on. A revision may only hold
 //! content they supply or that a snapshot it refers to holds at the same
 //! path (see [`Store::unsupplied`]): so no one reads a file by placing its
 //! id where they may read. Nor an attachment: a record that carries one
@@ -22,21 +36,24 @@
 //! a promotion, which carries its original's. The records of a batch are
 //! read before the store's (see [`Batch`]), so a batch may hold a stack of
 //! revisions and statements about them; those it brings anew are the
-//! caller's to see, but not one the store had.
+//! caller's to see, but not one the store had. Landings check what they change on the target, in the
+//! [queue](crate::queue).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::iter;
 
 use origin_platform::Platform;
 use origin_shared::access::{Capability, PathAccess, Rights};
 use origin_shared::event::EventKind;
 use origin_shared::{
-    Base, Kind, Object, ObjectId, Principal, RecordId, RepoPath, Revision, RevisionId, Statement,
-    TargetName,
+    Base, ChangeId, Kind, Object, ObjectId, Principal, RecordId, RepoPath, Revision, RevisionId,
+    Statement, StatementId, TargetName, TreeId,
 };
 
-use crate::annotations::RevisionView;
+use crate::annotations::{Annotations, Claim, RevisionView};
+use crate::conflict::Conflicts;
 use crate::store::{Store, StoreError};
+use crate::tree::FileChange;
 
 /// Who calls the service.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -166,6 +183,11 @@ pub struct Batch<'a, P> {
     /// Every object of the batch.
     supplied: HashSet<ObjectId>,
     revisions: HashMap<RevisionId, &'a Revision>,
+    /// How many revisions of each change evolve from none.
+    roots: HashMap<ChangeId, usize>,
+    statements: HashMap<StatementId, &'a Statement>,
+    /// The statements about each record, in batch order.
+    about: HashMap<RecordId, Vec<&'a Statement>>,
 }
 
 impl<'a, P: Platform> Batch<'a, P> {
@@ -179,10 +201,27 @@ impl<'a, P: Platform> Batch<'a, P> {
             store,
             supplied,
             revisions: HashMap::new(),
+            roots: HashMap::new(),
+            statements: HashMap::new(),
+            about: HashMap::new(),
         };
         for (id, object) in decoded {
-            if let Object::Revision(revision) = object {
-                batch.revisions.insert((*id).into(), revision);
+            match object {
+                Object::Revision(revision) => {
+                    batch.revisions.insert((*id).into(), revision);
+                    if revision.predecessors.is_empty() {
+                        *batch.roots.entry(revision.change).or_default() += 1;
+                    }
+                }
+                Object::Statement(statement) => {
+                    batch.statements.insert((*id).into(), statement);
+                    batch
+                        .about
+                        .entry(statement.subject)
+                        .or_default()
+                        .push(statement);
+                }
+                _ => {}
             }
         }
         batch
@@ -191,6 +230,14 @@ impl<'a, P: Platform> Batch<'a, P> {
     /// Whether the batch holds `record`.
     fn holds(&self, record: RecordId) -> bool {
         self.supplied.contains(&record.into())
+    }
+
+    /// The statement `id`.
+    fn statement(&self, id: StatementId) -> Result<Statement, StoreError> {
+        match self.statements.get(&id) {
+            Some(&statement) => Ok(statement.clone()),
+            None => self.store.get(id),
+        }
     }
 }
 
@@ -207,20 +254,31 @@ impl<P: Platform> RevisionView for Batch<'_, P> {
 /// module explains.
 pub struct Writer<'a, P> {
     batch: &'a Batch<'a, P>,
+    /// The statements and revisions of the store, as its index knows them.
+    annotations: &'a Annotations<'a, P>,
     principal: &'a Principal,
     rights: &'a Rights,
     reader: Reader<'a, P>,
+    effects: Effects<'a, P, Batch<'a, P>>,
 }
 
 impl<'a, P: Platform> Writer<'a, P> {
-    /// Checks `batch` for `principal`, with `rights`.
+    /// Checks `batch` for `principal`, with `rights`, finding what the
+    /// store has through `annotations`.
     #[must_use]
-    pub fn new(batch: &'a Batch<'a, P>, principal: &'a Principal, rights: &'a Rights) -> Self {
+    pub fn new(
+        batch: &'a Batch<'a, P>,
+        annotations: &'a Annotations<'a, P>,
+        principal: &'a Principal,
+        rights: &'a Rights,
+    ) -> Self {
         Self {
             batch,
+            annotations,
             principal,
             rights,
             reader: Reader::new(batch.store, &rights.paths),
+            effects: Effects::new(batch.store, batch, &rights.paths),
         }
     }
 
@@ -244,13 +302,21 @@ impl<'a, P: Platform> Writer<'a, P> {
         Err(Forbidden::UnsuppliedAttachment { record, attachment }.into())
     }
 
+    /// Whether the caller may write every path, so no effect is checked.
+    fn writes_all(&self) -> bool {
+        self.rights.paths.writes_all()
+    }
+
     /// Checks a statement put.
     ///
     /// # Errors
     ///
     /// Fails if the caller isn't its issuer, may not issue its kind, or
-    /// doesn't see what it's about or the original it promotes, or if a
-    /// record cannot be read.
+    /// doesn't see what it's about or the original it promotes; if it
+    /// replaces a `core.conflict` about a revision, by being one or
+    /// superseding one, that doesn't list exactly the conflicts the
+    /// revision carries where they may not write; or if a record cannot be
+    /// read.
     pub fn statement(&mut self, statement: &Statement) -> Result<(), PutError> {
         if statement.issuer != *self.principal {
             return Err(Forbidden::NotYours {
@@ -277,6 +343,40 @@ impl<'a, P: Platform> Writer<'a, P> {
         {
             self.brings("statement", payload.into())?;
         }
+        if !self.writes_all() {
+            self.keeps_listing(statement)?;
+        }
+        Ok(())
+    }
+
+    /// Checks that `statement`, if it replaces its issuer's `core.conflict`
+    /// about a revision, by being one or superseding one, lists exactly the
+    /// conflicts the revision carries where the caller may not write.
+    fn keeps_listing(&self, statement: &Statement) -> Result<(), PutError> {
+        let superseded = match statement.supersedes {
+            Some(id) => match self.batch.statement(id) {
+                Ok(superseded) => Some(superseded),
+                Err(StoreError::NotFound(_)) => None,
+                Err(error) => return Err(error.into()),
+            },
+            None => None,
+        };
+        let replaced = iter::once(statement)
+            .chain(&superseded)
+            .filter(|replaced| replaced.kind == Kind::CONFLICT);
+        for replaced in replaced {
+            let RecordId::Revision(id) = replaced.subject else {
+                continue;
+            };
+            let revision = self.batch.revision(id)?;
+            let listed =
+                if statement.kind == Kind::CONFLICT && statement.subject == replaced.subject {
+                    Conflicts::latest(self.batch.store, [statement], &revision)?
+                } else {
+                    Conflicts::default()
+                };
+            self.keeps_conflicts(&revision, &listed)?;
+        }
         Ok(())
     }
 
@@ -284,9 +384,11 @@ impl<'a, P: Platform> Writer<'a, P> {
     ///
     /// # Errors
     ///
-    /// Fails if the caller isn't its author; they don't see a revision it
-    /// evolves from; or it holds content they neither supplied nor share
-    /// with a snapshot it refers to; or if a tree cannot be read.
+    /// Fails if the caller isn't its author; it adds a root to a change
+    /// that has revisions, or evolves from a revision of another change;
+    /// they don't see a revision it evolves from; it has an effect they may
+    /// not have; or it holds content they neither supplied nor share with
+    /// a snapshot it refers to; or if a tree cannot be read.
     pub fn revision(&mut self, id: RevisionId, revision: &Revision) -> Result<(), PutError> {
         if revision.author != *self.principal {
             return Err(Forbidden::NotYours {
@@ -296,16 +398,32 @@ impl<'a, P: Platform> Writer<'a, P> {
             }
             .into());
         }
-        let base = match revision.base {
-            Base::Revision(id) => self.batch.revision(id)?.snapshot,
-            Base::Acceptance(_) => self.batch.store.base_snapshot(revision.base)?,
-        };
-        let mut references = vec![base];
+        let roots = self.batch.roots.get(&revision.change).copied();
+        let stored = !self
+            .annotations
+            .index()
+            .revisions(revision.change)
+            .is_empty();
+        if revision.predecessors.is_empty() && (stored || roots > Some(1)) {
+            return Err(Forbidden::History(revision.change).into());
+        }
+        let mut references = vec![self.effects.base_snapshot(revision.base)?];
         for &id in &revision.predecessors {
             if !self.sees(RecordId::Revision(id))? {
                 return Err(PutError::Unseen(RecordId::Revision(id)));
             }
-            references.push(self.batch.revision(id)?.snapshot);
+            let predecessor = self.batch.revision(id)?;
+            if predecessor.change != revision.change {
+                return Err(Forbidden::History(revision.change).into());
+            }
+            references.push(predecessor.snapshot);
+        }
+        if let Some(forbidden) = self.effects.check(revision)? {
+            return Err(forbidden.into());
+        }
+        if !self.writes_all() {
+            let listed = self.conflicts(id, revision)?;
+            self.keeps_conflicts(revision, &listed)?;
         }
         self.brings("revision", revision.description.into())?;
         if !self.rights.paths.reads_all() {
@@ -317,6 +435,153 @@ impl<'a, P: Platform> Writer<'a, P> {
             }
         }
         Ok(())
+    }
+
+    /// The unresolved conflicts of `revision`, `id`, as its author's latest
+    /// `core.conflict` about it lists them, the store's then the batch's.
+    fn conflicts(&self, id: RevisionId, revision: &Revision) -> Result<Conflicts, StoreError> {
+        let subject = RecordId::Revision(id);
+        let stored = self.annotations.claims(subject)?;
+        let batched = self
+            .batch
+            .about
+            .get(&subject)
+            .into_iter()
+            .flatten()
+            .copied();
+        let statements = stored.iter().map(Claim::statement).chain(batched);
+        Conflicts::latest(self.batch.store, statements, revision)
+    }
+
+    /// Checks that `listed`, the unresolved conflicts of `revision`, are
+    /// exactly those it carries where the caller may not write: its
+    /// predecessors', or its base revision's for a root, where `revision`
+    /// still has the entry written. Only a writer of a path resolves its
+    /// conflict, or adds one.
+    fn keeps_conflicts(&self, revision: &Revision, listed: &Conflicts) -> Result<(), PutError> {
+        let from = match (&revision.predecessors[..], revision.base) {
+            ([], Base::Revision(base)) => vec![base],
+            (predecessors, _) => predecessors.to_vec(),
+        };
+        let unwritable = |path: &RepoPath| !self.rights.paths.writes(path);
+        let mut carried = BTreeSet::new();
+        for id in from {
+            let from = self.batch.revision(id)?;
+            let kept = self
+                .conflicts(id, &from)?
+                .only(unwritable)
+                .remaining(self.batch.store, revision.snapshot)?;
+            carried.extend(kept.paths());
+        }
+        let listed: BTreeSet<RepoPath> = listed
+            .clone()
+            .only(unwritable)
+            .paths()
+            .into_iter()
+            .collect();
+        if let Some(path) = carried.difference(&listed).next() {
+            return Err(Forbidden::Resolve(path.clone()).into());
+        }
+        if let Some(path) = listed.difference(&carried).next() {
+            return Err(Forbidden::Conflict(path.clone()).into());
+        }
+        Ok(())
+    }
+}
+
+/// What revisions do where their writer may not write, as the module
+/// explains: the service checks it of every revision a signed-in caller
+/// puts.
+pub struct Effects<'a, P, V> {
+    store: &'a Store<P>,
+    /// Where revisions are read: a batch's, then the store's.
+    revisions: &'a V,
+    /// What the writer may do with each path.
+    paths: &'a PathAccess,
+}
+
+impl<'a, P: Platform, V: RevisionView> Effects<'a, P, V> {
+    /// The effects of revisions of `store`, read from `revisions`, for a
+    /// writer who may do `paths`.
+    pub fn new(store: &'a Store<P>, revisions: &'a V, paths: &'a PathAccess) -> Self {
+        Self {
+            store,
+            revisions,
+            paths,
+        }
+    }
+
+    /// The snapshot of `base`.
+    fn base_snapshot(&self, base: Base) -> Result<TreeId, StoreError> {
+        match base {
+            Base::Revision(id) => Ok(self.revisions.revision(id)?.snapshot),
+            Base::Acceptance(_) => self.store.base_snapshot(base),
+        }
+    }
+
+    /// The effect of `revision`: each file it changes where the writer
+    /// may not write, from its base's entry to its own, sorted by path.
+    fn effect(&self, revision: &Revision) -> Result<Vec<FileChange>, StoreError> {
+        let base = self.base_snapshot(revision.base)?;
+        let mut changes = self.store.diff(base, revision.snapshot)?;
+        changes.retain(|change| !self.paths.writes(&change.path));
+        Ok(changes)
+    }
+
+    /// What the writer may not do of what `revision` does, if anything: a
+    /// root may have no effect, and a successor has exactly each
+    /// predecessor's, on the same change below, if it's on one.
+    ///
+    /// # Errors
+    ///
+    /// Fails if a revision or tree cannot be read.
+    pub fn check(&self, revision: &Revision) -> Result<Option<Forbidden>, StoreError> {
+        if self.paths.writes_all() {
+            return Ok(None);
+        }
+        let ours = self.effect(revision)?;
+        if revision.predecessors.is_empty() {
+            return Ok(ours
+                .first()
+                .map(|change| Forbidden::Write(change.path.clone())));
+        }
+        let below = match revision.base {
+            Base::Revision(below) => Some(self.revisions.revision(below)?.change),
+            Base::Acceptance(_) => None,
+        };
+        for &id in &revision.predecessors {
+            let predecessor = self.revisions.revision(id)?;
+            if let Some(below) = below {
+                let theirs = match predecessor.base {
+                    Base::Revision(theirs) => Some(self.revisions.revision(theirs)?.change),
+                    Base::Acceptance(_) => None,
+                };
+                if theirs != Some(below) {
+                    return Ok(Some(Forbidden::Below(below)));
+                }
+            }
+            let theirs = self.effect(&predecessor)?;
+            // Both are sorted by path: the first that differs is a path one
+            // lacks, or changes otherwise.
+            let differs = ours
+                .iter()
+                .zip(&theirs)
+                .find(|(ours, theirs)| ours != theirs)
+                .map(|(ours, theirs)| ours.path.clone().min(theirs.path.clone()))
+                .or_else(|| {
+                    let longer = if ours.len() > theirs.len() {
+                        &ours
+                    } else {
+                        &theirs
+                    };
+                    let path = longer.get(ours.len().min(theirs.len()));
+                    path.map(|change| change.path.clone())
+                });
+            if let Some(path) = differs {
+                return Ok(Some(Forbidden::Write(path)));
+            }
+        }
+        Ok(None)
     }
 }
 
@@ -345,6 +610,25 @@ pub enum Forbidden {
     /// A change to a path the caller may not write.
     #[error("you may not change `{0}`")]
     Write(RepoPath),
+    /// A conflict at a path the caller may not write, which a revision or
+    /// statement of theirs would resolve.
+    #[error("you may not resolve the conflict at `{0}`")]
+    Resolve(RepoPath),
+    /// A conflict at a path the caller may not write, which a revision or
+    /// statement of theirs would list though none it evolves from does.
+    #[error("you may not add a conflict at `{0}`")]
+    Conflict(RepoPath),
+    /// A revision that would add a root to a change with revisions, or
+    /// evolve from a revision of another change.
+    #[error(
+        "a new revision of change {} must evolve from its revisions, and only from them",
+        .0.short()
+    )]
+    History(ChangeId),
+    /// A successor moved onto a change it wasn't on, which would then land
+    /// with it.
+    #[error("you may not move a change you took over onto change {}", .0.short())]
+    Below(ChangeId),
     /// A path the caller may not read.
     #[error("you may not read `{0}`")]
     Read(RepoPath),
@@ -407,6 +691,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::conflict::Conflicts;
     use crate::queue::tests::Repo;
     use crate::service::{Node, OriginService, ServiceError};
     use crate::tree::Snapshots;
@@ -751,6 +1036,378 @@ grants = { all = "none", "user:ada" = "write" }
         let landed = fixture.land(&ada, from_side).unwrap();
         assert!(matches!(landed[..], [Landing::Landed { .. }]), "{landed:?}");
         assert!(fixture.at_main("protected/file").is_none());
+    }
+
+    #[test]
+    fn converging_cannot_smuggle_others_changes() {
+        let fixture = Fixture::new();
+        let eve = caller("user:eve");
+        let repo = &fixture.repo;
+        let base = fixture.tip(&TargetName::MAIN);
+        let files = [
+            ("README.md", "hello"),
+            ("src/lib.rs", "fn a() {}"),
+            ("secrets/key", "hunter2"),
+        ];
+        let first = repo.revision(
+            5,
+            &[],
+            base,
+            &[&files[..], &[("protected/file", "keep")]].concat(),
+        );
+        // Ada's head edits the protected file, eve's head `src`.
+        let ada_head = repo.revision(
+            5,
+            &[first],
+            base,
+            &[&files[..], &[("protected/file", "ada")]].concat(),
+        );
+        let mut eves = files.to_vec();
+        eves[1] = ("src/lib.rs", "fn eve() {}");
+        eves.push(("protected/file", "keep"));
+        let eve_head = repo.revision(5, &[first], base, &eves);
+
+        // Eve converges them, merging ada's edit in.
+        let merged = repo
+            .store
+            .merge(
+                Some(repo.store.get(first).unwrap().snapshot),
+                repo.store.get(eve_head).unwrap().snapshot,
+                repo.store.get(ada_head).unwrap().snapshot,
+            )
+            .unwrap();
+        let (id, records) =
+            Fixture::revision(5, "user:eve", base, vec![ada_head, eve_head], merged.tree);
+        let mut objects = merged.trees.clone();
+        objects.extend(records.clone());
+        assert_eq!(
+            forbidden(fixture.put(&eve, objects)),
+            Forbidden::Write(path("protected/file"))
+        );
+
+        // Had someone else written it, eve still couldn't land it.
+        repo.store.write_all(&merged.trees).unwrap();
+        repo.store.write_all(&records).unwrap();
+        assert_eq!(
+            repo.annotations()
+                .index()
+                .heads(ChangeId::from_bytes([5; 16])),
+            [id]
+        );
+        assert_eq!(
+            forbidden(fixture.land(&eve, Proposal::Change(ChangeId::from_bytes([5; 16])))),
+            Forbidden::Write(path("protected/file"))
+        );
+    }
+
+    /// `main`'s files, with `edits`.
+    fn main_with(edits: &[(&'static str, &'static str)]) -> Vec<(&'static str, &'static str)> {
+        let main = [
+            ("README.md", "hello"),
+            ("src/lib.rs", "fn a() {}"),
+            ("secrets/key", "hunter2"),
+            ("protected/file", "keep"),
+        ];
+        main.iter()
+            .map(|&(at, content)| {
+                let edit = edits.iter().find(|(edited, _)| *edited == at);
+                edit.copied().unwrap_or((at, content))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn successors_have_their_predecessors_effect_where_their_writer_cannot_write() {
+        let fixture = Fixture::new();
+        let (eve, repo) = (caller("user:eve"), &fixture.repo);
+        let base = fixture.tip(&TargetName::MAIN);
+        let succeed = |predecessors: Vec<RevisionId>, base, files: &[(&str, &str)]| {
+            let (tree, mut objects) = Fixture::objects(files);
+            let (id, records) = Fixture::revision(30, "user:eve", base, predecessors, tree);
+            objects.extend(records);
+            fixture.put(&eve, objects).map(|()| id)
+        };
+
+        // A successor of ada's change of the README and the library never
+        // undoes the README, which eve doesn't write.
+        let edits = [("README.md", "ada"), ("src/lib.rs", "fn ada() {}")];
+        let adas = repo.revision(30, &[], base, &main_with(&edits));
+        let undone = main_with(&[("src/lib.rs", "fn ada() {}")]);
+        assert_eq!(
+            forbidden(succeed(vec![adas], base, &undone)),
+            Forbidden::Write(path("README.md"))
+        );
+
+        // Eve takes the change over, keeping the README as ada changed it,
+        // and changes the library, which she writes.
+        let edits = [("README.md", "ada"), ("src/lib.rs", "fn eve() {}")];
+        let taken = succeed(vec![adas], base, &main_with(&edits)).unwrap();
+
+        // Rebased onto a tip where the protected file moved, the successor
+        // differs from its predecessor there, as their bases do: that's
+        // fine.
+        repo.change_on_main(31, &[("protected/file", "newer")]);
+        repo.land(31);
+        let tip = fixture.tip(&TargetName::MAIN);
+        let rebased = [&edits[..], &[("protected/file", "newer")]].concat();
+        let rebased = succeed(vec![taken], tip, &main_with(&rebased)).unwrap();
+
+        // Two successors with that effect converge into one.
+        let edits = [("README.md", "ada"), ("src/lib.rs", "fn other() {}")];
+        let other = succeed(vec![taken], base, &main_with(&edits)).unwrap();
+        let edits = [("README.md", "ada"), ("src/lib.rs", "fn both() {}")];
+        succeed(vec![rebased, other], base, &main_with(&edits)).unwrap();
+        let landed = fixture
+            .land(
+                &caller("user:ada"),
+                Proposal::Change(ChangeId::from_bytes([30; 16])),
+            )
+            .unwrap();
+        assert!(matches!(landed[..], [Landing::Landed { .. }]), "{landed:?}");
+        assert_eq!(
+            fixture.at_main("README.md").unwrap().id,
+            EncodedObject::blob(b"ada").id()
+        );
+    }
+
+    /// The probes of the third review: a successor that keeps ada's files,
+    /// but on a base that already has her edits, so it changes nothing.
+    #[test]
+    fn no_base_makes_a_successor_drop_its_predecessors_effect() {
+        let fixture = Fixture::new();
+        let repo = &fixture.repo;
+        let reader = scoped("user:eve", &["read /"], in_a_week());
+        let base = fixture.tip(&TargetName::MAIN);
+        let state = fixture.state(&TargetName::MAIN);
+        let edits = [("README.md", "ada"), ("src/lib.rs", "fn ada() {}")];
+        let adas = repo.revision(40, &[], base, &main_with(&edits));
+        let snapshot = repo.store.get(adas).unwrap().snapshot;
+        let succeed = |base, predecessors| {
+            let (id, records) = Fixture::revision(40, "user:eve", base, predecessors, snapshot);
+            fixture.put(&reader, records).map(|()| id)
+        };
+
+        // On ada's head itself.
+        assert_eq!(
+            forbidden(succeed(Base::Revision(adas), vec![adas])),
+            Forbidden::Below(ChangeId::from_bytes([40; 16]))
+        );
+        // On a revision of another change, of eve's, on ada's head.
+        let (on_adas, records) =
+            Fixture::revision(41, "user:eve", Base::Revision(adas), Vec::new(), snapshot);
+        fixture.put(&reader, records).unwrap();
+        assert_eq!(
+            forbidden(succeed(Base::Revision(on_adas), vec![adas])),
+            Forbidden::Below(ChangeId::from_bytes([41; 16]))
+        );
+        // On a tip where another change landed the same files.
+        repo.change_on_main(42, &edits);
+        repo.land(42);
+        let tip = fixture.tip(&TargetName::MAIN);
+        assert_eq!(
+            forbidden(succeed(tip, vec![adas])),
+            Forbidden::Write(path("README.md"))
+        );
+
+        // Taking the head over as it is is fine, but chains nothing back:
+        // the effect stays ada's.
+        let taken = succeed(base, vec![adas]).unwrap();
+        let (_, records) = Fixture::revision(40, "user:eve", base, vec![taken], state);
+        assert_eq!(
+            forbidden(fixture.put(&reader, records)),
+            Forbidden::Write(path("README.md"))
+        );
+    }
+
+    #[test]
+    fn changes_keep_their_history() {
+        let fixture = Fixture::new();
+        let repo = &fixture.repo;
+        let reader = scoped("user:eve", &["read /"], in_a_week());
+        let base = fixture.tip(&TargetName::MAIN);
+        let state = fixture.state(&TargetName::MAIN);
+        let change = ChangeId::from_bytes([43; 16]);
+        let adas = repo.revision(43, &[], base, &main_with(&[("README.md", "ada")]));
+        let snapshot = repo.store.get(adas).unwrap().snapshot;
+
+        // No second root, which would make the change diverge, and eve
+        // one of its creators.
+        let (_, records) = Fixture::revision(43, "user:eve", base, Vec::new(), state);
+        assert_eq!(
+            forbidden(fixture.put(&reader, records)),
+            Forbidden::History(change)
+        );
+        // Nor a successor evolving from a root of another change.
+        let (eves, records) = Fixture::revision(44, "user:eve", base, Vec::new(), state);
+        fixture.put(&reader, records).unwrap();
+        let (_, records) = Fixture::revision(43, "user:eve", base, vec![adas, eves], snapshot);
+        assert_eq!(
+            forbidden(fixture.put(&reader, records)),
+            Forbidden::History(change)
+        );
+        // Nor two roots of a new change in one batch.
+        let (_, mut records) = Fixture::revision(45, "user:ada", base, Vec::new(), state);
+        records.extend(Fixture::revision(45, "user:ada", base, Vec::new(), snapshot).1);
+        assert_eq!(
+            forbidden(fixture.put(&caller("user:ada"), records)),
+            Forbidden::History(ChangeId::from_bytes([45; 16]))
+        );
+
+        // So ada still created hers, and abandons it.
+        let abandon = statement(RecordId::Revision(adas), "core.abandon", "user:ada").encode();
+        fixture.put(&caller("user:ada"), vec![abandon]).unwrap();
+        let landed = fixture.land(&caller("user:ada"), Proposal::Change(change));
+        assert!(
+            matches!(
+                landed,
+                Err(ServiceError::Land(crate::queue::LandError::Abandoned(_)))
+            ),
+            "{landed:?}"
+        );
+    }
+
+    #[test]
+    fn successors_resolve_no_conflict_their_writer_cannot_write() {
+        let fixture = Fixture::new();
+        let (eve, repo) = (caller("user:eve"), &fixture.repo);
+        let base = fixture.tip(&TargetName::MAIN);
+        // Ada's revision holds a conflict in the README, and lists it.
+        let marked = main_with(&[("README.md", "<<<<<<< ours")]);
+        let adas = repo.revision(46, &[], base, &marked);
+        let snapshot = repo.store.get(adas).unwrap().snapshot;
+        let readme = Snapshots::new(&repo.store)
+            .entry_at(snapshot, &path("README.md"))
+            .unwrap();
+        let conflicts = Conflicts::new(vec![crate::conflict::Conflicted {
+            path: path("README.md"),
+            written: readme.map(|entry| entry.id),
+        }]);
+        let listing = |subject, issuer: &str, supersedes| {
+            let (payload, statement) = conflicts.statement(
+                RecordId::Revision(subject),
+                issuer.parse().unwrap(),
+                supersedes,
+            );
+            (payload, statement.encode())
+        };
+        let (payload, adas_listing) = listing(adas, "user:ada", None);
+        repo.store.write_all(&[payload, adas_listing]).unwrap();
+
+        // Eve takes it over as it is: without the conflict, she'd resolve it.
+        let (taken, records) = Fixture::revision(46, "user:eve", base, vec![adas], snapshot);
+        assert_eq!(
+            forbidden(fixture.put(&eve, records.clone())),
+            Forbidden::Resolve(path("README.md"))
+        );
+        let (payload, kept) = listing(taken, "user:eve", None);
+        let kept_id = StatementId::from(kept.id());
+        fixture
+            .put(&eve, [vec![payload, kept], records].concat())
+            .unwrap();
+
+        // Nor does she supersede that list with one without it, or with
+        // anything else.
+        let (payload, empty) = Conflicts::default().statement(
+            RecordId::Revision(taken),
+            "user:eve".parse().unwrap(),
+            Some(kept_id),
+        );
+        assert_eq!(
+            forbidden(fixture.put(&eve, vec![payload, empty.encode()])),
+            Forbidden::Resolve(path("README.md"))
+        );
+        let review = Statement {
+            supersedes: Some(kept_id),
+            ..statement(RecordId::Revision(taken), "review", "user:eve")
+        };
+        assert_eq!(
+            forbidden(fixture.put(&eve, vec![review.encode()])),
+            Forbidden::Resolve(path("README.md"))
+        );
+        let landed = fixture.land(
+            &caller("user:ada"),
+            Proposal::Change(ChangeId::from_bytes([46; 16])),
+        );
+        assert!(
+            matches!(
+                landed,
+                Err(ServiceError::Land(
+                    crate::queue::LandError::Unresolved { .. }
+                ))
+            ),
+            "{landed:?}"
+        );
+    }
+
+    #[test]
+    fn revisions_add_no_conflict_their_writer_cannot_write() {
+        let fixture = Fixture::new();
+        let (eve, base) = (caller("user:eve"), fixture.tip(&TargetName::MAIN));
+        let mallory = scoped("user:mallory", &["read /"], in_a_week());
+        let change = ChangeId::from_bytes([47; 16]);
+        let (tree, mut objects) = Fixture::objects(&main_with(&[("src/lib.rs", "fn eve() {}")]));
+        let (eves, records) = Fixture::revision(47, "user:eve", base, Vec::new(), tree);
+        objects.extend(records);
+        fixture.put(&eve, objects).unwrap();
+        let listing = |subject, issuer: &str| {
+            let readme = fixture.at_main("README.md").map(|entry| entry.id);
+            let conflicts = Conflicts::new(vec![crate::conflict::Conflicted {
+                path: path("README.md"),
+                written: readme,
+            }]);
+            let (payload, statement) =
+                conflicts.statement(RecordId::Revision(subject), issuer.parse().unwrap(), None);
+            vec![payload, statement.encode()]
+        };
+        // Mallory, who only reads, takes eve's change over as it is, and
+        // lists a conflict at the README, which eve doesn't write: then
+        // eve could never land it, nor resolve it.
+        let (mallorys, mut records) = Fixture::revision(47, "user:mallory", base, vec![eves], tree);
+        records.extend(listing(mallorys, "user:mallory"));
+        assert_eq!(
+            forbidden(fixture.put(&mallory, records)),
+            Forbidden::Conflict(path("README.md"))
+        );
+        // Nor does a root list one its base doesn't have.
+        let (root, mut records) = Fixture::revision(48, "user:eve", base, Vec::new(), tree);
+        records.extend(listing(root, "user:eve"));
+        assert_eq!(
+            forbidden(fixture.put(&eve, records)),
+            Forbidden::Conflict(path("README.md"))
+        );
+        let landed = fixture.land(&eve, Proposal::Change(change)).unwrap();
+        assert!(matches!(landed[..], [Landing::Landed { .. }]), "{landed:?}");
+
+        // A root on a revision carries its conflicts.
+        let marked = main_with(&[("README.md", "<<<<<<< ours")]);
+        let adas = fixture.repo.revision(49, &[], base, &marked);
+        let snapshot = fixture.repo.store.get(adas).unwrap().snapshot;
+        let readme = Snapshots::new(&fixture.repo.store)
+            .entry_at(snapshot, &path("README.md"))
+            .unwrap();
+        let conflicts = Conflicts::new(vec![crate::conflict::Conflicted {
+            path: path("README.md"),
+            written: readme.map(|entry| entry.id),
+        }]);
+        let carry = |subject, issuer: &str| {
+            let (payload, statement) =
+                conflicts.statement(RecordId::Revision(subject), issuer.parse().unwrap(), None);
+            vec![payload, statement.encode()]
+        };
+        fixture
+            .repo
+            .store
+            .write_all(&carry(adas, "user:ada"))
+            .unwrap();
+        let on_adas = Base::Revision(adas);
+        let (root, records) = Fixture::revision(50, "user:eve", on_adas, Vec::new(), snapshot);
+        assert_eq!(
+            forbidden(fixture.put(&eve, records.clone())),
+            Forbidden::Resolve(path("README.md"))
+        );
+        fixture
+            .put(&eve, [records, carry(root, "user:eve")].concat())
+            .unwrap();
     }
 
     #[test]

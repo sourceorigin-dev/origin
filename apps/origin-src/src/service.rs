@@ -14,10 +14,9 @@
 //! Landings on one target still go one at a time, through the target's
 //! queue lock.
 //!
-//! Every method takes the [`Caller`], whose [`Rights`] the policy in force
-//! resolves, and does only what they allow, as
-//! [`permissions`](crate::permissions) explains: what each caller reads is
-//! filtered, and what they write is checked.
+//! Every method takes the [`Caller`], and does only what their [`Rights`]
+//! allow, as [`permissions`](crate::permissions) explains: what each
+//! caller reads is filtered, and what they write is checked.
 
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
@@ -767,8 +766,10 @@ impl OriginService {
             });
         };
         // A signed-in caller's token may narrow them out of `admin`.
-        let writer = Writer::new(&batch, principal, &rights);
-        self.check_records(&batch, decoded, Some(writer), |_| rights.admin)
+        self.annotations(|annotations| {
+            let writer = Writer::new(&batch, annotations, principal, &rights);
+            self.check_records(&batch, decoded, Some(writer), |_| rights.admin)
+        })
     }
 
     /// Checks the records of `batch`, `decoded`, as
