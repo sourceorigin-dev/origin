@@ -241,7 +241,7 @@ mod tests {
                 let issuer = "node:queue".parse().unwrap();
                 let promotions = Annotations::open(&store)
                     .unwrap()
-                    .promote(second, &issuer)
+                    .promote(second, &issuer, |_| Ok(true))
                     .unwrap();
                 done.send(promotions.len()).unwrap();
             });

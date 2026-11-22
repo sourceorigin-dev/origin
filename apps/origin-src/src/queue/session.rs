@@ -20,6 +20,7 @@ use crate::ancestry::Ancestry;
 use crate::annotations::{AnnotateError, Annotations, Claim};
 use crate::conflict::Conflicts;
 use crate::oplog::Effect;
+use crate::permissions::{Forbidden, Reader};
 use crate::policy::{Policy, PolicyError};
 use crate::store::{Store, StoreError};
 
@@ -197,6 +198,13 @@ impl<P: Platform> Session<'_, '_, P> {
         if !candidate.trees.is_empty() {
             store.write_all(&candidate.trees)?;
         }
+        if !self.queue.submitter.writes_all() {
+            for change in store.diff(self.state, candidate.state)? {
+                if !self.queue.submitter.writes(&change.path) {
+                    return Err(Forbidden::Write(change.path).into());
+                }
+            }
+        }
         // What a landing on `policy` lands governs the next one, which
         // this node must still be the authority of.
         let landed_policy = if self.onto == TargetName::POLICY {
@@ -219,9 +227,13 @@ impl<P: Platform> Session<'_, '_, P> {
             // Promotion reads the revision.
             store.write_all(&records)?;
             records.clear();
-            let promotions = self
-                .annotations
-                .promotions(candidate.subject, &self.queue.principal())?;
+            // Only from what the submitter sees.
+            let mut reader = Reader::new(store, &self.queue.submitter);
+            let promotions = self.annotations.promotions(
+                candidate.subject,
+                &self.queue.principal(),
+                |record| reader.sees(record),
+            )?;
             let mut claims = self.annotations.claims(candidate.subject)?;
             for promotion in promotions {
                 let encoded = promotion.encode();

@@ -17,9 +17,12 @@
 //!    statement about the revision lists the paths, and the change waits,
 //!    blocked, until a new revision of it merges.
 //! 3. **Policy.** The policy in force now must name this node as the
-//!    target's authority. On `policy`, that's the policy of the acceptance
-//!    before, never the one landing ([`Policy::governing`]). Each of the
-//!    target's requirements needs a [claim](crate::annotations::Claim)
+//!    target's authority, and the submitter must write every path the
+//!    landing changes on the target, whatever it lands: a revision made on
+//!    an old acceptance, or another target, never reverts or deletes what
+//!    they may not change. On `policy`, the policy is the acceptance
+//!    before's, never the one landing's ([`Policy::governing`]). Each of
+//!    the target's requirements needs a [claim](crate::annotations::Claim)
 //!    about the revision that lands: results with the same input digest
 //!    are promoted to it first, and a valid promotion claims what its
 //!    original does, as its original's issuer.
@@ -49,6 +52,7 @@ use std::io;
 use std::path::PathBuf;
 
 use origin_platform::{DurableWrite, LockMode, LockedFile, Native, Platform};
+use origin_shared::access::{Level, PathAccess};
 use origin_shared::landing::{Blocked, Landing, Pending, Proposal};
 use origin_shared::{
     AcceptanceBody, AcceptanceId, ChangeId, EncodedObject, Head, NodeKey, Principal, PrincipalName,
@@ -57,6 +61,7 @@ use origin_shared::{
 
 use crate::annotations::{AnnotateError, Annotations};
 use crate::conflict::Conflicts;
+use crate::permissions::Forbidden;
 use crate::policy::{Policy, PolicyError};
 use crate::store::{Store, StoreError};
 
@@ -69,13 +74,30 @@ pub struct Queue<'a, P = Native> {
     store: &'a Store<P>,
     key: &'a NodeKey,
     node: PrincipalName,
+    /// What the submitter may do with each path.
+    submitter: PathAccess,
 }
 
 impl<'a, P: Platform> Queue<'a, P> {
     /// The queues of `store`, run by the node `node`, which signs with
     /// `key`.
     pub fn new(store: &'a Store<P>, key: &'a NodeKey, node: PrincipalName) -> Self {
-        Self { store, key, node }
+        Self {
+            store,
+            key,
+            node,
+            submitter: PathAccess::uniform(Level::Write),
+        }
+    }
+
+    /// The queues, landing for a submitter who may do `paths`: everything,
+    /// by default.
+    #[must_use]
+    pub fn submitted_by(self, paths: PathAccess) -> Self {
+        Self {
+            submitter: paths,
+            ..self
+        }
     }
 
     /// This node, which issues the statements and revisions the queue
@@ -453,6 +475,9 @@ pub enum LandError {
     /// The policy in force cannot be read.
     #[error(transparent)]
     Policy(#[from] PolicyError),
+    /// The submitter may not change what the landing changes.
+    #[error(transparent)]
+    Forbidden(#[from] Forbidden),
     /// A conflict cannot be recorded.
     #[error(transparent)]
     Annotate(#[from] AnnotateError),

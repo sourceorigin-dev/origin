@@ -498,7 +498,7 @@ mod tests {
         let promoter = principal("node:queue");
         Annotations::open(store)
             .unwrap()
-            .promote(RecordId::Revision(revision), &promoter)
+            .promote(RecordId::Revision(revision), &promoter, |_| Ok(true))
             .unwrap()
             .into_iter()
             .map(|(_, statement)| {

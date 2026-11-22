@@ -1021,16 +1021,29 @@ impl OriginService {
     /// Lands what `request` proposes, with this node as the authority: a
     /// change with the changes below it the target doesn't have yet, or
     /// another target's tip. A change lands by default on the target its
-    /// stack is on.
+    /// stack is on. The caller must be signed in, may land on the target,
+    /// and must write every path the landing changes on it.
     ///
     /// # Errors
     ///
     /// Fails if the change or a target doesn't exist, a target was given
-    /// no target to land on, this node isn't the target's authority, the
-    /// change can't land as it is (see [`LandError`]), or the records
-    /// cannot be read or written.
-    pub fn land(&self, _caller: &Caller, request: &LandRequest) -> Result<Landings, ServiceError> {
-        let queue = Queue::new(&self.store, &self.node.key, self.node.name.clone());
+    /// no target to land on, the caller may not land there, this node isn't
+    /// the target's authority, the change can't land as it is (see
+    /// [`LandError`]), or the records cannot be read or written.
+    pub fn land(&self, caller: &Caller, request: &LandRequest) -> Result<Landings, ServiceError> {
+        if *caller == Caller::Anonymous {
+            return Err(Forbidden::Anonymous.into());
+        }
+        let rights = self.rights(caller)?;
+        let may_land = |onto: &TargetName| {
+            if rights.may_land(onto) {
+                Ok(())
+            } else {
+                Err(ServiceError::from(Forbidden::Land(onto.clone())))
+            }
+        };
+        let queue = Queue::new(&self.store, &self.node.key, self.node.name.clone())
+            .submitted_by(rights.paths.clone());
         let landed = self.annotations(|annotations| {
             let landed = match &request.proposal {
                 Proposal::Change(change) => {
@@ -1038,11 +1051,13 @@ impl OriginService {
                         Some(onto) => onto.clone(),
                         None => self.target_of(annotations.index(), *change)?,
                     };
+                    may_land(&onto)?;
                     let landings = queue.land_change(annotations, *change, &onto)?;
                     Landings { onto, landings }
                 }
                 Proposal::Target(source) => {
                     let onto = request.onto.clone().ok_or(ServiceError::NoTarget)?;
+                    may_land(&onto)?;
                     let landing = queue.land_target(annotations, source, &onto)?;
                     Landings {
                         onto,
@@ -1093,18 +1108,24 @@ impl OriginService {
     }
 
     /// Creates a target at the tip of another, with this node as its
-    /// authority.
+    /// authority. The caller must be signed in, and may land on it.
     ///
     /// # Errors
     ///
-    /// Fails if the name is taken, the other target doesn't exist, the
-    /// policy wouldn't make this node the new target's authority, or the
-    /// records cannot be written.
+    /// Fails if the caller may not land on the target, the name is taken,
+    /// the other target doesn't exist, the policy wouldn't make this node
+    /// the new target's authority, or the records cannot be written.
     pub fn create_target(
         &self,
-        _caller: &Caller,
+        caller: &Caller,
         request: &NewTarget,
     ) -> Result<Head, ServiceError> {
+        if *caller == Caller::Anonymous {
+            return Err(Forbidden::Anonymous.into());
+        }
+        if !self.rights(caller)?.may_land(&request.name) {
+            return Err(Forbidden::Land(request.name.clone()).into());
+        }
         let queue = Queue::new(&self.store, &self.node.key, self.node.name.clone());
         let head = queue.create_target(&request.name, &request.from)?;
         self.wakeup.notify();
@@ -1389,6 +1410,7 @@ impl ServiceError {
                 | LandError::Abandoned(_)
                 | LandError::Unresolved { .. }
                 | LandError::InvalidPolicy(_) => ErrorCode::Conflict,
+                LandError::Forbidden(_) => ErrorCode::Forbidden,
                 LandError::Store(error) => Self::store_code(error),
                 LandError::Policy(_) | LandError::Annotate(_) => ErrorCode::Internal,
             },

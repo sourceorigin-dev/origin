@@ -155,10 +155,12 @@ impl<P: Platform> Annotations<'_, P> {
     }
 
     /// The statements promoting results to `subject`, as `issuer` would
-    /// issue them, without writing them, sorted by kind: for each
+    /// issue them for a caller who `sees` some records, without writing
+    /// them, sorted by kind: for each
     /// [promotion group](Statement::promotion_group), the latest statement
-    /// about another record with the same input digest as the subject,
-    /// unless its issuer superseded it. Groups whose kind and issuer the
+    /// about another record the caller sees with the same input digest as
+    /// the subject, unless its issuer superseded it. So a promotion never
+    /// copies a result, and its payload, that the caller can't read. Groups whose kind and issuer the
     /// subject already has a result of, directly or promoted, are skipped:
     /// a result that ran there wins. A statement has no snapshot, so
     /// nothing is promoted to one.
@@ -171,6 +173,7 @@ impl<P: Platform> Annotations<'_, P> {
         &mut self,
         subject: RecordId,
         issuer: &Principal,
+        mut sees: impl FnMut(RecordId) -> Result<bool, StoreError>,
     ) -> Result<Vec<Statement>, StoreError> {
         let Some(snapshot) = self.store.snapshot_of(subject)? else {
             return Ok(Vec::new());
@@ -202,7 +205,7 @@ impl<P: Platform> Annotations<'_, P> {
                     continue;
                 }
                 let statement = self.store.get(id)?;
-                if self.superseded_by(id, &statement)?.is_none() {
+                if self.superseded_by(id, &statement)?.is_none() && sees(statement.subject)? {
                     promotions.push(Statement {
                         subject,
                         issuer: issuer.clone(),
@@ -220,9 +223,10 @@ impl<P: Platform> Annotations<'_, P> {
     }
 
     /// Issues the [`promotions`](Self::promotions) to `subject` as
-    /// `issuer`, returning them. A promotion refers to its original's
-    /// payload without writing it, so it [holds the objects](Store::hold_objects)
-    /// from finding the originals to writing the promotions.
+    /// `issuer`, for a caller who `sees` some records, returning them. A
+    /// promotion refers to its original's payload without writing it, so
+    /// it [holds the objects](Store::hold_objects) from finding the
+    /// originals to writing the promotions.
     ///
     /// # Errors
     ///
@@ -232,9 +236,10 @@ impl<P: Platform> Annotations<'_, P> {
         &mut self,
         subject: RecordId,
         issuer: &Principal,
+        sees: impl FnMut(RecordId) -> Result<bool, StoreError>,
     ) -> Result<Vec<(StatementId, Statement)>, StoreError> {
         let _held = self.store.hold_objects()?;
-        let promotions = self.promotions(subject, issuer)?;
+        let promotions = self.promotions(subject, issuer, sees)?;
         let encoded: Vec<_> = promotions.iter().map(Statement::encode).collect();
         self.store.write_all(&encoded)?;
         Ok(encoded
