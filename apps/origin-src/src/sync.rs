@@ -22,11 +22,22 @@
 //!   something reads it, such as a checkout. A snapshot is marked while it's
 //!   fetched ([`Store::fetching`]), so one whose fetch was interrupted is
 //!   fetched again rather than taken for whole.
+//! - **Pushing** shares revisions, with their snapshots, and statements. It
+//!   never lands anything. It first compares each change's heads with the
+//!   remote's, and refuses before uploading anything when the remote has a
+//!   revision this node lacks: the change is stale. The remote checks the
+//!   heads again as it publishes the revisions, so a push racing another
+//!   is refused too. Revisions only go to a remote that has the acceptance
+//!   they're based on. Each object goes after those it needs: snapshots
+//!   and attachments, then revisions, then statements. A statement that
+//!   needs one the remote neither has nor gets stays here, and the push
+//!   says so.
 //!
-//! Transfers are bounded: a fetch's answers stop at
-//! [`Pack::LIMIT`](origin_shared::pack::Pack::LIMIT), with the rest asked
-//! for again (see [`Part`]). Fetched records are written before the chains
-//! that refer to them.
+//! Transfers are bounded, in both directions: a push is split into
+//! requests of at most [`Pack::LIMIT`], and a fetch's answers stop there,
+//! with the rest asked for again (see [`Part`]). Each request of a push
+//! expects the heads the requests before it left. Fetched records are
+//! written before the chains that refer to them.
 
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -34,14 +45,16 @@ use std::mem;
 
 use origin_platform::Native;
 use origin_shared::api::{
-    ErrorCode, EventsQuery, FetchRecords, FetchSnapshot, InventoryRequest, List, LogQuery,
+    ErrorCode, EventsQuery, Expected, FetchRecords, FetchSnapshot, Inventory, InventoryRequest,
+    List, LogQuery, PutQuery,
 };
 use origin_shared::event::EventKind;
 use origin_shared::object::{BadSignature, DecodeError};
-use origin_shared::pack::Part;
+use origin_shared::pack::{Pack, Packer, Part};
 use origin_shared::{
-    Acceptance, AcceptanceId, ChangeId, EncodedObject, Head, Object, ObjectId, ObjectKind,
-    Principal, PrincipalName, Record, RecordId, Revision, TargetName, TreeId,
+    Acceptance, AcceptanceId, Base, ChangeId, EncodedObject, Head, Object, ObjectId, ObjectKind,
+    Principal, PrincipalName, Record, RecordId, Revision, RevisionId, Statement, StatementId,
+    TargetName, TreeId,
 };
 
 use crate::annotations::Annotations;
@@ -57,6 +70,9 @@ pub struct Sync<'a> {
     remote: &'a Remote,
     /// This node, which flags the divergence fetched revisions reveal.
     node: Principal,
+    /// The most bytes a push's request holds: [`Pack::LIMIT`], but in
+    /// tests.
+    pack_limit: usize,
 }
 
 /// A target whose chain a fetch extended.
@@ -112,6 +128,42 @@ pub struct Moved {
     pub changes: Option<HashSet<ChangeId>>,
 }
 
+/// What a push shared.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Pushed {
+    /// The revisions the remote didn't have.
+    pub revisions: usize,
+    /// The statements the remote didn't have.
+    pub statements: usize,
+    /// Every object sent: those, and the blobs and trees of their
+    /// snapshots the remote lacked.
+    pub objects: usize,
+    /// The statements that stay here: they need a record the remote
+    /// neither has nor got, such as a statement they supersede about
+    /// another change, or the original they promote.
+    pub unsent: Vec<StatementId>,
+}
+
+/// The statements a push sends, in order, and those that stay.
+struct Statements {
+    statements: Vec<(StatementId, Statement)>,
+    unsent: Vec<StatementId>,
+}
+
+/// What a push sends, and what each of its requests expects of the
+/// remote.
+#[derive(Default)]
+struct Transfer {
+    /// The objects, each after those it needs.
+    ids: Vec<ObjectId>,
+    /// Those that go in the same request as the one before them.
+    joined: HashSet<ObjectId>,
+    /// The change of each revision sent, and those it evolves from.
+    revisions: HashMap<ObjectId, (ChangeId, Vec<RevisionId>)>,
+    /// The heads of each change on the remote, as of the requests sent.
+    heads: HashMap<ChangeId, Vec<RevisionId>>,
+}
+
 /// The new acceptances of a target, verified and about to be appended.
 struct Chain {
     target: TargetName,
@@ -120,6 +172,50 @@ struct Chain {
     /// The remote's head: the last of `acceptances`.
     to: Head,
     acceptances: Vec<(AcceptanceId, Acceptance)>,
+}
+
+impl Transfer {
+    /// Adds `revisions`, in order, and returns `statements`.
+    fn add_revisions(
+        &mut self,
+        revisions: &[(RevisionId, Revision)],
+        statements: Vec<(StatementId, Statement)>,
+    ) -> Vec<(StatementId, Statement)> {
+        for (id, revision) in revisions {
+            self.ids.push((*id).into());
+            self.revisions.insert(
+                (*id).into(),
+                (revision.change, revision.predecessors.clone()),
+            );
+        }
+        statements
+    }
+
+    /// Adds `statements`, in order.
+    fn add_statements(&mut self, statements: &[(StatementId, Statement)]) {
+        self.ids
+            .extend(statements.iter().map(|&(id, _)| ObjectId::from(id)));
+    }
+
+    /// The heads the changes of `revisions`, which a request sends, must
+    /// have on the remote before it: those after the requests before.
+    /// Then moves them, as the request does.
+    fn expect(&mut self, revisions: &[ObjectId]) -> Vec<Expected> {
+        let mut expect: Vec<Expected> = Vec::new();
+        for id in revisions {
+            let (change, predecessors) = &self.revisions[id];
+            let heads = self.heads.entry(*change).or_default();
+            if !expect.iter().any(|expected| expected.change == *change) {
+                expect.push(Expected {
+                    change: *change,
+                    heads: heads.clone(),
+                });
+            }
+            heads.retain(|head| !predecessors.contains(head));
+            heads.push((*id).into());
+        }
+        expect
+    }
 }
 
 impl<'a> Sync<'a> {
@@ -133,6 +229,16 @@ impl<'a> Sync<'a> {
             store,
             remote,
             node: Principal::Node(node),
+            pack_limit: Pack::LIMIT,
+        }
+    }
+
+    /// Syncs pushing requests of at most `limit` bytes.
+    #[cfg(test)]
+    fn with_pack_limit(self, limit: usize) -> Self {
+        Self {
+            pack_limit: limit,
+            ..self
         }
     }
 
@@ -715,6 +821,354 @@ impl<'a> Sync<'a> {
         }
         Ok(())
     }
+
+    /// Shares `changes`, and the changes below them, with the remote, as
+    /// the module explains.
+    ///
+    /// # Errors
+    ///
+    /// Fails if a change has no revision here, is stale, or is based on an
+    /// acceptance the remote doesn't have, or if the remote or the store
+    /// fails. Nothing is sent then, unless the change moved on the remote
+    /// while the push was sending: then the snapshots and records sent
+    /// before stay there.
+    pub fn push(&self, changes: &[ChangeId]) -> Result<Pushed, SyncError> {
+        let index = Index::open(self.store)?;
+        let changes = self.stack(&index, changes)?;
+        let inventories = self.inventories(&index, &changes)?;
+        let mut shared: HashSet<ObjectId> = HashSet::new();
+        for inventory in &inventories {
+            shared.extend(inventory.revisions.iter().map(|&id| ObjectId::from(id)));
+            shared.extend(inventory.statements.iter().map(|&id| ObjectId::from(id)));
+        }
+
+        let mut revisions = Vec::new();
+        for &change in &changes {
+            for &id in index.revisions(change) {
+                if !shared.contains(&id.into()) {
+                    revisions.push((id, self.store.get(id)?));
+                }
+            }
+        }
+        let revisions = Self::bottom_up(revisions);
+        let mut checked = HashSet::new();
+        for (id, revision) in &revisions {
+            if let Base::Acceptance(base) = revision.base
+                && checked.insert(base)
+            {
+                self.check_shared(*id, revision, base)?;
+            }
+        }
+
+        // Snapshots and attachments first, then revisions, then statements.
+        let mut content = Vec::new();
+        let mut seen = HashSet::new();
+        for (id, revision) in &revisions {
+            // The remote has these snapshots, or gets them first.
+            let mut have = vec![match revision.base {
+                Base::Acceptance(base) => self.store.get(base)?.body().state,
+                Base::Revision(base) => self.store.get(base)?.snapshot,
+            }];
+            for &predecessor in &revision.predecessors {
+                if shared.contains(&predecessor.into()) {
+                    have.push(self.store.get(predecessor)?.snapshot);
+                }
+            }
+            let have = self.store.held_whole(have)?;
+            // Children first: a tree goes after what it holds.
+            for placed in self
+                .store
+                .added(revision.snapshot, &have, &[])?
+                .into_iter()
+                .rev()
+            {
+                if seen.insert(placed.entry.id) {
+                    content.push(placed.entry.id);
+                }
+            }
+            if seen.insert(revision.description.into()) {
+                content.push(revision.description.into());
+            }
+            shared.insert((*id).into());
+        }
+        let Statements { statements, unsent } = self.statements(&index, &changes, &mut shared)?;
+        for (_, statement) in &statements {
+            if let Some(payload) = statement.payload
+                && self.store.contains(payload.into())?
+                && seen.insert(payload.into())
+            {
+                content.push(payload.into());
+            }
+        }
+        let objects = content.len() + revisions.len() + statements.len();
+        // Counted before grouping, which leaves only those sent alone.
+        let pushed_statements = statements.len();
+        let mut transfer = Transfer {
+            ids: content,
+            heads: inventories
+                .into_iter()
+                .map(|inventory| (inventory.change, inventory.heads))
+                .collect(),
+            ..Transfer::default()
+        };
+        let statements = transfer.add_revisions(&revisions, statements);
+        transfer.add_statements(&statements);
+        if let Err(error) = self.send(transfer) {
+            // The remote refused as a change moved: say which.
+            if let SyncError::Remote(remote) = &error
+                && remote.code() == Some(ErrorCode::Conflict)
+            {
+                self.inventories(&Index::open(self.store)?, &changes)?;
+            }
+            return Err(error);
+        }
+        Ok(Pushed {
+            revisions: revisions.len(),
+            statements: pushed_statements,
+            objects,
+            unsent,
+        })
+    }
+
+    /// What the remote holds of `changes`, refusing if it has a head of one
+    /// this node lacks: the change is stale.
+    fn inventories(
+        &self,
+        index: &Index,
+        changes: &[ChangeId],
+    ) -> Result<Vec<Inventory>, SyncError> {
+        let inventories = self.remote.inventory(&InventoryRequest {
+            changes: changes.to_vec(),
+        })?;
+        for inventory in &inventories {
+            let local = index.revisions(inventory.change);
+            if let Some(&head) = inventory.heads.iter().find(|head| !local.contains(head)) {
+                return Err(SyncError::Stale {
+                    change: inventory.change,
+                    head,
+                });
+            }
+        }
+        Ok(inventories)
+    }
+
+    /// `revisions`, each after those of them it evolves from, is based on
+    /// or depends on.
+    fn bottom_up(revisions: Vec<(RevisionId, Revision)>) -> Vec<(RevisionId, Revision)> {
+        let position: HashMap<RevisionId, usize> = revisions
+            .iter()
+            .enumerate()
+            .map(|(position, &(id, _))| (id, position))
+            .collect();
+        let mut placed = vec![false; revisions.len()];
+        let mut order = Vec::with_capacity(revisions.len());
+        for start in 0..revisions.len() {
+            // Depth first, placing each revision once those below it are.
+            let mut stack = vec![(start, false)];
+            while let Some((at, below_placed)) = stack.pop() {
+                if placed[at] {
+                    continue;
+                }
+                if below_placed {
+                    placed[at] = true;
+                    order.push(at);
+                    continue;
+                }
+                stack.push((at, true));
+                let revision = &revisions[at].1;
+                let base = match revision.base {
+                    Base::Revision(base) => Some(base),
+                    Base::Acceptance(_) => None,
+                };
+                let below = base.iter().chain(&revision.deps);
+                for below in below.chain(&revision.predecessors) {
+                    if let Some(&below) = position.get(below)
+                        && !placed[below]
+                    {
+                        stack.push((below, false));
+                    }
+                }
+            }
+        }
+        let mut revisions: Vec<_> = revisions.into_iter().map(Some).collect();
+        order
+            .into_iter()
+            .filter_map(|at| revisions[at].take())
+            .collect()
+    }
+
+    /// The statements about the revisions of `changes`, and about
+    /// statements about them, that the remote lacks, each after those of
+    /// them it needs, adding each to `shared`; and those that need a record
+    /// that isn't in `shared`, which stay.
+    fn statements(
+        &self,
+        index: &Index,
+        changes: &[ChangeId],
+        shared: &mut HashSet<ObjectId>,
+    ) -> Result<Statements, SyncError> {
+        let mut subjects: Vec<RecordId> = changes
+            .iter()
+            .flat_map(|&change| index.revisions(change))
+            .map(|&id| RecordId::Revision(id))
+            .collect();
+        let mut waiting = Vec::new();
+        let mut seen = HashSet::new();
+        while let Some(subject) = subjects.pop() {
+            for &id in index.statements(subject) {
+                if !seen.insert(id) {
+                    continue;
+                }
+                subjects.push(RecordId::Statement(id));
+                if shared.contains(&id.into()) {
+                    continue;
+                }
+                waiting.push((id, self.store.get(id)?));
+            }
+        }
+        let mut ordered = Vec::new();
+        loop {
+            let before = waiting.len();
+            waiting.retain(|(id, statement): &(StatementId, Statement)| {
+                let ready = Dependencies::of_statement(statement)
+                    .records
+                    .iter()
+                    .all(|(needed, _)| shared.contains(needed));
+                if ready {
+                    shared.insert((*id).into());
+                    ordered.push((*id, statement.clone()));
+                }
+                !ready
+            });
+            if waiting.len() == before {
+                break;
+            }
+        }
+        Ok(Statements {
+            statements: ordered,
+            unsent: waiting.into_iter().map(|(id, _)| id).collect(),
+        })
+    }
+
+    /// Puts the objects of `transfer`, in order, in requests of at most
+    /// [`Pack::LIMIT`], keeping together those it joins.
+    fn send(&self, mut transfer: Transfer) -> Result<(), SyncError> {
+        let ids = mem::take(&mut transfer.ids);
+        let mut packer = Packer::new(self.pack_limit);
+        let mut together = Vec::new();
+        let mut filling = Vec::new();
+        self.store.read_each(&ids, |object| {
+            if !transfer.joined.contains(&object.id()) {
+                let objects = mem::take(&mut together);
+                self.add(&mut packer, objects, &mut filling, &mut transfer)?;
+            }
+            together.push(object);
+            Ok::<_, SyncError>(true)
+        })?;
+        self.add(&mut packer, together, &mut filling, &mut transfer)?;
+        if !packer.is_empty() {
+            self.put(packer.finish(), &filling, &mut transfer)?;
+        }
+        Ok(())
+    }
+
+    /// Adds `together` to `packer`, all in one pack: if they don't fit,
+    /// first puts the pack it filled, whose revisions are `filling`.
+    fn add(
+        &self,
+        packer: &mut Packer,
+        together: Vec<EncodedObject>,
+        filling: &mut Vec<ObjectId>,
+        transfer: &mut Transfer,
+    ) -> Result<(), SyncError> {
+        let revisions: Vec<ObjectId> = together
+            .iter()
+            .map(EncodedObject::id)
+            .filter(|id| transfer.revisions.contains_key(id))
+            .collect();
+        if let Some(full) = packer.add_together(together) {
+            self.put(full, &mem::take(filling), transfer)?;
+        }
+        filling.extend(revisions);
+        Ok(())
+    }
+
+    /// Puts `pack`, whose revisions are `revisions`, if their changes have
+    /// the heads `transfer` expects of them.
+    fn put(
+        &self,
+        pack: Pack,
+        revisions: &[ObjectId],
+        transfer: &mut Transfer,
+    ) -> Result<(), SyncError> {
+        let query = PutQuery {
+            expect: List(transfer.expect(revisions)),
+        };
+        self.remote.push(pack, &query)?;
+        Ok(())
+    }
+
+    /// `changes`, and every change below their revisions, following their
+    /// bases and dependencies.
+    fn stack(&self, index: &Index, changes: &[ChangeId]) -> Result<Vec<ChangeId>, SyncError> {
+        let mut stack = Vec::new();
+        let mut seen = HashSet::new();
+        let mut next = changes.to_vec();
+        while let Some(change) = next.pop() {
+            if !seen.insert(change) {
+                continue;
+            }
+            let revisions = index.revisions(change);
+            if revisions.is_empty() {
+                return Err(SyncError::UnknownChange(change));
+            }
+            stack.push(change);
+            for &id in revisions {
+                let revision = self.store.get(id)?;
+                let base = match revision.base {
+                    Base::Revision(base) => Some(base),
+                    Base::Acceptance(_) => None,
+                };
+                for below in base.into_iter().chain(revision.deps) {
+                    if self.store.contains(below.into())? {
+                        next.push(self.store.get(below)?.change);
+                    }
+                }
+            }
+        }
+        Ok(stack)
+    }
+
+    /// Checks that the remote has `base`, the acceptance the revision `id`
+    /// is based on.
+    fn check_shared(
+        &self,
+        id: RevisionId,
+        revision: &Revision,
+        base: AcceptanceId,
+    ) -> Result<(), SyncError> {
+        let body = self.store.get(base)?.body().clone();
+        let unshared = |target| SyncError::Unshared {
+            change: revision.change,
+            revision: id,
+            target,
+            seq: body.seq,
+        };
+        let Some(target) = self.store.target_name(body.target)? else {
+            return Err(unshared(None));
+        };
+        let query = LogQuery {
+            target: target.clone(),
+            since: body.seq,
+            limit: Some(1),
+        };
+        match self.remote.log(&query) {
+            Ok(entries) if entries.first().is_some_and(|entry| entry.id == base) => Ok(()),
+            Ok(_) => Err(unshared(Some(target))),
+            Err(error) if error.code() == Some(ErrorCode::NotFound) => Err(unshared(Some(target))),
+            Err(error) => Err(error.into()),
+        }
+    }
 }
 
 /// Why an acceptance fetched doesn't verify.
@@ -752,6 +1206,9 @@ pub enum SyncError {
     /// The remote has no such target.
     #[error("the remote has no target `{0}`")]
     UnknownTarget(TargetName),
+    /// The change has no revision to push.
+    #[error("change {} has no revisions", .0.short())]
+    UnknownChange(ChangeId),
     /// A target's chain here isn't a start of the remote's.
     #[error("the history of `{0}` here differs from the remote's")]
     Diverged(TargetName),
@@ -765,6 +1222,40 @@ pub enum SyncError {
         /// Why.
         #[source]
         why: Unverified,
+    },
+    /// The remote has a revision of a change that this node lacks: the
+    /// change moved on there.
+    #[error(
+        "change {} is stale: the remote has revision {} of it, which this repository doesn't. \
+         Run `origin fetch`, then `origin converge {}`",
+        change.short(),
+        head.short(),
+        change.short()
+    )]
+    Stale {
+        /// The change.
+        change: ChangeId,
+        /// The remote's head this node lacks.
+        head: RevisionId,
+    },
+    /// A revision to push is based on an acceptance the remote doesn't
+    /// have.
+    #[error(
+        "revision {} of change {} is based on {} #{seq}, which the remote doesn't have: \
+         start the change on a target the remote has, with `origin new --on`",
+        revision.short(),
+        change.short(),
+        target.as_ref().map_or_else(|| "a target".to_owned(), |target| format!("`{target}`"))
+    )]
+    Unshared {
+        /// The change.
+        change: ChangeId,
+        /// The revision.
+        revision: RevisionId,
+        /// The base's target, if this node knows its name.
+        target: Option<TargetName>,
+        /// The base's position.
+        seq: u64,
     },
     /// The remote sent an object that doesn't decode.
     #[error("the remote sent a malformed object {id}")]
@@ -791,8 +1282,7 @@ mod tests {
 
     use origin_platform::Native;
     use origin_shared::event::Filter;
-    use origin_shared::pack::Pack;
-    use origin_shared::{AcceptanceBody, Base, NodeKey, RepoPath, Statement};
+    use origin_shared::{AcceptanceBody, NodeKey, RepoPath, Verdict};
 
     use super::*;
     use crate::events::Events;
@@ -836,6 +1326,35 @@ mod tests {
 
         fn sync(&self) -> Sync<'_> {
             Sync::new(&self.store, &self.remote, "laptop".parse().unwrap())
+        }
+
+        /// Writes a revision of `change` with `files` on `base`, with every
+        /// object it needs.
+        fn revision(
+            &self,
+            change: u8,
+            predecessors: &[RevisionId],
+            base: Base,
+            files: &[(&str, &str)],
+        ) -> RevisionId {
+            let mut objects: Vec<_> = files
+                .iter()
+                .map(|(_, content)| EncodedObject::blob(content.as_bytes()))
+                .collect();
+            let description = EncodedObject::blob(b"work");
+            let revision = Revision {
+                change: ChangeId::from_bytes([change; 16]),
+                predecessors: predecessors.to_vec(),
+                base,
+                deps: Vec::new(),
+                snapshot: build(&self.store, files),
+                description: description.id().into(),
+                author: "user:ada".parse().unwrap(),
+            }
+            .encode();
+            objects.extend([description, revision.clone()]);
+            self.store.write_all(&objects).unwrap();
+            revision.id().into()
         }
     }
 
@@ -1124,6 +1643,133 @@ mod tests {
     }
 
     #[test]
+    fn pushes_revisions_snapshots_and_statements() {
+        let server = Repo::new(MAIN_RULES);
+        let client = Client::new(&server);
+        client.sync().fetch_chains(&[TargetName::MAIN]).unwrap();
+        let base = main_tip(&client.store);
+        let first = client.revision(1, &[], base, &[("a", "1"), ("b", "1")]);
+        let second = client.revision(1, &[first], base, &[("a", "2"), ("b", "1")]);
+        let statement = ci_test(second, "user:ada").encode();
+        client
+            .store
+            .write_all(std::slice::from_ref(&statement))
+            .unwrap();
+
+        let change = ChangeId::from_bytes([1; 16]);
+        let pushed = client.sync().push(&[change]).unwrap();
+        assert_eq!((pushed.revisions, pushed.statements), (2, 1), "{pushed:?}");
+        assert_eq!(
+            pushed.objects,
+            2 + 1 + 1 + 2 + 2,
+            "the revisions, their description, the statement, two trees and two blobs"
+        );
+        for id in [first.into(), second.into(), statement.id()] {
+            assert!(server.store.contains(id).unwrap());
+        }
+        assert_eq!(client.sync().push(&[change]).unwrap(), Pushed::default());
+    }
+
+    #[test]
+    fn pushes_statements_after_those_they_need() {
+        let server = Repo::new(MAIN_RULES);
+        let client = Client::new(&server);
+        client.sync().fetch_chains(&[TargetName::MAIN]).unwrap();
+        let base = main_tip(&client.store);
+        let first = client.revision(1, &[], base, &[("a", "1")]);
+        let second = client.revision(1, &[first], base, &[("a", "2")]);
+        let pass = ci_test(first, "user:ada");
+        let fail = Statement {
+            subject: RecordId::Revision(second),
+            verdict: Some(Verdict::Fail),
+            supersedes: Some(pass.encode().id().into()),
+            ..pass.clone()
+        };
+        client
+            .store
+            .write_all(&[fail.encode(), pass.encode()])
+            .unwrap();
+
+        let change = ChangeId::from_bytes([1; 16]);
+        let pushed = client.sync().push(&[change]).unwrap();
+        assert_eq!((pushed.statements, &pushed.unsent[..]), (2, &[][..]));
+        for statement in [&pass, &fail] {
+            assert!(server.store.contains(statement.encode().id()).unwrap());
+        }
+
+        // One superseding a statement the remote lacks, about a change the
+        // push leaves out, stays, and the push says so.
+        let other = client.revision(2, &[], base, &[("b", "1")]);
+        let old = ci_test(other, "user:ada");
+        let newer = Statement {
+            supersedes: Some(old.encode().id().into()),
+            ..fail.clone()
+        };
+        client
+            .store
+            .write_all(&[old.encode(), newer.encode()])
+            .unwrap();
+        let pushed = client.sync().push(&[change]).unwrap();
+        assert_eq!(pushed.statements, 0);
+        assert_eq!(pushed.unsent, [StatementId::from(newer.encode().id())]);
+    }
+
+    #[test]
+    fn transfers_go_in_parts_in_dependency_order() {
+        let server = Repo::new(MAIN_RULES);
+        // Small enough for about one object a part.
+        let limit = 200;
+        let client = Client::answered_in_parts(&server, limit);
+        client.sync().fetch_chains(&[TargetName::MAIN]).unwrap();
+        let base = main_tip(&client.store);
+        let files: Vec<(String, String)> = (0..20)
+            .map(|i| (format!("src/{}/{i}", i % 3), format!("content {i}")))
+            .collect();
+        let files: Vec<_> = files
+            .iter()
+            .map(|(p, c)| (p.as_str(), c.as_str()))
+            .collect();
+        let first = client.revision(1, &[], base, &files);
+        let second = client.revision(1, &[first], base, &files[1..]);
+        let statement = ci_test(second, "user:ada").encode();
+        client
+            .store
+            .write_all(std::slice::from_ref(&statement))
+            .unwrap();
+        // The remote refuses any object sent before one it needs.
+        let change = ChangeId::from_bytes([1; 16]);
+        let pushed = client
+            .sync()
+            .with_pack_limit(limit)
+            .push(&[change])
+            .unwrap();
+        assert_eq!((pushed.revisions, pushed.statements), (2, 1));
+
+        let other = Client::answered_in_parts(&server, limit);
+        other.sync().fetch_chains(&[TargetName::MAIN]).unwrap();
+        let fetched = other.sync().fetch_changes(&[change]).unwrap();
+        assert_eq!(
+            fetched,
+            Fetched {
+                revisions: 2,
+                statements: 1
+            }
+        );
+        let snapshot = other.store.get(first).unwrap().snapshot;
+        let request = FetchSnapshot {
+            snapshot,
+            have: Vec::new(),
+            paths: Vec::new(),
+            skip: 0,
+        };
+        let part = other.remote.snapshot(&request).unwrap();
+        assert!(part.more && part.pack.objects.len() < 10, "{part:?}");
+        assert!(other.sync().need(snapshot, &[]).unwrap());
+        let empty = build(&other.store, &[]);
+        assert_eq!(other.store.diff(empty, snapshot).unwrap().len(), 20);
+    }
+
+    #[test]
     fn interrupted_snapshot_fetches_are_fetched_again() {
         let server = Repo::new(MAIN_RULES);
         let revision = server.change_on_main(1, &[("src/a", "a")]);
@@ -1194,6 +1840,113 @@ mod tests {
         let moved = client.sync().moved(Some(&cursor)).unwrap();
         assert_eq!(moved.changes, Some(HashSet::from(both)));
         assert!(moved.cursor.next > cursor.next);
+    }
+
+    #[test]
+    fn pushes_refuse_stale_changes_and_bases_the_remote_lacks() {
+        let server = Repo::new(MAIN_RULES);
+        let shared = server.change_on_main(1, &[("a", "a")]);
+        let client = Client::new(&server);
+        client.sync().fetch_chains(&[TargetName::MAIN]).unwrap();
+        let change = ChangeId::from_bytes([1; 16]);
+        client.sync().fetch_changes(&[change]).unwrap();
+
+        let base = main_tip(&client.store);
+        let ours = client.revision(1, &[shared], base, &[("a", "ours")]);
+        let theirs = server.revision(1, &[shared], base, &[("a", "theirs")]);
+        let error = client.sync().push(&[change]).unwrap_err();
+        assert!(
+            matches!(error, SyncError::Stale { change: c, head } if c == change && head == theirs),
+            "{error}"
+        );
+        assert!(
+            !server.store.contains(ours.into()).unwrap(),
+            "nothing was sent"
+        );
+
+        let local = TargetName::new("local").unwrap();
+        let key = NodeKey::from_bytes(&[9; 32]);
+        let genesis = AcceptanceBody {
+            target: local.id(),
+            seq: 0,
+            prev: None,
+            state: build(&client.store, &[]),
+            landed: Vec::new(),
+            evidence: Vec::new(),
+            policy: None,
+        }
+        .sign(&key);
+        client.store.append(&local, &genesis).unwrap();
+        let on_local = Base::Acceptance(genesis.encode().id().into());
+        client.revision(2, &[], on_local, &[("b", "b")]);
+        let error = client
+            .sync()
+            .push(&[ChangeId::from_bytes([2; 16])])
+            .unwrap_err();
+        assert!(
+            matches!(&error, SyncError::Unshared { target: Some(target), .. } if *target == local),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn each_part_of_a_push_expects_the_heads_the_parts_before_left() {
+        let change = ChangeId::from_bytes([1; 16]);
+        let [r0, r1, r2] = [1, 2, 3].map(|n| RevisionId::from(ObjectId::from_bytes([n; 32])));
+        let mut transfer = Transfer {
+            heads: HashMap::from([(change, vec![r0])]),
+            revisions: HashMap::from([
+                (r1.into(), (change, vec![r0])),
+                (r2.into(), (change, vec![r1])),
+            ]),
+            ..Transfer::default()
+        };
+        let expected = |heads: Vec<RevisionId>| vec![Expected { change, heads }];
+        assert_eq!(transfer.expect(&[r1.into()]), expected(vec![r0]));
+        assert_eq!(transfer.expect(&[r2.into()]), expected(vec![r1]));
+        assert_eq!(transfer.expect(&[]), []);
+    }
+
+    #[test]
+    fn queue_rebases_and_pushes_never_make_a_change_diverge() {
+        let server = Repo::new(MAIN_RULES);
+        server.change_on_main(1, &[("a", "a")]);
+        let original = server.change_on_main(2, &[("b", "b")]);
+        server.land(1);
+        let change = ChangeId::from_bytes([2; 16]);
+        // A push whose check of the heads passed, about to publish a
+        // successor of the head, while the queue rebases that head.
+        let pushing = server.store.lock_pushes().unwrap();
+        let description = EncodedObject::blob(b"concurrent edit");
+        let successor = Revision {
+            predecessors: vec![original],
+            description: description.id().into(),
+            ..server.store.get(original).unwrap()
+        }
+        .encode();
+        let landed = std::thread::scope(|scope| {
+            let landing = scope.spawn(|| {
+                server
+                    .queue()
+                    .land_change(&mut server.annotations(), change, &TargetName::MAIN)
+            });
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            server
+                .store
+                .write_all(&[description, successor.clone()])
+                .unwrap();
+            drop(pushing);
+            landing.join().unwrap()
+        });
+        // The queue waited for the push, and found the change moved: or
+        // had it come late, rebased the successor.
+        let heads = Index::open(&server.store).unwrap().heads(change);
+        assert_eq!(heads.len(), 1, "{landed:?}");
+        assert!(
+            matches!(landed, Err(crate::queue::LandError::Moved(moved)) if moved == change)
+                || landed.is_ok(),
+            "{landed:?}"
+        );
     }
 
     #[test]
