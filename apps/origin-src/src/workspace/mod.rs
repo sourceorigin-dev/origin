@@ -59,14 +59,17 @@ pub struct Workspace {
 struct WorkingCopy {
     id: RevisionId,
     revision: Revision,
-    /// The files as the snapshot found them: the draft, which is the
-    /// revision's snapshot once recorded.
-    files: TreeId,
     /// The revision's record, if recording the draft made a new revision,
     /// which is not written yet.
     unsaved: Option<EncodedObject>,
     /// The unresolved conflicts of the revision that the files still have.
     conflicts: Conflicts,
+    /// The record index, as of the snapshot: once saved, it has the
+    /// revision.
+    index: Index,
+    /// The files as the snapshot found them: the draft, which is the
+    /// revision's snapshot once recorded.
+    files: TreeId,
     /// Keeps garbage collection away from the objects the snapshot found
     /// stored, until the command that saves it is done.
     _held: LockedFile,
@@ -75,11 +78,11 @@ struct WorkingCopy {
 impl WorkingCopy {
     /// The change `prefix` names: `@` for the working copy's, or a unique
     /// prefix of its id.
-    fn find_change(&self, index: &Index, prefix: &str) -> Result<ChangeId, FindChangeError> {
+    fn find_change(&self, prefix: &str) -> Result<ChangeId, FindChangeError> {
         if prefix == "@" {
             return Ok(self.revision.change);
         }
-        index.find_change(prefix)
+        self.index.find_change(prefix)
     }
 }
 
@@ -127,9 +130,11 @@ impl Workspace {
             config,
             revision: encoded.id().into(),
         };
+        // A first revision makes no divergence, which an index would tell.
         workspace.save(
             &[vec![empty_description], vec![encoded]],
             workspace.revision,
+            &mut Index::default(),
         )?;
         println!(
             "Initialized a repository in {}: node:{} is the authority of `policy` and `main`",
@@ -204,7 +209,7 @@ impl Workspace {
 
     /// Snapshots the working copy into a draft, recording nothing, for the
     /// commands that only read it.
-    fn snapshot(&self) -> Result<WorkingCopy, WorkspaceError> {
+    fn snapshot(&mut self) -> Result<WorkingCopy, WorkspaceError> {
         let held = self.store.hold_objects()?;
         let revision: Revision = self.store.get(self.revision)?;
         let path = self.meta("state");
@@ -215,22 +220,24 @@ impl Workspace {
                 .save(&path)
                 .map_err(|source| WorkspaceError::io(&path, source))?;
         }
+        let index = Index::open(&self.store)?;
         let conflicts = self
             .conflicts(self.revision, &revision)?
             .remaining(&self.store, files)?;
         Ok(WorkingCopy {
             id: self.revision,
             revision,
-            files,
             unsaved: None,
             conflicts,
+            index,
+            files,
             _held: held,
         })
     }
 
     /// Snapshots the working copy and records its draft: a new revision if
     /// the files changed, which still has to be saved.
-    fn record(&self) -> Result<WorkingCopy, WorkspaceError> {
+    fn record(&mut self) -> Result<WorkingCopy, WorkspaceError> {
         let working_copy = self.snapshot()?;
         if working_copy.files == working_copy.revision.snapshot {
             return Ok(working_copy);
@@ -299,21 +306,24 @@ impl Workspace {
     fn refresh(&mut self) -> Result<WorkingCopy, WorkspaceError> {
         let mut working_copy = self.record()?;
         if let Some(unsaved) = working_copy.unsaved.take() {
-            self.save(&[vec![unsaved]], working_copy.id)?;
+            self.save(&[vec![unsaved]], working_copy.id, &mut working_copy.index)?;
         }
         Ok(working_copy)
     }
 
-    /// Writes `layers` of objects, then makes `revision` the working copy,
-    /// flagging its change if that made it diverge.
+    /// Writes `layers` of objects, adding them to `index`, then makes
+    /// `revision` the working copy, flagging its change if that made it
+    /// diverge.
     fn save(
         &mut self,
         layers: &[Vec<EncodedObject>],
         revision: RevisionId,
+        index: &mut Index,
     ) -> Result<(), WorkspaceError> {
         self.write(layers)?;
+        index.add(layers.iter().flatten())?;
         self.point_at(revision)?;
-        self.flag_divergence(revision)
+        self.flag_divergence(index, revision)
     }
 
     /// Writes `layers` of objects in order, each durable before the next,
@@ -352,14 +362,14 @@ impl Workspace {
     pub fn status(&mut self) -> Result<(), WorkspaceError> {
         let working_copy = self.snapshot()?;
         let revision = &working_copy.revision;
-        let index = Index::open(&self.store)?;
+        let index = &working_copy.index;
         println!(
             "Working copy: {}{}",
             self.headline(revision)?,
-            self.flags(&index, revision.change)?
+            self.flags(index, revision.change)?
         );
         println!("On top of: {}", self.describe_base(revision.base)?);
-        Self::print_divergence(&index, revision.change);
+        Self::print_divergence(index, revision.change);
         if !working_copy.conflicts.is_empty() {
             Self::print_conflicts(&working_copy.conflicts);
         }
@@ -399,12 +409,12 @@ impl Workspace {
     /// Fails if the change cannot be found, or like [`Workspace::diff`].
     pub fn show(&mut self, change: Option<&str>) -> Result<(), WorkspaceError> {
         let working_copy = self.snapshot()?;
-        let index = Index::open(&self.store)?;
+        let index = &working_copy.index;
         // Each revision, with the files to show: the working copy's draft.
         let revisions = match change {
             None => vec![(working_copy.id, Some(working_copy.files))],
             Some(change) => index
-                .heads(working_copy.find_change(&index, change)?)
+                .heads(working_copy.find_change(change)?)
                 .into_iter()
                 .map(|head| (head, None))
                 .collect(),
@@ -418,7 +428,7 @@ impl Workspace {
             println!(
                 "Change {}{}",
                 revision.change.short(),
-                self.flags(&index, revision.change)?
+                self.flags(index, revision.change)?
             );
             let edited = if files == revision.snapshot {
                 ""
@@ -427,7 +437,7 @@ impl Workspace {
             };
             println!("Revision {} by {}{edited}", id.short(), revision.author);
             println!("On top of: {}", self.describe_base(revision.base)?);
-            for (issuer, reason) in self.abandonments(&index, id)? {
+            for (issuer, reason) in self.abandonments(index, id)? {
                 println!("Abandoned by {issuer}: {reason}");
             }
             println!();
@@ -461,7 +471,7 @@ impl Workspace {
     /// Fails if the working copy cannot be snapshotted or the new change
     /// cannot be written.
     pub fn new_change(&mut self, description: &str) -> Result<(), WorkspaceError> {
-        let working_copy = self.record()?;
+        let mut working_copy = self.record()?;
         let description = EncodedObject::blob(description.as_bytes());
         let revision = Revision {
             change: ChangeId::random().map_err(WorkspaceError::Random)?,
@@ -475,14 +485,14 @@ impl Workspace {
         let encoded = revision.encode();
         let id = encoded.id().into();
         let recorded = working_copy.unsaved.is_some();
-        let first = working_copy.unsaved.into_iter().chain([description]);
+        let first = working_copy.unsaved.take().into_iter().chain([description]);
         // It starts with the files of the one below, and their conflicts.
         let layers = self.revision_layers(first.collect(), &encoded, &working_copy.conflicts);
-        self.save(&layers, id)?;
+        self.save(&layers, id, &mut working_copy.index)?;
         // Edits recorded on a revision that is no longer its change's head
         // make that change diverge.
         if recorded {
-            self.flag_divergence(working_copy.id)?;
+            self.flag_divergence(&working_copy.index, working_copy.id)?;
         }
         println!("Working copy: {}", self.headline(&revision)?);
         println!("On top of: {}", self.headline(&working_copy.revision)?);
@@ -497,19 +507,19 @@ impl Workspace {
     /// Fails if the working copy cannot be snapshotted or the revision
     /// cannot be written.
     pub fn describe(&mut self, description: &str) -> Result<(), WorkspaceError> {
-        let working_copy = self.record()?;
+        let mut working_copy = self.record()?;
         let description = EncodedObject::blob(description.as_bytes());
         let revision = Revision {
             predecessors: vec![working_copy.id],
             description: description.id().into(),
             author: self.config.user(),
-            ..working_copy.revision
+            ..working_copy.revision.clone()
         };
         let encoded = revision.encode();
         let id = encoded.id().into();
-        let first = working_copy.unsaved.into_iter().chain([description]);
+        let first = working_copy.unsaved.take().into_iter().chain([description]);
         let layers = self.revision_layers(first.collect(), &encoded, &working_copy.conflicts);
-        self.save(&layers, id)?;
+        self.save(&layers, id, &mut working_copy.index)?;
         println!("Working copy: {}", self.headline(&revision)?);
         Ok(())
     }
@@ -537,7 +547,7 @@ impl Workspace {
         let encoded = revision.encode();
         let id = encoded.id().into();
         let layers = self.revision_layers(Vec::new(), &encoded, &working_copy.conflicts);
-        self.save(&layers, id)?;
+        self.save(&layers, id, &mut working_copy.index)?;
         println!("Resolved {}", Self::list_paths(&resolved));
         if !working_copy.conflicts.is_empty() {
             Self::print_conflicts(&working_copy.conflicts);
@@ -554,9 +564,9 @@ impl Workspace {
     /// cannot be snapshotted or checked out.
     pub fn edit(&mut self, change: &str) -> Result<(), WorkspaceError> {
         let working_copy = self.refresh()?;
-        let index = Index::open(&self.store)?;
-        let change = working_copy.find_change(&index, change)?;
-        let head = Self::single_head(&index, change)?;
+        let index = &working_copy.index;
+        let change = working_copy.find_change(change)?;
+        let head = Self::single_head(index, change)?;
         let revision: Revision = self.store.get(head)?;
         if head != working_copy.id {
             self.checkout(working_copy.revision.snapshot, revision.snapshot)?;
@@ -579,12 +589,12 @@ impl Workspace {
     /// checked out.
     pub fn abandon(&mut self, change: Option<&str>, reason: &str) -> Result<(), WorkspaceError> {
         let working_copy = self.refresh()?;
-        let index = Index::open(&self.store)?;
+        let index = &working_copy.index;
         let change = match change {
-            Some(change) => working_copy.find_change(&index, change)?,
+            Some(change) => working_copy.find_change(change)?,
             None => working_copy.revision.change,
         };
-        let head = Self::single_head(&index, change)?;
+        let head = Self::single_head(index, change)?;
         let reason = EncodedObject::blob(reason.as_bytes());
         let statement = Statement {
             subject: RecordId::Revision(head),
@@ -651,8 +661,8 @@ impl Workspace {
     /// revision cannot be written.
     pub fn converge(&mut self, change: &str) -> Result<(), WorkspaceError> {
         let working_copy = self.refresh()?;
-        let index = Index::open(&self.store)?;
-        let change = working_copy.find_change(&index, change)?;
+        let index = &working_copy.index;
+        let change = working_copy.find_change(change)?;
         let heads = index.heads(change);
         if heads.len() < 2 {
             return Err(WorkspaceError::NotDivergent(change));
@@ -757,9 +767,9 @@ impl Workspace {
         limit: Option<usize>,
     ) -> Result<(), WorkspaceError> {
         let working_copy = self.snapshot()?;
-        let index = Index::open(&self.store)?;
+        let index = &working_copy.index;
         let mut next = working_copy.revision.base;
-        let mut stack = vec![(working_copy.id, working_copy.revision)];
+        let mut stack = vec![(working_copy.id, working_copy.revision.clone())];
         let acceptance = loop {
             match next {
                 Base::Revision(id) => {
@@ -785,7 +795,7 @@ impl Workspace {
                 println!(
                     "{marker} {}{}",
                     self.headline(revision)?,
-                    self.flags(&index, revision.change)?
+                    self.flags(index, revision.change)?
                 );
             }
         }
@@ -803,7 +813,7 @@ impl Workspace {
                         println!(
                             "    {}{}",
                             self.headline(&revision)?,
-                            self.flags(&index, revision.change)?
+                            self.flags(index, revision.change)?
                         );
                     }
                     Source::Target(id) => {
@@ -823,10 +833,10 @@ impl Workspace {
     /// Fails if the change cannot be found, or a record cannot be read.
     pub fn evolog(&mut self, change: &str) -> Result<(), WorkspaceError> {
         let working_copy = self.snapshot()?;
-        let index = Index::open(&self.store)?;
-        let change = working_copy.find_change(&index, change)?;
+        let index = &working_copy.index;
+        let change = working_copy.find_change(change)?;
         let heads = index.heads(change);
-        println!("Change {}{}", change.short(), self.flags(&index, change)?);
+        println!("Change {}{}", change.short(), self.flags(index, change)?);
         for &id in index.revisions(change).iter().rev() {
             let revision: Revision = self.store.get(id)?;
             let marker = if id == working_copy.id { '@' } else { '○' };
