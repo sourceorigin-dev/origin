@@ -8,9 +8,9 @@
 
 use std::sync::Arc;
 
-use axum::Json;
 use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, FromRequestParts, Path, Query, State};
+use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
+use axum::extract::{DefaultBodyLimit, FromRequest, FromRequestParts, Request, State};
 use axum::http::request::Parts;
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -26,6 +26,7 @@ use origin_shared::api::{
 use origin_shared::event::Page;
 use origin_shared::landing::Pending;
 use origin_shared::pack::{Pack, PackError, Part};
+use serde::Serialize;
 use utoipa::OpenApi;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
@@ -110,6 +111,56 @@ impl FromRequestParts<Arc<Repositories>> for Caller {
     }
 }
 
+/// Declares extractors like axum's, of the same names, so `utoipa` documents
+/// them alike, but refusing a request as an [`ApiError`], as every other
+/// failure is, rather than in axum's plain text.
+macro_rules! extractors {
+    ($(
+        $(#[$doc:meta])*
+        $name:ident: $trait:ident::$method:ident($input:ty)
+            via $($axum:ident)::+ refusing with $rejection:ty;
+    )*) => {$(
+        $(#[$doc])*
+        struct $name<T>(T);
+
+        impl<S: Send + Sync, T> $trait<S> for $name<T>
+        where
+            $($axum)::+<T>: $trait<S, Rejection = $rejection>,
+        {
+            type Rejection = HttpError;
+
+            async fn $method(input: $input, state: &S) -> Result<Self, HttpError> {
+                let $($axum)::+(value) = <$($axum)::+<T>>::$method(input, state).await?;
+                Ok(Self(value))
+            }
+        }
+
+        impl From<$rejection> for HttpError {
+            fn from(rejection: $rejection) -> Self {
+                Self::Rejected(rejection.status(), rejection.body_text())
+            }
+        }
+    )*};
+}
+
+extractors! {
+    /// The request's path parameters.
+    Path: FromRequestParts::from_request_parts(&mut Parts)
+        via axum::extract::Path refusing with PathRejection;
+    /// The request's query.
+    Query: FromRequestParts::from_request_parts(&mut Parts)
+        via axum::extract::Query refusing with QueryRejection;
+    /// The request's JSON body; also a JSON response.
+    Json: FromRequest::from_request(Request)
+        via axum::Json refusing with JsonRejection;
+}
+
+impl<T: Serialize> IntoResponse for Json<T> {
+    fn into_response(self) -> Response {
+        axum::Json(self.0).into_response()
+    }
+}
+
 /// Runs a call on the service of repository `repo`, on the blocking thread
 /// pool: service calls do synchronous file system work, and event
 /// long-polls wait.
@@ -133,6 +184,9 @@ pub enum HttpError {
     Pack(PackError),
     /// The caller's credentials are invalid.
     Unauthorized(InvalidToken),
+    /// axum refused the request's path, query or body, with this status:
+    /// a client error but for a route that doesn't match its handler.
+    Rejected(StatusCode, String),
     /// The service panicked.
     Panicked(String),
 }
@@ -147,6 +201,11 @@ impl IntoResponse for HttpError {
             Self::Service(error) => (error.code(), error.to_string()),
             Self::Pack(error) => (ErrorCode::BadRequest, format!("invalid pack: {error}")),
             Self::Unauthorized(error) => (ErrorCode::Unauthorized, error.to_string()),
+            Self::Rejected(status, message) if status.is_server_error() => {
+                tracing::error!(%message, "request rejected");
+                (ErrorCode::Internal, "internal server error".to_owned())
+            }
+            Self::Rejected(_, message) => (ErrorCode::BadRequest, message),
             Self::Panicked(message) => {
                 tracing::error!(%message, "request panicked");
                 (ErrorCode::Internal, "internal server error".to_owned())

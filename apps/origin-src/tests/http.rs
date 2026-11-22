@@ -8,9 +8,9 @@ use std::time::{Duration, Instant};
 
 use origin_client::{Client, Error, Repo};
 use origin_shared::api::{
-    BrowseQuery, ErrorCode, EventsQuery, Expected, FetchRecords, FetchSnapshot, InventoryRequest,
-    LandRequest, List, LogQuery, NewTarget, PromoteRequest, PutQuery, RepoName, StatementsQuery,
-    TokenRequest,
+    ApiError, BrowseQuery, ErrorCode, EventsQuery, Expected, FetchRecords, FetchSnapshot,
+    InventoryRequest, LandRequest, List, LogQuery, NewTarget, PromoteRequest, PutQuery, RepoName,
+    StatementsQuery, TokenRequest,
 };
 use origin_shared::event::EventKind;
 use origin_shared::landing::{Blocked, Landing, Proposal};
@@ -1133,6 +1133,26 @@ fn review(subject: RevisionId) -> EncodedObject {
         ..ci_test(subject, "user:ada").decode_as().unwrap()
     }
     .encode()
+}
+
+/// Requests axum's extractors refuse, for a malformed query or body, are
+/// refused as an `ApiError`, as every other failure is.
+#[tokio::test]
+async fn refuses_malformed_requests_as_api_errors() {
+    let server = Server::start().await;
+    let http = reqwest::Client::new();
+    let repo = format!("{}/api/v1/repos/demo", server.base);
+    for request in [
+        http.get(format!("{repo}/events?wait=soon")),
+        http.post(format!("{repo}/changes/inventory"))
+            .header("content-type", "application/json")
+            .body("{"),
+    ] {
+        let response = request.send().await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+        let error: ApiError = response.json().await.unwrap();
+        assert_eq!(error.code, ErrorCode::BadRequest, "{error}");
+    }
 }
 
 #[tokio::test]

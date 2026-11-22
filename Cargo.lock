@@ -886,6 +886,7 @@ dependencies = [
  "origin-platform",
  "origin-shared",
  "origin-src",
+ "reqwest",
  "serde",
  "serde_json",
  "similar",
