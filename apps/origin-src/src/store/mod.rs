@@ -21,8 +21,8 @@
 //! [`Store::compact`] moves small loose objects into [`packs`], and reads
 //! look in the loose objects first, then in the packs.
 //!
-//! Committing a batch also indexes its new records, see
-//! [`index`](crate::index).
+//! Committing a batch also logs its new records in the op log, which the
+//! [`index`](crate::index) catches up from.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -39,7 +39,7 @@ use origin_shared::object::{DecodeError, IdMismatch};
 use origin_shared::{EncodedObject, ObjectId, TargetName, TypedId};
 
 use crate::index::Entry;
-use crate::oplog::Actor;
+use crate::oplog::{Actor, Effect};
 use crate::targets::Head;
 
 pub use packs::Compaction;
@@ -183,7 +183,7 @@ impl<P: Platform> Store<P> {
         for dir in [&loose, &objects, &self.root, parent] {
             self.sync_dir(dir)?;
         }
-        self.write_index(&[], &[])
+        self.write_index(&[], &[], 0)
     }
 
     /// The directory holding the store: a repository's `.origin`.
@@ -504,7 +504,7 @@ impl<P: Platform> Store<P> {
 pub struct Batch<'a, P> {
     store: &'a Store<P>,
     write: DurableWrite<'a, P>,
-    /// What the index keeps of each new record staged.
+    /// What the index keeps of each new record staged, for the op log.
     entries: Mutex<Vec<Entry>>,
     /// Whether the batch read the pack manifest, which it does before it
     /// first trusts a pack to hold an object: see [`Batch::packed`].
@@ -579,13 +579,14 @@ impl<P: Platform> Batch<'_, P> {
         })
     }
 
-    /// Publishes every object staged, durably, and adds the new records to
-    /// the [`Index`](crate::index::Index).
+    /// Publishes every object staged, durably, and logs the new records in
+    /// the [op log](crate::oplog), with what the
+    /// [`Index`](crate::index::Index) keeps of them.
     ///
     /// # Errors
     ///
     /// Fails if an object cannot be renamed into place, a directory cannot
-    /// be synced, or the index cannot be appended to.
+    /// be synced, or the op log cannot be appended to.
     pub fn commit(self) -> Result<(), StoreError> {
         let entries = self
             .entries
@@ -594,7 +595,9 @@ impl<P: Platform> Batch<'_, P> {
         if entries.is_empty() {
             return Ok(self.write.commit()?);
         }
-        self.store.commit_indexed(self.write, &entries)
+        self.store
+            .commit_logged(self.write, &[Effect::Wrote(entries)])?;
+        Ok(())
     }
 }
 

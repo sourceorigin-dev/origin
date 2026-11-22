@@ -13,25 +13,31 @@
 //! them ([`Skipped`]).
 //!
 //! On disk it is one append-only file of [frames](crate::frames),
-//! `index/log`. A frame holds what the index keeps of each record of a
-//! batch, the mark that the batch at some offset was published, or input
+//! `index/log`. A frame holds what the index keeps of each record of some
+//! op log entries, and the sequence number of the last of them, or input
 //! digests computed since.
 //!
-//! [`Batch::commit`](crate::store::Batch::commit) appends a batch's entries
-//! before publishing its records, and the batch sync makes them durable
-//! with the records, so indexing costs no sync of its own. Once the records
-//! are published, it marks the batch, without syncing. Opening the index
-//! trusts the marked batches, and checks that the records of the others are
-//! in the store: those belong to batches that crashed, failed, or are being
-//! published. A partial last frame is an append in progress, or one a crash
-//! cut short, and is skipped. Any other damage rebuilds the index.
+//! Writers don't touch the index: the [op log](crate::oplog) entry of each
+//! batch holds what the index keeps of its records, and is synced with
+//! them, so indexing costs no sync. Opening the index catches up: it reads
+//! the op log after the last entry the index has, adds the records that
+//! are published, and appends them to the index, without syncing. An entry
+//! whose records aren't all published while a write is in progress is
+//! looked at again next time, and the index takes the records published
+//! after it meanwhile, in memory only: a power loss may take them back
+//! before their entry settles, so they're appended once it has. Once no
+//! write is in progress, a write that crashed is taken as what it
+//! published. A frame lost to a crash is caught up again from the op log;
+//! if the op log no longer has the entries, the index is rebuilt. A partial
+//! last frame is an append in progress, or one a crash cut short, and is
+//! skipped. Any other damage rebuilds the index.
 //!
-//! Batches append under a shared lock on `index/lock`, held from appending
-//! their entries to marking them, and appends serialize on an exclusive
-//! lock of the log itself. A rebuild holds `index/lock` exclusively, so it
-//! never misses a batch: it sees every batch's records published, or none
-//! of them appended yet. Rebuilding keeps the arrival order the old log
-//! still knows, and puts the records it didn't after them.
+//! A rebuild holds `index/lock` exclusively, and starts from the op log's
+//! last entry once no write is in progress, so it misses no batch: those
+//! before are published, and those after are caught up: their records stay
+//! in memory, as catching up keeps them, until they settle. Rebuilding keeps
+//! the arrival order the old log still knows, and puts the records it
+//! didn't after them.
 //!
 //! The directory also holds `index/supersession`, which isn't an index
 //! lock: [`Annotations::supersede`](crate::annotations::Annotations::supersede)
@@ -44,7 +50,7 @@ use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::PathBuf;
 
-use origin_platform::{DurableWrite, LockMode, LockedFile, Platform};
+use origin_platform::{LockMode, LockedFile, Platform};
 use origin_shared::object::{DecodeError, IdMismatch, Reader};
 use origin_shared::{
     AcceptanceId, ChangeId, Digest, EncodedObject, ObjectId, ObjectKind, RecordId, Revision,
@@ -52,6 +58,7 @@ use origin_shared::{
 };
 
 use crate::frames::{Frames, Tail, Writer};
+use crate::oplog::Effect;
 use crate::store::{Store, StoreError};
 
 /// The records of a store, by the fields they're looked up by.
@@ -74,6 +81,11 @@ pub struct Index {
     /// The input digests of promotable statements computed so far, see
     /// [`Index::remember_digests`].
     digests: HashMap<StatementId, Digest>,
+    /// The sequence number of the last op log entry indexed.
+    applied: u64,
+    /// The records [`Index::add`] added, which the log doesn't have yet:
+    /// catching up still appends them.
+    added: HashSet<RecordId>,
 }
 
 /// The revisions of one change.
@@ -120,22 +132,22 @@ pub enum Skipped {
 }
 
 impl Index {
-    /// Reads the index of `store`, rebuilding it if it's missing or
-    /// corrupt.
+    /// Reads the index of `store`, and catches up with the op log,
+    /// rebuilding it if it's missing or corrupt, or too far behind.
     ///
     /// # Errors
     ///
-    /// Fails if the index or the store cannot be read, or a rebuilt index
-    /// cannot be written.
+    /// Fails if the index, the op log or the store cannot be read, or a
+    /// rebuilt index cannot be written.
     pub fn open<P: Platform>(store: &Store<P>) -> Result<Self, StoreError> {
-        let (index, intact) = Self::read(store)?;
-        if intact {
+        let (mut index, intact) = Self::read(store)?;
+        if intact && index.catch_up(store)? {
             return Ok(index);
         }
         let _lock = store.lock_index(LockMode::Exclusive)?;
         // Another process may have rebuilt it while this one waited.
-        let (index, intact) = Self::read(store)?;
-        if intact {
+        let (mut index, intact) = Self::read(store)?;
+        if intact && index.catch_up(store)? {
             return Ok(index);
         }
         Ok(Self::rebuild_locked(store, &index)?.index)
@@ -158,6 +170,9 @@ impl Index {
     /// Rebuilds the index while holding its lock exclusively, keeping the
     /// arrival order of `old`.
     fn rebuild_locked<P: Platform>(store: &Store<P>, old: &Self) -> Result<Rebuilt, StoreError> {
+        // Every entry up to it is as published as it will be, so the store
+        // has their records; later ones are caught up.
+        let applied = store.oplog().settled()?;
         let order: HashMap<RecordId, usize> = old
             .arrivals
             .iter()
@@ -172,10 +187,25 @@ impl Index {
             let record = entry.record();
             (order.get(&record).copied().unwrap_or(usize::MAX), record)
         });
-        let mut index = Self::default();
+        let mut index = Self {
+            applied,
+            ..Self::default()
+        };
+        // Records of entries after it are kept in memory, not written:
+        // catching up writes them once their entries settle.
+        let mut later = HashSet::new();
+        for logged in store.oplog().after(applied)?.entries {
+            if let Effect::Wrote(written) = logged.effect {
+                later.extend(written.iter().map(Entry::record));
+            }
+        }
         for entry in &entries {
             index.insert(entry.clone());
         }
+        let (entries, unsettled): (Vec<_>, Vec<_>) = entries
+            .into_iter()
+            .partition(|entry| !later.contains(&entry.record()));
+        index.added.extend(unsettled.iter().map(Entry::record));
         // Digests never change, so those of statements still there stay.
         let mut digests: Vec<_> = old
             .digests
@@ -184,7 +214,7 @@ impl Index {
             .map(|(&id, &digest)| (id, digest))
             .collect();
         digests.sort_unstable();
-        store.write_index(&entries, &digests)?;
+        store.write_index(&entries, &digests, applied)?;
         index.digests.extend(digests);
         Ok(Rebuilt { index, skipped })
     }
@@ -201,25 +231,17 @@ impl Index {
             Err(source) => return Err(StoreError::io(&path, source)),
         };
         let (frames, tail) = Log::parse(&bytes);
-        let published: HashSet<u64> = frames
-            .iter()
-            .filter_map(|(_, frame)| match frame {
-                Frame::Published(offset) => Some(*offset),
-                Frame::Records(_) | Frame::Digests(_) => None,
-            })
-            .collect();
         let mut index = Self::default();
-        for (offset, frame) in frames {
+        for (_, frame) in frames {
             match frame {
-                Frame::Records(entries) => {
-                    let trusted = published.contains(&offset);
+                Frame::Records { applied, entries } => {
                     for entry in entries.into_owned() {
-                        if trusted || store.contains(entry.id())? {
-                            index.insert(entry);
-                        }
+                        index.insert(entry);
                     }
+                    // Frames from processes catching up at once can come in
+                    // any order.
+                    index.applied = index.applied.max(applied);
                 }
-                Frame::Published(_) => {}
                 Frame::Digests(digests) => index.digests.extend(digests.iter().copied()),
             }
         }
@@ -242,11 +264,66 @@ impl Index {
                 id: object.id(),
                 source,
             })?;
-            if let Some(entry) = entry {
+            if let Some(entry) = entry
+                && !self.known.contains(&entry.record())
+            {
+                self.added.insert(entry.record());
                 self.insert(entry);
             }
         }
         Ok(())
+    }
+
+    /// Adds the published records of the op log entries after the last one
+    /// indexed, and appends them to the index, as the module explains.
+    /// Returns `false` if the op log no longer has them: then only a
+    /// rebuild can catch up.
+    fn catch_up<P: Platform>(&mut self, store: &Store<P>) -> Result<bool, StoreError> {
+        let oplog = store.oplog();
+        let read = match oplog.after(self.applied) {
+            Err(StoreError::Expired { .. }) => return Ok(false),
+            read => read?,
+        };
+        let Some(last) = read.entries.last() else {
+            return Ok(true);
+        };
+        // The index stays before the first entry whose write may still be
+        // in progress, to look again next time, but takes the records
+        // published after it, such as this process's own: in memory only,
+        // since a power loss may take them back before their entry settles.
+        let applied = last.seq.min(oplog.settled()?).max(self.applied);
+        let mut caught = Vec::new();
+        for logged in &read.entries {
+            if let Effect::Wrote(written) = &logged.effect {
+                for entry in written {
+                    let record = entry.record();
+                    let unlogged = !self.known.contains(&record) || self.added.contains(&record);
+                    if !unlogged || !store.contains(entry.id())? {
+                        continue;
+                    }
+                    if logged.seq <= applied {
+                        self.added.remove(&record);
+                        caught.push(entry.clone());
+                    } else {
+                        self.added.insert(record);
+                        self.insert(entry.clone());
+                    }
+                }
+            }
+        }
+        if applied == self.applied && caught.is_empty() {
+            return Ok(true);
+        }
+        for entry in &caught {
+            self.insert(entry.clone());
+        }
+        self.applied = applied;
+        // Not synced: a lost frame is caught up again from the op log.
+        store.append_to_index(&Frame::Records {
+            applied,
+            entries: Cow::Owned(caught),
+        })?;
+        Ok(true)
     }
 
     /// Adds a record, unless it's already indexed.
@@ -614,31 +691,28 @@ impl Entry {
 /// A frame of the log.
 #[derive(Debug)]
 enum Frame<'a> {
-    /// The entries of a batch, appended before its records are published.
-    Records(Cow<'a, [Entry]>),
-    /// The records of the batch at this offset are published.
-    Published(u64),
+    /// The published records of op log entries, up to the entry `applied`.
+    Records {
+        applied: u64,
+        entries: Cow<'a, [Entry]>,
+    },
     /// Input digests of promotable statements, computed from the store.
     Digests(Cow<'a, [(StatementId, Digest)]>),
 }
 
 impl Frame<'_> {
     const RECORDS: u8 = 1;
-    const PUBLISHED: u8 = 2;
-    const DIGESTS: u8 = 3;
+    const DIGESTS: u8 = 2;
 
     /// Encodes the frame: a tag, then its contents.
     fn encode(&self) -> Vec<u8> {
         Frames::frame(|out| match self {
-            Self::Records(entries) => {
+            Self::Records { applied, entries } => {
                 out.u8(Self::RECORDS);
+                out.u64(*applied);
                 for entry in entries.iter() {
                     entry.write(out);
                 }
-            }
-            Self::Published(offset) => {
-                out.u8(Self::PUBLISHED);
-                out.u64(*offset);
             }
             Self::Digests(digests) => {
                 out.u8(Self::DIGESTS);
@@ -654,13 +728,16 @@ impl Frame<'_> {
         let mut reader = Reader::new(payload);
         let frame = match reader.u8()? {
             Self::RECORDS => {
+                let applied = reader.u64()?;
                 let mut entries = Vec::new();
                 while reader.remaining() > 0 {
                     entries.push(Entry::read(&mut reader)?);
                 }
-                Frame::Records(Cow::Owned(entries))
+                Frame::Records {
+                    applied,
+                    entries: Cow::Owned(entries),
+                }
             }
-            Self::PUBLISHED => Frame::Published(reader.u64()?),
             Self::DIGESTS => {
                 let mut digests = Vec::new();
                 while reader.remaining() > 0 {
@@ -686,14 +763,19 @@ struct Log;
 
 impl Log {
     /// The format, and its version.
-    const FRAMES: Frames = Frames::new(b"origin index 2\n");
+    const FRAMES: Frames = Frames::new(b"origin index 3\n");
 
-    /// Encodes a log holding `entries`, all published, and `digests`.
-    fn encode(entries: &[Entry], digests: &[(StatementId, Digest)]) -> Vec<u8> {
+    /// Encodes a log holding `entries`, up to the op log entry `applied`,
+    /// and `digests`.
+    fn encode(entries: &[Entry], digests: &[(StatementId, Digest)], applied: u64) -> Vec<u8> {
         let mut log = Self::FRAMES.header().to_vec();
-        let offset = log.len() as u64;
-        log.extend(Frame::Records(Cow::Borrowed(entries)).encode());
-        log.extend(Frame::Published(offset).encode());
+        log.extend(
+            Frame::Records {
+                applied,
+                entries: Cow::Borrowed(entries),
+            }
+            .encode(),
+        );
         if !digests.is_empty() {
             log.extend(Frame::Digests(Cow::Borrowed(digests)).encode());
         }
@@ -736,15 +818,16 @@ impl<P: Platform> Store<P> {
         self.index_dir().join("log")
     }
 
-    /// Locks the index: shared by batches being indexed, exclusive for a
+    /// Locks the index: shared while appending digests, exclusive for a
     /// rebuild.
     fn lock_index(&self, mode: LockMode) -> Result<LockedFile, StoreError> {
         self.lock_in_index("lock", mode)
     }
 
     /// Locks supersession, exclusively: see [`Annotations::supersede`].
-    /// It's a lock of its own, since issuing takes the index's, on another
-    /// handle, which `flock` conflicts with even within one process.
+    /// It's a lock of its own, since reading the index under it may rebuild
+    /// the index under the index's, on another handle, which `flock`
+    /// conflicts with even within one process.
     ///
     /// [`Annotations::supersede`]: crate::annotations::Annotations::supersede
     pub(crate) fn lock_supersession(&self) -> Result<LockedFile, StoreError> {
@@ -758,64 +841,37 @@ impl<P: Platform> Store<P> {
         Ok(LockedFile::open(&self.platform, &dir.join(name), mode)?)
     }
 
-    /// Durably replaces the index with one holding `entries` and
-    /// `digests`.
+    /// Durably replaces the index with one holding `entries` and `digests`,
+    /// up to the op log entry `applied`.
     pub(crate) fn write_index(
         &self,
         entries: &[Entry],
         digests: &[(StatementId, Digest)],
+        applied: u64,
     ) -> Result<(), StoreError> {
         let write = self.durable_write();
-        write.stage(self.index_log(), &Log::encode(entries, digests))?;
+        write.stage(self.index_log(), &Log::encode(entries, digests, applied))?;
         Ok(write.commit()?)
     }
 
-    /// Commits `write`, which stages the records `entries` describe, and
-    /// indexes them: their entries are durable with the records, and marked
-    /// published after them.
-    ///
-    /// # Errors
-    ///
-    /// Fails if the entries cannot be appended or the write cannot be
-    /// committed.
-    pub(crate) fn commit_indexed(
-        &self,
-        write: DurableWrite<'_, P>,
-        entries: &[Entry],
-    ) -> Result<(), StoreError> {
-        let _lock = self.lock_index(LockMode::Shared)?;
-        let offset = self.append_to_index(&Frame::Records(Cow::Borrowed(entries)))?;
-        if offset.is_some() {
-            write.sync_with(self.index_log());
-        }
-        write.commit()?;
-        if let Some(offset) = offset {
-            // Best effort: without the mark, opening the index checks that
-            // the records are in the store instead.
-            let _ = self.append_to_index(&Frame::Published(offset));
-        }
-        Ok(())
-    }
-
-    /// Appends `frame` to the log, without syncing it, returning its offset,
-    /// or `None` if there's no log: opening the index will rebuild it from
-    /// the store.
-    fn append_to_index(&self, frame: &Frame<'_>) -> Result<Option<u64>, StoreError> {
+    /// Appends `frame` to the log, without syncing it, unless there's no log:
+    /// opening the index will rebuild it from the store.
+    fn append_to_index(&self, frame: &Frame<'_>) -> Result<(), StoreError> {
         let path = self.index_log();
         let io_error = |source| StoreError::io(&path, source);
         let log = match OpenOptions::new().read(true).append(true).open(&path) {
             Ok(log) => log,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
             Err(source) => return Err(io_error(source)),
         };
         // Closing the log releases the lock.
         self.platform
             .lock(&log, LockMode::Exclusive)
             .map_err(io_error)?;
-        let offset = Log::FRAMES
+        Log::FRAMES
             .append(&self.platform, &log, &frame.encode())
             .map_err(io_error)?;
-        Ok(Some(offset))
+        Ok(())
     }
 
     /// The entry of every record in the store, read from every core, and
@@ -1046,12 +1102,15 @@ mod tests {
     fn damage_rebuilds_the_index() {
         let (_dir, store) = store();
         write_history(&store);
+        Index::open(&store).unwrap();
+        let last = revision(change(3), &[], "last");
+        store.write_all(slice::from_ref(&last)).unwrap();
         let index = Index::open(&store).unwrap();
         let log = store.index_log();
         let bytes = fs::read(&log).unwrap();
 
         // Damage past the first frame keeps the arrival order before it:
-        // here, the mark that the last batch was published.
+        // here, the frame catching up with the last record.
         let mut late = bytes.clone();
         *late.last_mut().unwrap() ^= 1;
         fs::write(&log, late).unwrap();
@@ -1078,36 +1137,116 @@ mod tests {
     }
 
     #[test]
-    fn recovers_from_crashed_batches() {
+    fn catches_up_with_what_crashed_writes_published() {
         let (_dir, store) = store();
         let c = change(1);
         let published = revision(c, &[], "published");
         let unpublished = revision(c, &[], "unpublished");
         store.write_all(slice::from_ref(&published)).unwrap();
+        let caught_up = Index::open(&store).unwrap();
 
-        // A batch that crashed after appending its entries: one record made
-        // it into the store before the crash, one didn't, and neither was
-        // marked published.
+        // A batch whose writer crashed after logging it: one record made it
+        // into the store, one didn't.
         let entries = [&published, &unpublished].map(|object| Entry::of(object).unwrap().unwrap());
-        let frame = Frame::Records(Cow::Borrowed(&entries)).encode();
-        // Then a crash in the middle of the next append.
+        store
+            .commit_logged(store.durable_write(), &[Effect::Wrote(entries.to_vec())])
+            .unwrap();
+        // Then a crash in the middle of catching up.
+        let frame = Frame::Records {
+            applied: 99,
+            entries: Cow::Borrowed(&entries),
+        }
+        .encode();
         let mut log = OpenOptions::new()
             .append(true)
             .open(store.index_log())
             .unwrap();
-        log.write_all(&frame).unwrap();
         log.write_all(&frame[..frame.len() / 2]).unwrap();
 
         let (index, intact) = Index::read(&store).unwrap();
         assert!(intact, "a partial last frame is no damage");
-        assert_eq!(index.heads(c), [revision_id(&published)]);
+        assert_eq!(index, caught_up);
+        let index = Index::open(&store).unwrap();
+        assert_eq!(
+            index.heads(c),
+            [revision_id(&published)],
+            "what was published"
+        );
+        assert_eq!(index.applied, store.oplog().last_seq().unwrap());
+        assert_eq!(
+            Log::parse(&fs::read(store.index_log()).unwrap()).1,
+            Tail::Clean
+        );
 
-        // The next append cuts the partial frame off instead of following it.
+        // Frames lost to a crash are caught up again from the op log, and
+        // the next record lands on top.
         let next = revision(c, &[&published], "next");
         store.write_all(slice::from_ref(&next)).unwrap();
-        let log = fs::read(store.index_log()).unwrap();
-        assert_eq!(Log::parse(&log).1, Tail::Clean);
-        assert_eq!(Index::open(&store).unwrap().heads(c), [revision_id(&next)]);
+        let reopened = Index::open(&store).unwrap();
+        fs::write(store.index_log(), Log::encode(&[], &[], 0)).unwrap();
+        assert_eq!(Index::open(&store).unwrap(), reopened);
+        assert_eq!(reopened.heads(c), [revision_id(&next)]);
+    }
+
+    #[test]
+    fn writes_in_progress_hold_back_none_published_after_them() {
+        let (_dir, store) = store();
+        let c = change(1);
+        let slow = revision(c, &[], "slow");
+        let quick = revision(change(2), &[], "quick");
+        // A write whose records aren't published yet, then one that is.
+        let entry = Entry::of(&slow).unwrap().unwrap();
+        let (held, writing) = store
+            .oplog()
+            .append_in_progress(&Effect::Wrote(vec![entry]))
+            .unwrap();
+        store.write_all(slice::from_ref(&quick)).unwrap();
+
+        let index = Index::open(&store).unwrap();
+        assert_eq!(index.heads(change(2)), [revision_id(&quick)]);
+        assert_eq!(index.applied, held - 1, "it looks at the slow one again");
+        assert_eq!(
+            Index::open(&store).unwrap(),
+            index,
+            "and appends nothing twice"
+        );
+
+        store.write_all(slice::from_ref(&slow)).unwrap();
+        drop(writing);
+        let index = Index::open(&store).unwrap();
+        assert_eq!(index.heads(c), [revision_id(&slow)]);
+        assert_eq!(index.applied, store.oplog().last_seq().unwrap());
+    }
+
+    #[test]
+    fn records_added_before_catching_up_are_still_logged() {
+        let (_dir, store) = store();
+        let mut index = Index::open(&store).unwrap();
+        let written = revision(change(1), &[], "added");
+        store.write_all(slice::from_ref(&written)).unwrap();
+        index.add([&written]).unwrap();
+        assert!(index.catch_up(&store).unwrap());
+        let reopened = Index::open(&store).unwrap();
+        assert_eq!(reopened.heads(change(1)), [revision_id(&written)]);
+    }
+
+    #[test]
+    fn rebuilds_once_the_op_log_dropped_what_it_missed() {
+        let (_dir, store) = store();
+        // The test op log keeps a few kilobytes: far fewer entries than this.
+        let written: Vec<_> = (0..100)
+            .map(|i| {
+                let object = revision(change(1), &[], &format!("{i}"));
+                store.write_all(slice::from_ref(&object)).unwrap();
+                revision_id(&object)
+            })
+            .collect();
+        assert!(matches!(
+            store.oplog().after(0),
+            Err(StoreError::Expired { .. })
+        ));
+        let index = Index::open(&store).unwrap();
+        assert_eq!(index.revisions(change(1)).len(), written.len());
     }
 
     #[test]
@@ -1187,5 +1326,41 @@ mod tests {
         for id in written {
             assert!(index.known.contains(&RecordId::Revision(id.into())), "{id}");
         }
+    }
+
+    #[test]
+    fn records_written_after_an_unsettled_entry_are_not_logged_yet() {
+        let (_dir, store) = store();
+        let (_, writing) = store
+            .oplog()
+            .append_in_progress(&Effect::Wrote(Vec::new()))
+            .unwrap();
+        let written = revision(change(1), &[], "after the entry in progress");
+        store.write_all(slice::from_ref(&written)).unwrap();
+        let index = Index::open(&store).unwrap();
+        let record = RecordId::Revision(written.id().into());
+        assert!(index.known.contains(&record), "known in memory");
+        // A power loss takes the record back before its entry settles.
+        fs::remove_file(store.path(written.id())).unwrap();
+        let (logged, _) = Index::read(&store).unwrap();
+        assert!(!logged.known.contains(&record));
+        drop(writing);
+        assert!(!Index::open(&store).unwrap().known.contains(&record));
+    }
+
+    #[test]
+    fn rebuilds_keep_records_of_unsettled_entries_in_memory() {
+        let (_dir, store) = store();
+        let (_, _writing) = store
+            .oplog()
+            .append_in_progress(&Effect::Wrote(Vec::new()))
+            .unwrap();
+        let written = revision(change(1), &[], "after the entry in progress");
+        store.write_all(slice::from_ref(&written)).unwrap();
+        let record = RecordId::Revision(written.id().into());
+        let rebuilt = Index::rebuild(&store).unwrap();
+        assert!(rebuilt.index.known.contains(&record), "known in memory");
+        let (logged, _) = Index::read(&store).unwrap();
+        assert!(!logged.known.contains(&record), "not written yet");
     }
 }

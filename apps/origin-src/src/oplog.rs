@@ -24,16 +24,21 @@
 //! oldest segments are deleted beyond a cap: the log keeps the latest 16 MiB
 //! of entries, and a cursor older than that has expired.
 //!
-//! **Writing.** Every entry must be durable before a reader moves past it:
-//! a power loss could drop it otherwise, and the next entry would take its
-//! sequence number, behind a cursor already handed out. Each write appends
-//! its entries as a writer ([`Store::commit_logged`]): a lock file,
-//! `writers/<n>`, `n` being the sequence number of its first entry, which
-//! every entry names, and which is created and locked before that entry is
-//! appended. The entries are appended just before the write is committed,
-//! and synced with it ([`DurableWrite::sync_with`]): records and waiting
-//! landings with their files, and a target's head with its new acceptance.
-//! Once the write is published, the writer removes its lock file.
+//! **Writing.** The index comes from the entries, so every entry must be
+//! durable before a reader moves past it: a power loss could drop it otherwise,
+//! and the next entry would take its sequence number, behind a cursor already
+//! handed out. Each write appends its entries as a writer
+//! ([`Store::commit_logged`]): a lock file, `writers/<n>`, `n` being the
+//! sequence number of its first entry, which every entry names, and which is
+//! created and locked before that entry is appended. The entries are appended
+//! just before the write is committed, and synced with it
+//! ([`DurableWrite::sync_with`]): records and waiting landings with their
+//! files, and a target's head with its new acceptance. Once the write is
+//! published, the writer removes its lock file.
+//!
+//! A batch of records syncs the op log in place of the index, which catches
+//! up from it, so logging costs little: on Linux, a batch of up to two
+//! files syncs them at once.
 //!
 //! **Reading.** Readers read up to the entry before the first one whose
 //! writer still holds its lock ([`OpLog::settled`]): every entry up to there
