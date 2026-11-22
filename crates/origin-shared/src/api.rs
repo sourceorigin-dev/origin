@@ -108,15 +108,17 @@ pub const MORE: &str = "origin-more";
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct FetchRecords {
     /// The records, returned in this order, each followed by its
-    /// attachment. A response that stops short, with the [`MORE`] header,
-    /// holds those up to the last record it has: ask again for those after
-    /// it.
+    /// attachment. Those the caller may not read are left out. A response
+    /// that stops short, with the [`MORE`] header, holds those up to the
+    /// last record it has: ask again for those after it.
     pub ids: Vec<ObjectId>,
 }
 
 /// Asks for the objects of a snapshot that the caller lacks: its trees and
 /// blobs, walked from its root. This is the only way blobs and trees leave
-/// a repository, so what each caller may read can be checked by path.
+/// a repository, so what each caller may read is checked by path: the
+/// content of paths they may not read is withheld, though it keeps its
+/// place in the trees.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct FetchSnapshot {
     /// The record whose snapshot it is: a revision or an acceptance. Only a

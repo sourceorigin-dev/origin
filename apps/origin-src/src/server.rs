@@ -269,24 +269,33 @@ impl Repositories {
         self.repos.insert(name, service);
     }
 
-    /// Lists the repositories, by name.
-    #[must_use]
-    pub fn list(&self, _caller: &Caller) -> Vec<RepoSummary> {
-        self.repos
-            .keys()
-            .map(|name| RepoSummary { name: name.clone() })
-            .collect()
-    }
-
-    /// The repository `name`.
+    /// Lists the repositories the caller sees, by name.
     ///
     /// # Errors
     ///
-    /// Fails if the server hosts none by that name.
-    pub fn get(&self, _caller: &Caller, name: &RepoName) -> Result<&OriginService, ServiceError> {
-        self.repos
-            .get(name)
-            .ok_or_else(|| ServiceError::UnknownRepository(name.clone()))
+    /// Fails if a repository's policy cannot be read.
+    pub fn list(&self, caller: &Caller) -> Result<Vec<RepoSummary>, ServiceError> {
+        let mut seen = Vec::new();
+        for (name, service) in &self.repos {
+            if service.sees_repository(caller)? {
+                seen.push(RepoSummary { name: name.clone() });
+            }
+        }
+        Ok(seen)
+    }
+
+    /// The repository `name`, if the caller sees it: invisible repositories
+    /// don't exist.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the server hosts none by that name the caller sees, or its
+    /// policy cannot be read.
+    pub fn get(&self, caller: &Caller, name: &RepoName) -> Result<&OriginService, ServiceError> {
+        match self.repos.get(name) {
+            Some(service) if service.sees_repository(caller)? => Ok(service),
+            _ => Err(ServiceError::UnknownRepository(name.clone())),
+        }
     }
 }
 

@@ -1027,7 +1027,7 @@ impl<'a> Sync<'a> {
             // Children first: a tree goes after what it holds.
             for placed in self
                 .store
-                .added(revision.snapshot, &have, &[])?
+                .added(revision.snapshot, &have, &[], None)?
                 .into_iter()
                 .rev()
             {
@@ -2193,7 +2193,7 @@ mod tests {
                 let wire = |objects: Vec<EncodedObject>| Pack { objects }.encode().len();
                 let content = client
                     .store
-                    .added(revision.snapshot, &[], &[])
+                    .added(revision.snapshot, &[], &[], None)
                     .unwrap()
                     .iter()
                     .map(|placed| client.store.read(placed.entry.id).unwrap())

@@ -7,6 +7,7 @@ use std::io;
 use std::path::PathBuf;
 
 use origin_platform::Platform;
+use origin_shared::access::{Level, PathAccess};
 use origin_shared::{
     Base, Digest, EncodedObject, EntryKind, EntryName, Inputs, ObjectId, Record, RecordId,
     RepoPath, Tree, TreeEntry, TreeId,
@@ -27,6 +28,13 @@ pub struct FileChange {
 }
 
 impl<P: Platform> Store<P> {
+    /// Whether a tree operation may read the entry at `path` of a
+    /// directory whose withheld paths are `withheld`: a file it reads, or a
+    /// directory it reads something under.
+    fn readable(withheld: Option<&PathAccess>, path: &RepoPath, entry: &TreeEntry) -> bool {
+        withheld.is_none_or(|access| access.reads_entry(path, entry))
+    }
+
     /// Lists the files that differ between two trees, sorted by path.
     /// Subtrees with equal ids are skipped without being read, so the cost
     /// follows the size of the change.
@@ -543,7 +551,9 @@ impl<P: Platform> Store<P> {
     /// The objects of `snapshot` that none of the snapshots `have` holds at
     /// the same path, parents before children: what someone holding `have`
     /// lacks of it. With `paths`, only those under them, and the trees on
-    /// the way. Subtrees a `have` holds whole are skipped without being
+    /// the way. With `access`, only what it reads, and the trees on the way
+    /// to it: the rest keeps its place in the trees, but its content is
+    /// withheld. Subtrees a `have` holds whole are skipped without being
     /// read, so the cost follows the size of the change. Objects appear
     /// once, at their first path.
     ///
@@ -555,34 +565,48 @@ impl<P: Platform> Store<P> {
         snapshot: TreeId,
         have: &[TreeId],
         paths: &[RepoPath],
+        access: Option<&PathAccess>,
     ) -> Result<Vec<Placed>, StoreError> {
         let mut added = Vec::new();
         let mut seen = HashSet::new();
-        self.add_dir(
-            &RepoPath::root(),
-            snapshot,
-            have,
-            &Scope(paths),
-            &mut seen,
-            &mut added,
-        )?;
+        let walk = Walk {
+            scope: Scope(paths),
+            seen: &mut seen,
+            added: &mut added,
+        };
+        let root = RepoPath::root();
+        walk.dir(self, &root, snapshot, have, Self::unsettled(access, &root))?;
         Ok(added)
     }
 
-    fn add_dir(
-        &self,
+    /// `access`, if what it allows at and under `path` isn't settled to
+    /// reading: walks only check paths while it isn't.
+    fn unsettled<'a>(access: Option<&'a PathAccess>, path: &RepoPath) -> Option<&'a PathAccess> {
+        access.filter(|access| access.settled(path).is_none_or(|level| level < Level::Read))
+    }
+}
+
+/// A walk of [`Store::added`].
+struct Walk<'w> {
+    scope: Scope<'w>,
+    seen: &'w mut HashSet<ObjectId>,
+    added: &'w mut Vec<Placed>,
+}
+
+impl Walk<'_> {
+    fn dir<P: Platform>(
+        mut self,
+        store: &Store<P>,
         dir: &RepoPath,
         tree: TreeId,
         have: &[TreeId],
-        scope: &Scope<'_>,
-        seen: &mut HashSet<ObjectId>,
-        added: &mut Vec<Placed>,
-    ) -> Result<(), StoreError> {
+        access: Option<&PathAccess>,
+    ) -> Result<Self, StoreError> {
         if have.contains(&tree) {
-            return Ok(());
+            return Ok(self);
         }
-        if seen.insert(tree.into()) {
-            added.push(Placed {
+        if self.seen.insert(tree.into()) {
+            self.added.push(Placed {
                 path: dir.clone(),
                 entry: TreeEntry {
                     kind: EntryKind::Tree,
@@ -592,12 +616,15 @@ impl<P: Platform> Store<P> {
         }
         let have: Vec<Tree> = have
             .iter()
-            .map(|&id| self.get(id))
+            .map(|&id| store.get(id))
             .collect::<Result<_, _>>()?;
-        for (name, &entry) in &self.get(tree)? {
+        for (name, &entry) in &store.get(tree)? {
             let path = dir.join(name);
-            let covered = scope.covers(&path);
-            if !(covered || entry.kind.is_tree() && scope.leads_in(&path)) {
+            let covered = self.scope.covers(&path);
+            if !(covered || entry.kind.is_tree() && self.scope.leads_in(&path)) {
+                continue;
+            }
+            if !Store::<P>::readable(access, &path, &entry) {
                 continue;
             }
             let held = have.iter().filter_map(|tree| tree.get(name.as_str()));
@@ -607,13 +634,14 @@ impl<P: Platform> Store<P> {
             match entry.subtree() {
                 Some(subtree) => {
                     let held: Vec<_> = held.filter_map(|held| held.subtree()).collect();
-                    self.add_dir(&path, subtree, &held, scope, seen, added)?;
+                    let access = Store::<P>::unsettled(access, &path);
+                    self = self.dir(store, &path, subtree, &held, access)?;
                 }
-                None if seen.insert(entry.id) => added.push(Placed { path, entry }),
+                None if self.seen.insert(entry.id) => self.added.push(Placed { path, entry }),
                 None => {}
             }
         }
-        Ok(())
+        Ok(self)
     }
 }
 
@@ -776,31 +804,31 @@ pub(crate) mod tests {
         };
 
         assert_eq!(
-            paths(store.added(new, &[old], &[]).unwrap()),
+            paths(store.added(new, &[old], &[], None).unwrap()),
             ["/", "docs", "docs/copy", "edit", "edit/b", "file"],
             "`file/now-dir` has the content of `docs/copy`, listed first"
         );
         assert_eq!(
-            store.added(new, &[], &[]).unwrap().len(),
+            store.added(new, &[], &[], None).unwrap().len(),
             8,
             "5 trees, and 5 files of 3 contents"
         );
-        assert_eq!(store.added(new, &[new], &[]).unwrap(), []);
+        assert_eq!(store.added(new, &[new], &[], None).unwrap(), []);
         let empty = build(&store, &[]);
         assert_eq!(
-            paths(store.added(new, &[empty, old], &[]).unwrap()),
-            paths(store.added(new, &[old], &[]).unwrap()),
+            paths(store.added(new, &[empty, old], &[], None).unwrap()),
+            paths(store.added(new, &[old], &[], None).unwrap()),
             "any have holding an object is enough"
         );
 
         let only = |path: &str| [RepoPath::new(path).unwrap()];
         assert_eq!(
-            paths(store.added(new, &[], &only("edit/b")).unwrap()),
+            paths(store.added(new, &[], &only("edit/b"), None).unwrap()),
             ["/", "edit", "edit/b"],
             "the trees on the way, then the path"
         );
         assert_eq!(
-            paths(store.added(new, &[old], &only("same")).unwrap()),
+            paths(store.added(new, &[old], &only("same"), None).unwrap()),
             ["/"]
         );
     }

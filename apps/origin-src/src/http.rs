@@ -176,7 +176,7 @@ impl utoipa::PartialSchema for Binary {
 
 impl utoipa::ToSchema for Binary {}
 
-/// Lists the repositories on the server.
+/// Lists the repositories on the server that the caller sees.
 #[utoipa::path(
     get,
     path = "/api/v1/repos",
@@ -186,8 +186,15 @@ impl utoipa::ToSchema for Binary {}
         (status = 401, description = "The token is invalid or expired", body = ApiError)
     )
 )]
-async fn list_repos(State(repositories): Repos, caller: Caller) -> Json<Vec<RepoSummary>> {
-    Json(repositories.list(&caller))
+async fn list_repos(
+    State(repositories): Repos,
+    caller: Caller,
+) -> Result<Json<Vec<RepoSummary>>, HttpError> {
+    tokio::task::spawn_blocking(move || repositories.list(&caller))
+        .await
+        .map_err(|error| HttpError::Panicked(error.to_string()))?
+        .map(Json)
+        .map_err(HttpError::Service)
 }
 
 /// A part of a fetch, as a response: its pack, with the [`MORE`] header if
