@@ -133,6 +133,17 @@ impl Frames {
         unwanted.then_some(frames)
     }
 
+    /// The intact frames at the end of a file, decoded by `decode`, oldest
+    /// first: read backwards from the end, up to a broken one or the
+    /// header. They are those after damage that [`Frames::parse`] stops at.
+    pub(crate) fn parse_tail<T>(
+        self,
+        bytes: &[u8],
+        decode: impl FnMut(&[u8]) -> Result<T, DecodeError>,
+    ) -> Vec<T> {
+        self.back(bytes, decode, |_| true).0
+    }
+
     /// Reads frames backwards from the end of `bytes`, oldest first, while
     /// `wanted` is true of them, up to a broken one or the header. Returns
     /// them, and whether it stopped at one `wanted` is false of.
