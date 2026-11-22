@@ -155,14 +155,21 @@ impl Workspace {
         let policy = format!(
             "# Who may land what. Changing it is a landing on `policy`.\n\
              \n\
+             # Each node's public key.\n\
              [nodes]\n\
              \"{node}\" = \"{key}\"\n\
              \n\
+             # Groups of users and nodes, for requirements:\n\
+             # [groups]\n\
+             # runners = [\"node:ci-1\"]\n\
+             \n\
+             # The node ordering each target, and the statements landing needs.\n\
              [targets.policy]\n\
              authority = \"node:{node}\"\n\
              \n\
              [targets.main]\n\
-             authority = \"node:{node}\"\n"
+             authority = \"node:{node}\"\n\
+             # require = [{{ kind = \"ci.test\", verdict = \"pass\", issuer = \"group:runners\" }}]\n"
         );
         let policy = EncodedObject::blob(policy.as_bytes());
         let tree: Tree = [(
