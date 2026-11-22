@@ -8,6 +8,7 @@ use std::io;
 use std::path::PathBuf;
 
 use origin_platform::{LockedFile, Platform};
+use origin_shared::policy::Requirement;
 use origin_shared::{
     AcceptanceBody, AcceptanceId, Base, ChangeId, EncodedObject, Kind, Record, RecordId, Revision,
     RevisionId, Source, StatementId, TargetName, TreeId,
@@ -17,7 +18,7 @@ use crate::ancestry::Ancestry;
 use crate::annotations::{AnnotateError, Annotations, Claim};
 use crate::conflict::Conflicts;
 use crate::oplog::Effect;
-use crate::policy::{Policy, PolicyError, Requirement};
+use crate::policy::{Policy, PolicyError};
 use crate::store::{Store, StoreError};
 use crate::targets::Head;
 
