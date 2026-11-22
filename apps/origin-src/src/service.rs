@@ -10,9 +10,10 @@
 //! index open, catching it up with the op log before each use instead of
 //! reading it whole, and wakes the event long-polls waiting on it whenever
 //! it writes. Calls don't wait for each other to use the index: each takes
-//! one of the indexes kept open, or opens another if they're all in use.
-//! Landings on one target still go one at a time, through the target's
-//! queue lock.
+//! one of the indexes kept open, or opens another if they're all in use, up
+//! to [`OriginService::MAX_INDEXES`], past which calls wait for one, since
+//! each holds the whole index in memory. Landings on one target still go
+//! one at a time, through the target's queue lock.
 //!
 //! Every method takes the [`Caller`], and does only what their [`Rights`]
 //! allow, as [`permissions`](crate::permissions) explains: what each
@@ -21,7 +22,7 @@
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 use std::{iter, mem};
 
@@ -89,8 +90,8 @@ impl Node {
 pub struct OriginService {
     store: Store,
     node: Node,
-    /// The record indexes kept open, but those in use: see the module.
-    indexes: Mutex<Vec<Index>>,
+    /// The record indexes open: see the module.
+    indexes: Indexes,
     /// The policy in force, and the acceptance of `policy` holding it, once
     /// read.
     policy: Mutex<Option<(AcceptanceId, Arc<Policy>)>>,
@@ -109,8 +110,8 @@ impl OriginService {
     /// The longest an event long-poll waits.
     pub const MAX_WAIT: Duration = Duration::from_mins(1);
 
-    /// The most indexes kept open for calls to take.
-    const KEPT_INDEXES: usize = 8;
+    /// The most indexes open at once, kept for calls to take, or in use.
+    pub const MAX_INDEXES: usize = 8;
 
     /// Serves the repository in `store` as `node`.
     #[must_use]
@@ -118,7 +119,7 @@ impl OriginService {
         Self {
             store,
             node,
-            indexes: Mutex::default(),
+            indexes: Indexes::default(),
             policy: Mutex::default(),
             wakeup: Wakeup::default(),
             pack_limit: Pack::LIMIT,
@@ -138,7 +139,7 @@ impl OriginService {
     #[must_use]
     pub fn with_index(self, index: Index) -> Self {
         Self {
-            indexes: Mutex::new(vec![index]),
+            indexes: Indexes::with(index),
             ..self
         }
     }
@@ -184,14 +185,14 @@ impl OriginService {
 
     /// Runs `call` with the statements of the repository, through one of the
     /// indexes kept open, caught up first, or a new one if they're all in
-    /// use.
+    /// use, once fewer than [`OriginService::MAX_INDEXES`] are.
     fn annotations<'s, T>(
         &'s self,
         call: impl FnOnce(&mut Annotations<'s>) -> Result<T, ServiceError>,
     ) -> Result<T, ServiceError> {
-        let kept = self.kept_indexes().pop();
+        let mut taken = self.indexes.take(Self::MAX_INDEXES);
         // A failed refresh drops the index, to read whole next time.
-        let index = match kept {
+        let index = match taken.index.take() {
             Some(mut index) => {
                 index.refresh(&self.store)?;
                 index
@@ -200,15 +201,8 @@ impl OriginService {
         };
         let mut annotations = Annotations::new(&self.store, index);
         let result = call(&mut annotations);
-        let mut kept = self.kept_indexes();
-        if kept.len() < Self::KEPT_INDEXES {
-            kept.push(annotations.into_index());
-        }
+        taken.index = Some(annotations.into_index());
         result
-    }
-
-    fn kept_indexes(&self) -> MutexGuard<'_, Vec<Index>> {
-        self.indexes.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// The policy in force, read again only once `policy` moved.
@@ -1327,6 +1321,72 @@ impl OriginService {
     }
 }
 
+/// The record indexes a service has open: those kept for calls to take,
+/// and how many calls hold one.
+#[derive(Debug, Default)]
+struct Indexes {
+    state: Mutex<IndexesState>,
+    /// Signalled whenever a call gives its index back.
+    returned: Condvar,
+}
+
+#[derive(Debug, Default)]
+struct IndexesState {
+    kept: Vec<Index>,
+    taken: usize,
+}
+
+impl Indexes {
+    /// Indexes keeping `index`.
+    fn with(index: Index) -> Self {
+        Self {
+            state: Mutex::new(IndexesState {
+                kept: vec![index],
+                taken: 0,
+            }),
+            returned: Condvar::new(),
+        }
+    }
+
+    /// Takes a kept index, or room to open one, waiting while `most` are
+    /// open and none is kept. The index goes back when the result drops.
+    fn take(&self, most: usize) -> Taken<'_> {
+        let mut state = self.state();
+        while state.kept.is_empty() && state.taken >= most {
+            state = self
+                .returned
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        state.taken += 1;
+        Taken {
+            indexes: self,
+            index: state.kept.pop(),
+        }
+    }
+
+    fn state(&self) -> MutexGuard<'_, IndexesState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// An index a call took from [`Indexes`], or room to open one, which it
+/// puts in `index` to keep it. Dropped, it gives both back, even if the
+/// call panicked.
+struct Taken<'a> {
+    indexes: &'a Indexes,
+    index: Option<Index>,
+}
+
+impl Drop for Taken<'_> {
+    fn drop(&mut self) {
+        let mut state = self.indexes.state();
+        state.taken -= 1;
+        state.kept.extend(self.index.take());
+        self.indexes.returned.notify_one();
+    }
+}
+
 /// The blobs, trees and attachments of a pack, which
 /// [`OriginService::push`] writes in layers: blobs and attachments first,
 /// then each tree after the trees of the pack it holds. So neither a crash
@@ -1718,6 +1778,9 @@ impl ServiceError {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::thread;
+
     use origin_shared::landing::Landing;
     use origin_shared::{EntryKind, Record, Tree, Verdict};
 
@@ -1888,7 +1951,30 @@ mod tests {
             service.annotations(|annotations| Ok(annotations.index().changes().count()))
         });
         assert_eq!(read.unwrap(), 0);
-        assert_eq!(service.kept_indexes().len(), 2, "both kept for later calls");
+        assert_eq!(
+            service.indexes.state().kept.len(),
+            2,
+            "both kept for later calls"
+        );
+    }
+
+    #[test]
+    fn calls_wait_for_an_index_past_the_most_open() {
+        let (_repo, service) = requiring_ci();
+        let (open, most) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        thread::scope(|scope| {
+            for _ in 0..OriginService::MAX_INDEXES * 2 {
+                scope.spawn(|| {
+                    service.annotations(|_| {
+                        most.fetch_max(open.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
+                        thread::sleep(Duration::from_millis(50));
+                        open.fetch_sub(1, Ordering::SeqCst);
+                        Ok(())
+                    })
+                });
+            }
+        });
+        assert!(most.into_inner() <= OriginService::MAX_INDEXES);
     }
 
     /// A repository whose `main` requires a passing `ci.test` from
