@@ -1,8 +1,19 @@
 //! Sync: sharing records with a [remote](crate::remote).
 //!
-//! - **Fetching** the records of changes compares them with the remote's,
-//!   by id, and fetches those missing, with the records they refer to, and
-//!   the records of the changes those belong to.
+//! - **Fetching** brings the chain of each target this node follows, those
+//!   it holds and those asked for, from the last acceptance it holds on.
+//!   Each acceptance must follow the one before it, and is verified against
+//!   the key of the authority named by the policy governing it
+//!   ([`Policy::governing`]): for an acceptance of `policy`, the one before
+//!   it, and for any other, the policy it names, which must be on the chain
+//!   of `policy` as this node verified it. Only the first acceptance of
+//!   `policy` is checked against its own. Acceptances this node merely
+//!   stores, such as the base of a revision fetched, never govern anything.
+//!   Each acceptance comes with what it landed, and the records of the
+//!   changes that brings.
+//! - The records of changes are compared with the remote's, by id, and
+//!   those missing fetched, with the records they refer to, and the records
+//!   of the changes those belong to.
 //! - Snapshots don't come with records: [`Sync::need`] fetches one when
 //!   something reads it, such as a checkout. A snapshot is marked while it's
 //!   fetched ([`Store::fetching`]), so one whose fetch was interrupted is
@@ -10,20 +21,24 @@
 //!
 //! Transfers are bounded: a fetch's answers stop at
 //! [`Pack::LIMIT`](origin_shared::pack::Pack::LIMIT), with the rest asked
-//! for again (see [`Part`]).
+//! for again (see [`Part`]). Fetched records are written before the chains
+//! that refer to them.
 
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::mem;
 
 use origin_platform::Native;
-use origin_shared::api::{FetchRecords, FetchSnapshot, InventoryRequest};
-use origin_shared::object::DecodeError;
+use origin_shared::api::{FetchRecords, FetchSnapshot, InventoryRequest, LogQuery};
+use origin_shared::object::{BadSignature, DecodeError};
 use origin_shared::pack::Part;
 use origin_shared::{
-    ChangeId, EncodedObject, ObjectId, ObjectKind, Principal, PrincipalName, Revision, TreeId,
+    Acceptance, AcceptanceId, ChangeId, EncodedObject, Head, Object, ObjectId, ObjectKind,
+    Principal, PrincipalName, Record, Revision, TargetName, TreeId,
 };
 
 use crate::annotations::Annotations;
+use crate::policy::{Policy, PolicyError};
 use crate::remote::{Remote, RemoteError};
 use crate::service::Dependencies;
 use crate::store::{Batch, Store, StoreError};
@@ -36,6 +51,17 @@ pub struct Sync<'a> {
     node: Principal,
 }
 
+/// A target whose chain a fetch extended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Advanced {
+    /// The target.
+    pub target: TargetName,
+    /// Its head before, if this node followed it.
+    pub from: Option<Head>,
+    /// Its head now.
+    pub to: Head,
+}
+
 /// What fetching records did.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Fetched {
@@ -43,6 +69,16 @@ pub struct Fetched {
     pub revisions: usize,
     /// The statements fetched.
     pub statements: usize,
+}
+
+/// The new acceptances of a target, verified and about to be appended.
+struct Chain {
+    target: TargetName,
+    /// This node's head of the target, if it has one.
+    from: Option<Head>,
+    /// The remote's head: the last of `acceptances`.
+    to: Head,
+    acceptances: Vec<(AcceptanceId, Acceptance)>,
 }
 
 impl<'a> Sync<'a> {
@@ -53,6 +89,217 @@ impl<'a> Sync<'a> {
             remote,
             node: Principal::Node(node),
         }
+    }
+
+    /// Fetches the chains of `policy`, of the targets this node holds, and
+    /// of `more`, with what they landed, as the module explains. Returns
+    /// the targets that moved, `policy` first. Learns the names of all the
+    /// remote's targets, so acceptances of those this node doesn't follow
+    /// can be described.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the remote doesn't have a target of `more`, a target's
+    /// chain differs from the remote's, an acceptance doesn't verify, or
+    /// the remote or the store fails.
+    pub fn fetch_chains(&self, more: &[TargetName]) -> Result<Vec<Advanced>, SyncError> {
+        let (advanced, landed) = self.chains(more)?;
+        self.fetch_changes(&landed)?;
+        Ok(advanced)
+    }
+
+    /// [`Sync::fetch_chains`], but for the records of the changes that
+    /// landed, which it returns, for the caller to fetch.
+    fn chains(&self, more: &[TargetName]) -> Result<(Vec<Advanced>, Vec<ChangeId>), SyncError> {
+        let remote: HashMap<TargetName, Head> = self
+            .remote
+            .targets()?
+            .into_iter()
+            .map(|target| (target.name, target.head))
+            .collect();
+        for name in remote.keys() {
+            self.store.name_target(name)?;
+        }
+        let mut follow: BTreeSet<TargetName> = self.store.targets()?.into_iter().collect();
+        for target in more {
+            if !remote.contains_key(target) {
+                return Err(SyncError::UnknownTarget(target.clone()));
+            }
+            follow.insert(target.clone());
+        }
+        follow.remove(&TargetName::POLICY);
+        let mut chains = Vec::new();
+        for target in [TargetName::POLICY].into_iter().chain(follow) {
+            // Targets only this node has stay as they are.
+            if let Some(&head) = remote.get(&target) {
+                chains.extend(self.chain(target, head)?);
+            }
+        }
+        self.verify(&chains)?;
+        let appending: HashSet<ObjectId> = chains
+            .iter()
+            .flat_map(|chain| &chain.acceptances)
+            .map(|&(id, _)| id.into())
+            .collect();
+        let landed = chains
+            .iter()
+            .flat_map(|chain| &chain.acceptances)
+            .flat_map(|(_, acceptance)| &acceptance.body().landed)
+            .map(|&source| source.id());
+        // Objects found stored stay until the chains refer to them.
+        let _held = self.store.hold_objects()?;
+        let held = self.store.batch();
+        let records = self.closure(&held, landed, &appending)?;
+        held.commit()?;
+
+        let mut revised = Self::revised(&records)?;
+        revised.sort_unstable();
+        revised.dedup();
+        if !records.is_empty() {
+            self.store.write_all(&records)?;
+        }
+        let mut advanced = Vec::new();
+        for chain in chains {
+            let acceptances: Vec<_> = chain.acceptances.into_iter().map(|(_, a)| a).collect();
+            self.store.append_all(&chain.target, &acceptances, &[])?;
+            advanced.push(Advanced {
+                target: chain.target,
+                from: chain.from,
+                to: chain.to,
+            });
+        }
+        // The changes that landed come whole, so the next fetch only looks
+        // for what moved since.
+        Ok((advanced, revised))
+    }
+
+    /// The acceptances of `target` after the last this node holds, up to
+    /// the remote's head, `theirs`, each checked against its id and target,
+    /// and to follow the one before it. `None` if there are none.
+    fn chain(&self, target: TargetName, theirs: Head) -> Result<Option<Chain>, SyncError> {
+        let ours = self.store.head(&target)?;
+        if ours == Some(theirs) {
+            return Ok(None);
+        }
+        let query = LogQuery {
+            target: target.clone(),
+            since: ours.map_or(0, |ours| ours.seq),
+            limit: None,
+        };
+        let mut entries = self.remote.log(&query)?.into_iter();
+        // The remote's log goes through this node's head.
+        if let Some(ours) = ours
+            && entries
+                .next()
+                .is_none_or(|entry| entry.id != ours.acceptance)
+        {
+            return Err(SyncError::Diverged(target));
+        }
+        let mut acceptances = Vec::new();
+        let mut before = ours;
+        for entry in entries {
+            let body = entry.acceptance.body();
+            let unverified = |why| SyncError::Unverified {
+                target: target.clone(),
+                seq: body.seq,
+                why,
+            };
+            if entry.acceptance.encode().id() != entry.id.into() || body.target != target.id() {
+                return Err(unverified(Unverified::Id(entry.id)));
+            }
+            if body.seq != before.map_or(0, |before| before.seq + 1)
+                || body.prev != before.map(|before| before.acceptance)
+            {
+                return Err(unverified(Unverified::Order));
+            }
+            before = Some(Head {
+                seq: body.seq,
+                acceptance: entry.id,
+            });
+            acceptances.push((entry.id, entry.acceptance));
+        }
+        let Some(to) = before.filter(|_| !acceptances.is_empty()) else {
+            return Ok(None);
+        };
+        Ok(Some(Chain {
+            target,
+            from: ours,
+            to,
+            acceptances,
+        }))
+    }
+
+    /// Checks that the authority each acceptance's governing policy names
+    /// signed it, as the module explains. `chains` start with `policy`'s,
+    /// whose acceptances may govern those after them once verified. The
+    /// policies' snapshots are fetched as needed, and those of `policy`'s
+    /// new acceptances always, so the policy in force can be read.
+    fn verify(&self, chains: &[Chain]) -> Result<(), SyncError> {
+        let mut policies: HashMap<AcceptanceId, Policy> = HashMap::new();
+        // The acceptances of `policy` verified so far, and their snapshots.
+        let mut verified: HashMap<AcceptanceId, TreeId> = HashMap::new();
+        for chain in chains {
+            for (id, acceptance) in &chain.acceptances {
+                let body = acceptance.body();
+                let unverified = |why| SyncError::Unverified {
+                    target: chain.target.clone(),
+                    seq: body.seq,
+                    why,
+                };
+                // Small, and the policy in force once it's the tip.
+                if chain.target == TargetName::POLICY {
+                    self.need(body.state, &[])?;
+                }
+                let governing = Policy::governing(*id, body)
+                    .map_err(|error| unverified(Unverified::Policy(error)))?;
+                let policy = match policies.entry(governing) {
+                    Entry::Occupied(policy) => policy.into_mut(),
+                    Entry::Vacant(vacant) => {
+                        // Only the first acceptance of `policy` governs
+                        // itself: `chain` has it follow nothing.
+                        let state = if governing == *id {
+                            body.state
+                        } else if let Some(&state) = verified.get(&governing) {
+                            state
+                        } else {
+                            self.on_policy_chain(governing)?
+                                .ok_or_else(|| unverified(Unverified::OffChain(governing)))?
+                        };
+                        self.need(state, &[])?;
+                        let policy = Policy::of_snapshot(self.store, state)?
+                            .ok_or(unverified(Unverified::NoPolicy))?;
+                        vacant.insert(policy)
+                    }
+                };
+                let authority = policy
+                    .authority(&chain.target)
+                    .ok_or(unverified(Unverified::NoAuthority))?;
+                let key = policy
+                    .node_key(authority)
+                    .ok_or_else(|| unverified(Unverified::NoKey(authority.clone())))?;
+                acceptance
+                    .verify(key)
+                    .map_err(|error| unverified(Unverified::Signature(error)))?;
+                if chain.target == TargetName::POLICY {
+                    verified.insert(*id, body.state);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The snapshot of `id`, if it's on this node's chain of `policy`,
+    /// which it verified as it appended it.
+    fn on_policy_chain(&self, id: AcceptanceId) -> Result<Option<TreeId>, SyncError> {
+        let acceptance = match self.store.get(id) {
+            Ok(acceptance) => acceptance,
+            Err(StoreError::NotFound(_)) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let body = acceptance.body();
+        let on_chain = body.target == TargetName::POLICY.id()
+            && self.store.acceptance_at(body.target, body.seq)? == Some(id);
+        Ok(on_chain.then_some(body.state))
     }
 
     /// Fetches the records of `changes` the remote has and this node
@@ -173,7 +420,7 @@ impl<'a> Sync<'a> {
                 for object in pack.objects {
                     if matches!(
                         object.kind(),
-                        Ok(ObjectKind::Revision | ObjectKind::Statement)
+                        Ok(ObjectKind::Revision | ObjectKind::Statement | ObjectKind::Acceptance)
                     ) {
                         let decoded = object.decode().map_err(|source| SyncError::Malformed {
                             id: object.id(),
@@ -181,6 +428,13 @@ impl<'a> Sync<'a> {
                         })?;
                         for (id, _) in Dependencies::of(&decoded).records {
                             want(id, &mut wanted)?;
+                        }
+                        // Another target's acceptance, landed on this one:
+                        // what it landed comes too.
+                        if let Object::Acceptance(acceptance) = &decoded {
+                            for source in &acceptance.body().landed {
+                                want(source.id(), &mut wanted)?;
+                            }
                         }
                     }
                     objects.push(object);
@@ -260,9 +514,55 @@ impl<'a> Sync<'a> {
     }
 }
 
+/// Why an acceptance fetched doesn't verify.
+#[derive(Debug, thiserror::Error)]
+pub enum Unverified {
+    /// It doesn't match its id, or belongs to another target.
+    #[error("it isn't acceptance {0} of the target")]
+    Id(AcceptanceId),
+    /// It doesn't follow the acceptance before it.
+    #[error("it doesn't follow the acceptance before it")]
+    Order,
+    /// It names no policy, or another than the one governing it.
+    #[error("it names the wrong policy")]
+    Policy(#[source] PolicyError),
+    /// The policy it names isn't on the chain of `policy`.
+    #[error("its policy {} isn't on the chain of `policy`", .0.short())]
+    OffChain(AcceptanceId),
+    /// Its policy has no `policy.toml`.
+    #[error("its policy has no policy.toml")]
+    NoPolicy,
+    /// Its policy names no authority for the target.
+    #[error("its policy names no authority for the target")]
+    NoAuthority,
+    /// Its policy lists no key for the authority.
+    #[error("its policy lists no key for node:{0}")]
+    NoKey(PrincipalName),
+    /// The authority didn't sign it.
+    #[error("its authority didn't sign it")]
+    Signature(#[source] BadSignature),
+}
+
 /// A failure to sync with a remote.
 #[derive(Debug, thiserror::Error)]
 pub enum SyncError {
+    /// The remote has no such target.
+    #[error("the remote has no target `{0}`")]
+    UnknownTarget(TargetName),
+    /// A target's chain here isn't a start of the remote's.
+    #[error("the history of `{0}` here differs from the remote's")]
+    Diverged(TargetName),
+    /// An acceptance fetched doesn't verify.
+    #[error("acceptance #{seq} of `{target}` from the remote doesn't verify: {why}")]
+    Unverified {
+        /// Its target.
+        target: TargetName,
+        /// Its position.
+        seq: u64,
+        /// Why.
+        #[source]
+        why: Unverified,
+    },
     /// The remote sent an object that doesn't decode.
     #[error("the remote sent a malformed object {id}")]
     Malformed {
@@ -274,6 +574,9 @@ pub enum SyncError {
     /// The remote failed.
     #[error(transparent)]
     Remote(#[from] RemoteError),
+    /// A policy fetched cannot be read.
+    #[error(transparent)]
+    Policy(#[from] PolicyError),
     /// Objects cannot be read or written.
     #[error(transparent)]
     Store(#[from] StoreError),
@@ -284,10 +587,12 @@ mod tests {
     use std::sync::Arc;
 
     use origin_platform::Native;
+    use origin_shared::event::{EventKind, Filter};
     use origin_shared::pack::Pack;
-    use origin_shared::{NodeKey, RepoPath};
+    use origin_shared::{AcceptanceBody, Base, NodeKey, RepoPath};
 
     use super::*;
+    use crate::events::Events;
     use crate::queue::tests::{Repo, ci_test};
     use crate::service::{Node, OriginService};
     use crate::tree::Snapshots;
@@ -331,6 +636,258 @@ mod tests {
         }
     }
 
+    /// Writes a snapshot of `policy.toml` making `key` the key of
+    /// `node:queue`, the authority of `policy`, to `store`.
+    fn policy_snapshot(store: &Store, key: &NodeKey) -> TreeId {
+        let policy = format!(
+            "[nodes]\nqueue = \"{}\"\n[targets.policy]\nauthority = \"node:queue\"\n{MAIN_RULES}",
+            key.public()
+        );
+        let (file, tree) = Policy::snapshot(&policy);
+        store.write_all(&[file, tree.clone()]).unwrap();
+        tree.id().into()
+    }
+
+    #[test]
+    fn fetches_verified_chains_and_what_they_landed_but_not_snapshots() {
+        let server = Repo::new(MAIN_RULES);
+        let landed = server.change_on_main(1, &[("a", "a")]);
+        let result = server
+            .annotations()
+            .issue(&ci_test(landed, "node:ci"), None)
+            .unwrap();
+        server.land(1);
+        let client = Client::new(&server);
+
+        let advanced = client.sync().fetch_chains(&[]).unwrap();
+        assert_eq!(advanced.len(), 1, "`policy` is always followed");
+        let advanced = client.sync().fetch_chains(&[TargetName::MAIN]).unwrap();
+        assert_eq!(advanced[0].to, server.tip(&TargetName::MAIN));
+        assert_eq!(
+            client.store.log(&TargetName::MAIN).unwrap(),
+            server.store.log(&TargetName::MAIN).unwrap()
+        );
+        assert!(
+            client.store.contains(landed.into()).unwrap(),
+            "what landed comes"
+        );
+        assert!(
+            client.store.contains(result.into()).unwrap(),
+            "with the records of its change"
+        );
+        assert!(Policy::in_force(&client.store).is_ok(), "the policy too");
+
+        let state = client
+            .store
+            .get(server.tip(&TargetName::MAIN).acceptance)
+            .unwrap()
+            .body()
+            .state;
+        assert!(
+            !client.store.contains(state.into()).unwrap(),
+            "snapshots are lazy"
+        );
+        assert!(client.sync().need(state, &[]).unwrap());
+        assert!(!client.sync().need(state, &[]).unwrap(), "once");
+        assert_eq!(client.store.diff(state, state).unwrap(), []);
+        assert_eq!(client.sync().fetch_chains(&[]).unwrap(), []);
+    }
+
+    #[test]
+    fn acceptances_that_do_not_verify_are_refused() {
+        let server = Repo::new(MAIN_RULES);
+        let tip = server.tip(&TargetName::MAIN);
+        let state = server.store.get(tip.acceptance).unwrap().body().state;
+        let forged = AcceptanceBody {
+            target: TargetName::MAIN.id(),
+            seq: 1,
+            prev: Some(tip.acceptance),
+            state,
+            landed: Vec::new(),
+            evidence: Vec::new(),
+            policy: Some(server.tip(&TargetName::POLICY).acceptance),
+        }
+        .sign(&NodeKey::from_bytes(&[8; 32]));
+        server.store.append(&TargetName::MAIN, &forged).unwrap();
+        let client = Client::new(&server);
+
+        let error = client.sync().fetch_chains(&[TargetName::MAIN]).unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                SyncError::Unverified {
+                    seq: 1,
+                    why: Unverified::Signature(_),
+                    ..
+                }
+            ),
+            "{error}"
+        );
+        assert_eq!(
+            client.store.head(&TargetName::MAIN).unwrap(),
+            None,
+            "nothing of the chain was appended"
+        );
+    }
+
+    #[test]
+    fn only_the_chain_of_policy_governs() {
+        let server = Repo::new(MAIN_RULES);
+        let client = Client::new(&server);
+        client.sync().fetch_chains(&[TargetName::MAIN]).unwrap();
+        // An acceptance of `policy` off its chain, signed by another key,
+        // which the client stores as the base of a revision it fetches.
+        let attacker = NodeKey::from_bytes(&[8; 32]);
+        let fake = AcceptanceBody {
+            target: TargetName::POLICY.id(),
+            seq: 40,
+            prev: None,
+            state: policy_snapshot(&server.store, &attacker),
+            landed: Vec::new(),
+            evidence: Vec::new(),
+            policy: None,
+        }
+        .sign(&attacker);
+        let fake_id: AcceptanceId = fake.encode().id().into();
+        server.store.write_all(&[fake.encode()]).unwrap();
+        server.revision(9, &[], Base::Acceptance(fake_id), &[("a", "a")]);
+        client
+            .sync()
+            .fetch_changes(&[ChangeId::from_bytes([9; 16])])
+            .unwrap();
+        assert!(client.store.contains(fake_id.into()).unwrap());
+
+        let tip = server.tip(&TargetName::MAIN);
+        let forged = AcceptanceBody {
+            target: TargetName::MAIN.id(),
+            seq: tip.seq + 1,
+            prev: Some(tip.acceptance),
+            state: server.store.get(tip.acceptance).unwrap().body().state,
+            landed: Vec::new(),
+            evidence: Vec::new(),
+            policy: Some(fake_id),
+        }
+        .sign(&attacker);
+        server.store.append(&TargetName::MAIN, &forged).unwrap();
+        let error = client.sync().fetch_chains(&[]).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                SyncError::Unverified { why: Unverified::OffChain(id), .. } if id == fake_id
+            ),
+            "{error}"
+        );
+        assert_eq!(client.store.head(&TargetName::MAIN).unwrap(), Some(tip));
+    }
+
+    #[test]
+    fn each_acceptance_of_policy_is_governed_by_the_one_before() {
+        // The policy replaces the authority's key, then the old key extends
+        // it, naming the policy it was replaced in, or the one before it.
+        let extended_by_the_old_key = |names_genesis: bool| {
+            let server = Repo::new(MAIN_RULES);
+            let client = Client::new(&server);
+            client.sync().fetch_chains(&[]).unwrap();
+            let genesis = server.tip(&TargetName::POLICY).acceptance;
+            let old = NodeKey::from_bytes(&[7; 32]);
+            let rotation = AcceptanceBody {
+                target: TargetName::POLICY.id(),
+                seq: 1,
+                prev: Some(genesis),
+                state: policy_snapshot(&server.store, &NodeKey::from_bytes(&[8; 32])),
+                landed: Vec::new(),
+                evidence: Vec::new(),
+                policy: Some(genesis),
+            }
+            .sign(&old);
+            server.store.append(&TargetName::POLICY, &rotation).unwrap();
+            client.sync().fetch_chains(&[]).unwrap();
+            let rotation: AcceptanceId = rotation.encode().id().into();
+            let reverted = AcceptanceBody {
+                target: TargetName::POLICY.id(),
+                seq: 2,
+                prev: Some(rotation),
+                state: server.store.get(genesis).unwrap().body().state,
+                landed: Vec::new(),
+                evidence: Vec::new(),
+                policy: Some(if names_genesis { genesis } else { rotation }),
+            }
+            .sign(&old);
+            server.store.append(&TargetName::POLICY, &reverted).unwrap();
+            client.sync().fetch_chains(&[]).unwrap_err()
+        };
+        let error = extended_by_the_old_key(true);
+        assert!(
+            matches!(
+                error,
+                SyncError::Unverified {
+                    seq: 2,
+                    why: Unverified::Policy(PolicyError::NotPredecessor(2)),
+                    ..
+                }
+            ),
+            "{error}"
+        );
+        let error = extended_by_the_old_key(false);
+        assert!(
+            matches!(
+                error,
+                SyncError::Unverified {
+                    seq: 2,
+                    why: Unverified::Signature(_),
+                    ..
+                }
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn acceptances_fetched_before_their_chain_advance_it_once_appended() {
+        let server = Repo::new(MAIN_RULES);
+        server.change_on_main(1, &[("a", "a")]);
+        server.land(1);
+        let release = TargetName::new("release").unwrap();
+        server
+            .queue()
+            .create_target(&release, &TargetName::MAIN)
+            .unwrap();
+        let main_tip = server.tip(&TargetName::MAIN).acceptance;
+        let client = Client::new(&server);
+        let events = Events::new(&client.store);
+
+        // `release` landed `main`'s tip, which comes as a record.
+        client.sync().fetch_chains(&[release]).unwrap();
+        assert!(client.store.contains(main_tip.into()).unwrap());
+        let advanced = |cursor| {
+            let page = events
+                .after(cursor, &Filter::default(), usize::MAX)
+                .unwrap();
+            let main: Vec<u64> = page
+                .events
+                .iter()
+                .filter_map(|event| match &event.kind {
+                    EventKind::TargetAdvanced { target, seq, .. }
+                        if *target == TargetName::MAIN =>
+                    {
+                        Some(*seq)
+                    }
+                    _ => None,
+                })
+                .collect();
+            (main, page.next)
+        };
+        let (main, cursor) = advanced(0);
+        assert!(main.is_empty(), "not followed, so nothing advanced");
+
+        client.sync().fetch_chains(&[TargetName::MAIN]).unwrap();
+        assert_eq!(
+            advanced(cursor).0,
+            [0, 1],
+            "the acceptance held before advances `main` too, once appended"
+        );
+    }
+
     #[test]
     fn fetches_the_records_of_changes() {
         let server = Repo::new(MAIN_RULES);
@@ -338,6 +895,7 @@ mod tests {
         let annotations = server.annotations();
         annotations.issue(&ci_test(first, "node:ci"), None).unwrap();
         let client = Client::new(&server);
+        client.sync().fetch_chains(&[TargetName::MAIN]).unwrap();
 
         let fetched = client
             .sync()
@@ -363,6 +921,7 @@ mod tests {
         let server = Repo::new(MAIN_RULES);
         let revision = server.change_on_main(1, &[("src/a", "a")]);
         let client = Client::new(&server);
+        client.sync().fetch_chains(&[TargetName::MAIN]).unwrap();
         client
             .sync()
             .fetch_changes(&[ChangeId::from_bytes([1; 16])])

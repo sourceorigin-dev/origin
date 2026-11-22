@@ -5,7 +5,7 @@ use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 
 use super::{DecodeError, Field, ObjectKind, Reader, Record, fields, tagged};
 use crate::id::hex;
-use crate::{AcceptanceId, ParseIdError, RevisionId, StatementId, TargetId, TreeId};
+use crate::{AcceptanceId, ObjectId, ParseIdError, RevisionId, StatementId, TargetId, TreeId};
 
 pub use ed25519_dalek::Signature;
 
@@ -124,6 +124,17 @@ tagged!(Source {
     Revision = 1,
     Target = 2,
 });
+
+impl Source {
+    /// The record it names: a revision, or another target's acceptance.
+    #[must_use]
+    pub fn id(self) -> ObjectId {
+        match self {
+            Self::Revision(id) => id.into(),
+            Self::Target(id) => id.into(),
+        }
+    }
+}
 
 impl Field for Signature {
     fn write(&self, out: &mut Vec<u8>) {
