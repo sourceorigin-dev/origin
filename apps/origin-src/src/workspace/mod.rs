@@ -28,9 +28,9 @@ use std::path::{self, Path, PathBuf};
 
 use origin_platform::Native;
 use origin_shared::{
-    AcceptanceBody, AcceptanceId, Base, BlobId, ChangeId, EncodedObject, EntryKind, EntryName,
-    Kind, NodePublicKey, Principal, Record, RecordId, RepoPath, Revision, RevisionId, Source,
-    Statement, StatementId, TargetId, TargetName, Tree, TreeEntry, TreeId,
+    AcceptanceId, Base, BlobId, ChangeId, EncodedObject, Kind, NodePublicKey, Principal, Record,
+    RecordId, RepoPath, Revision, RevisionId, Source, Statement, StatementId, TargetId, TargetName,
+    Tree, TreeId,
 };
 
 use crate::ancestry::Ancestry;
@@ -39,6 +39,7 @@ use crate::config::{ConfigError, UserConfig};
 use crate::conflict::Conflicts;
 use crate::index::{FindChangeError, FindError, Index};
 use crate::output::FileDiff;
+use crate::queue::{LandError, Queue};
 use crate::store::{Store, StoreError};
 use crate::worktree::{SnapshotError, StatCache, Worktree};
 
@@ -100,32 +101,10 @@ impl Workspace {
         let store = Store::new(meta, Native::default());
         store.init()?;
 
-        let (policy, policy_tree) = Self::policy(&config, &key.public());
+        let policy = Self::policy(&config, &key.public());
+        let main = Queue::new(&store, &key, config.node().clone()).init(&policy)?;
         let empty_tree = Tree::default().encode();
         let empty_description = EncodedObject::blob(b"");
-        let genesis = |target: &TargetName, state: &EncodedObject, policy| AcceptanceBody {
-            target: target.id(),
-            seq: 0,
-            prev: None,
-            state: state.id().into(),
-            landed: Vec::new(),
-            evidence: Vec::new(),
-            policy,
-        };
-        store.write_all(&[
-            policy,
-            policy_tree.clone(),
-            empty_tree.clone(),
-            empty_description.clone(),
-        ])?;
-        let policy = store.append(
-            &TargetName::POLICY,
-            &genesis(&TargetName::POLICY, &policy_tree, None).sign(&key),
-        )?;
-        let main = store.append(
-            &TargetName::MAIN,
-            &genesis(&TargetName::MAIN, &empty_tree, Some(policy)).sign(&key),
-        )?;
 
         let revision = Revision {
             change: ChangeId::random().map_err(WorkspaceError::Random)?,
@@ -143,7 +122,10 @@ impl Workspace {
             config,
             revision: encoded.id().into(),
         };
-        workspace.save(&[vec![encoded]], workspace.revision)?;
+        workspace.save(
+            &[vec![empty_description], vec![encoded]],
+            workspace.revision,
+        )?;
         println!(
             "Initialized a repository in {}: node:{} is the authority of `policy` and `main`",
             workspace.root.display(),
@@ -153,12 +135,12 @@ impl Workspace {
         Ok(workspace)
     }
 
-    /// The first `policy.toml`, and the snapshot holding it: this node is
-    /// the authority of `policy` and `main`, and neither requires anything,
-    /// so a solo project lands instantly.
-    fn policy(config: &UserConfig, key: &NodePublicKey) -> (EncodedObject, EncodedObject) {
+    /// The first `policy.toml`: this node is the authority of `policy` and
+    /// `main`, and neither requires anything, so a solo project lands
+    /// instantly.
+    fn policy(config: &UserConfig, key: &NodePublicKey) -> String {
         let node = config.node();
-        let policy = format!(
+        format!(
             "# Who may land what. Changing it is a landing on `policy`.\n\
              \n\
              # Each node's public key.\n\
@@ -176,18 +158,7 @@ impl Workspace {
              [targets.main]\n\
              authority = \"node:{node}\"\n\
              # require = [{{ kind = \"ci.test\", verdict = \"pass\", issuer = \"group:runners\" }}]\n"
-        );
-        let policy = EncodedObject::blob(policy.as_bytes());
-        let tree: Tree = [(
-            EntryName::new("policy.toml").expect("a valid name"),
-            TreeEntry {
-                kind: EntryKind::File,
-                id: policy.id(),
-            },
-        )]
-        .into_iter()
-        .collect();
-        (policy, tree.encode())
+        )
     }
 
     /// Opens the working copy containing `start`.
@@ -1106,6 +1077,9 @@ pub enum WorkspaceError {
     /// A statement cannot be issued.
     #[error(transparent)]
     Annotate(#[from] AnnotateError),
+    /// A landing failed.
+    #[error(transparent)]
+    Land(#[from] LandError),
 }
 
 impl WorkspaceError {

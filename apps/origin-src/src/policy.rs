@@ -33,8 +33,8 @@ use std::str::FromStr;
 
 use origin_platform::Platform;
 use origin_shared::{
-    AcceptanceId, Kind, NodePublicKey, Principal, PrincipalName, RepoPath, TargetName, TreeId,
-    Verdict,
+    AcceptanceId, EncodedObject, EntryKind, EntryName, Kind, NodePublicKey, Principal,
+    PrincipalName, Record, RepoPath, TargetName, Tree, TreeEntry, TreeId, Verdict,
 };
 use serde::Deserialize;
 
@@ -164,6 +164,19 @@ impl Policy {
                 snapshot,
                 source: Box::new(source),
             })
+    }
+
+    /// A snapshot holding only `policy` as its `policy.toml`: the file and
+    /// the tree.
+    pub(crate) fn snapshot(policy: &str) -> (EncodedObject, EncodedObject) {
+        let file = EncodedObject::blob(policy.as_bytes());
+        let entry = TreeEntry {
+            kind: EntryKind::File,
+            id: file.id(),
+        };
+        let name = EntryName::new(Self::FILE).expect("`policy.toml` is a valid name");
+        let tree: Tree = [(name, entry)].into_iter().collect();
+        (file, tree.encode())
     }
 
     /// The node that orders `target`: the one its table names, or else the
