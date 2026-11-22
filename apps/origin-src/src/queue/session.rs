@@ -12,7 +12,7 @@ use origin_shared::{
 
 use crate::annotations::{AnnotateError, Annotations, Claim};
 use crate::conflict::Conflicts;
-use crate::policy::{Policy, Requirement};
+use crate::policy::{Policy, PolicyError, Requirement};
 use crate::store::{Store, StoreError};
 use crate::targets::Head;
 
@@ -190,6 +190,14 @@ impl<P: Platform> Session<'_, '_, P> {
         if !candidate.trees.is_empty() {
             store.write_all(&candidate.trees)?;
         }
+        // What a landing on `policy` lands governs the next one, which
+        // this node must still be the authority of.
+        let landed_policy = if self.onto == TargetName::POLICY {
+            self.queue.authorize(&self.policy, &self.onto)?;
+            Some(Queue::check_policy(store, candidate.state)?)
+        } else {
+            None
+        };
         let mut records: Vec<EncodedObject> = candidate.revision.into_iter().collect();
         let requirements = self.policy.requirements(&self.onto).to_vec();
         let mut evidence = Vec::new();
@@ -237,7 +245,11 @@ impl<P: Platform> Session<'_, '_, P> {
             policy: Some(self.policy_head),
         }
         .sign(self.queue.key);
-        records.push(acceptance.encode());
+        let encoded = acceptance.encode();
+        if Policy::governing(encoded.id().into(), acceptance.body())? != self.policy_head {
+            return Err(PolicyError::NotPredecessor(acceptance.body().seq).into());
+        }
+        records.push(encoded);
         store.write_all(&records)?;
         let id = store.append(&self.onto, &acceptance)?;
         self.tip = Head {
@@ -245,6 +257,10 @@ impl<P: Platform> Session<'_, '_, P> {
             acceptance: id,
         };
         self.state = candidate.state;
+        if let Some(policy) = landed_policy {
+            self.policy = policy;
+            self.policy_head = id;
+        }
         Ok(Landing::Landed {
             proposal: candidate.proposal,
             source: candidate.source,

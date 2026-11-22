@@ -16,11 +16,12 @@
 //!    statement about the revision lists the paths, and the change waits,
 //!    blocked, until a new revision of it merges.
 //! 3. **Policy.** The policy in force now must name this node as the
-//!    target's authority. Each of the target's requirements needs a
-//!    [claim](crate::annotations::Claim) about the revision that lands:
-//!    results with the same input digest are promoted to it first, and a
-//!    valid promotion claims what its original does, as its original's
-//!    issuer.
+//!    target's authority. On `policy`, that's the policy of the acceptance
+//!    before, never the one landing ([`Policy::governing`]). Each of the
+//!    target's requirements needs a [claim](crate::annotations::Claim)
+//!    about the revision that lands: results with the same input digest
+//!    are promoted to it first, and a valid promotion claims what its
+//!    original does, as its original's issuer.
 //! 4. **Missing evidence** leaves the landing waiting, until the statements
 //!    are issued and the landing is retried.
 //! 5. **Otherwise** this node signs an acceptance naming what landed, the
@@ -260,7 +261,14 @@ impl<'a, P: Platform> Queue<'a, P> {
             .store
             .head(onto)?
             .ok_or_else(|| LandError::UnknownTarget(onto.clone()))?;
-        let (policy_head, policy) = Policy::in_force(self.store)?;
+        // A landing on `policy` is governed by the acceptance before it: its
+        // tip, whatever the policy it lands says.
+        let (policy_head, policy) = if *onto == TargetName::POLICY {
+            let state = self.store.get(tip.acceptance)?.body().state;
+            (tip.acceptance, Self::check_policy(self.store, state)?)
+        } else {
+            Policy::in_force(self.store)?
+        };
         self.authorize(&policy, onto)?;
         Ok(Session {
             queue: self,
