@@ -73,8 +73,8 @@ endpoints! {
         /// holds those up to the last record it has.
         fn fetch_records(request: &FetchRecords) -> Part =
             POST "records/fetch", json(request) => part;
-        /// Fetches the trees and blobs of a snapshot that none of the
-        /// request's snapshots holds at the same path, parents first. A
+        /// Fetches the trees and blobs of a record's snapshot that none of
+        /// the request's snapshots holds at the same path, parents first. A
         /// part that stops short is followed by asking again, skipping the
         /// objects it holds.
         fn fetch_snapshot(request: &FetchSnapshot) -> Part =

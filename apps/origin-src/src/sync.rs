@@ -572,7 +572,7 @@ impl<'a> Sync<'a> {
                 };
                 // Small, and the policy in force once it's the tip.
                 if chain.target == TargetName::POLICY {
-                    self.need(body.state, &[])?;
+                    self.fetch_snapshot(RecordId::Acceptance(*id), body.state, &[])?;
                 }
                 let governing = Policy::governing(*id, body)
                     .map_err(|error| unverified(Unverified::Policy(error)))?;
@@ -589,7 +589,7 @@ impl<'a> Sync<'a> {
                             self.on_policy_chain(governing)?
                                 .ok_or_else(|| unverified(Unverified::OffChain(governing)))?
                         };
-                        self.need(state, &[])?;
+                        self.fetch_snapshot(RecordId::Acceptance(governing), state, &[])?;
                         let policy = Policy::of_snapshot(self.store, state)?
                             .ok_or(unverified(Unverified::NoPolicy))?;
                         vacant.insert(policy)
@@ -887,43 +887,62 @@ impl<'a> Sync<'a> {
         Ok(objects)
     }
 
-    /// Fetches the trees and blobs of `snapshot`, unless the store holds it
-    /// whole, skipping what the snapshots `have`, which it holds whole,
-    /// hold at the same path. Returns whether it fetched.
+    /// Fetches the trees and blobs of the snapshot of `record`, a revision
+    /// or an acceptance this node has, unless the store holds it whole,
+    /// skipping what the snapshots `have`, which it holds whole, hold at
+    /// the same path. Returns whether it fetched.
     ///
     /// # Errors
     ///
-    /// Fails if the remote doesn't have the snapshot, or the remote or the
-    /// store fails.
-    pub fn need(&self, snapshot: TreeId, have: &[TreeId]) -> Result<bool, SyncError> {
+    /// Fails if the record has no snapshot, the remote doesn't have it, or
+    /// the remote or the store fails.
+    pub fn need(&self, record: RecordId, have: &[TreeId]) -> Result<bool, SyncError> {
+        let snapshot = self
+            .store
+            .snapshot_of(record)?
+            .ok_or(SyncError::NoSnapshot(record))?;
+        self.fetch_snapshot(record, snapshot, have)
+    }
+
+    /// Fetches the whole snapshot of `record` again, whatever the store
+    /// holds: what the store lacks of a snapshot it has the root of, which
+    /// reading it found.
+    ///
+    /// # Errors
+    ///
+    /// Fails like [`Sync::need`].
+    pub fn repair(&self, record: RecordId) -> Result<(), SyncError> {
+        let snapshot = self
+            .store
+            .snapshot_of(record)?
+            .ok_or(SyncError::NoSnapshot(record))?;
+        let request = FetchSnapshot {
+            of: record,
+            have: Vec::new(),
+            paths: Vec::new(),
+            skip: 0,
+        };
+        self.fetch_parts(request, Some(snapshot))
+    }
+
+    /// [`Sync::need`], given the snapshot of `record`.
+    fn fetch_snapshot(
+        &self,
+        record: RecordId,
+        snapshot: TreeId,
+        have: &[TreeId],
+    ) -> Result<bool, SyncError> {
         if self.store.holds(snapshot)? {
             return Ok(false);
         }
         let request = FetchSnapshot {
-            snapshot,
+            of: record,
             have: self.store.held_whole(have.iter().copied())?,
             paths: Vec::new(),
             skip: 0,
         };
         self.fetch_parts(request, Some(snapshot))?;
         Ok(true)
-    }
-
-    /// Fetches `snapshot` whole again, whatever the store holds: what the
-    /// store lacks of a snapshot it has the root of, which reading it
-    /// found.
-    ///
-    /// # Errors
-    ///
-    /// Fails like [`Sync::need`].
-    pub fn repair(&self, snapshot: TreeId) -> Result<(), SyncError> {
-        let request = FetchSnapshot {
-            snapshot,
-            have: Vec::new(),
-            paths: Vec::new(),
-            skip: 0,
-        };
-        self.fetch_parts(request, Some(snapshot))
     }
 
     /// Fetches what `request` asks for, part after part, in one batch. With
@@ -998,10 +1017,7 @@ impl<'a> Sync<'a> {
         let mut seen = HashSet::new();
         for (id, revision) in &revisions {
             // The remote has these snapshots, or gets them first.
-            let mut have = vec![match revision.base {
-                Base::Acceptance(base) => self.store.get(base)?.body().state,
-                Base::Revision(base) => self.store.get(base)?.snapshot,
-            }];
+            let mut have = vec![self.store.base_snapshot(revision.base)?];
             for &predecessor in &revision.predecessors {
                 if shared.contains(&predecessor.into()) {
                     have.push(self.store.get(predecessor)?.snapshot);
@@ -1339,6 +1355,9 @@ pub enum SyncError {
     /// The remote has no such target.
     #[error("the remote has no target `{0}`")]
     UnknownTarget(TargetName),
+    /// A snapshot was needed of a record that has none.
+    #[error("{0} has no snapshot")]
+    NoSnapshot(RecordId),
     /// The change has no revision to push.
     #[error("change {} has no revisions", .0.short())]
     UnknownChange(ChangeId),
@@ -1546,8 +1565,9 @@ mod tests {
             !client.store.contains(state.into()).unwrap(),
             "snapshots are lazy"
         );
-        assert!(client.sync().need(state, &[]).unwrap());
-        assert!(!client.sync().need(state, &[]).unwrap(), "once");
+        let tip = RecordId::Acceptance(server.tip(&TargetName::MAIN).acceptance);
+        assert!(client.sync().need(tip, &[]).unwrap());
+        assert!(!client.sync().need(tip, &[]).unwrap(), "once");
         assert_eq!(client.store.diff(state, state).unwrap(), []);
         assert_eq!(client.sync().fetch_chains(&[]).unwrap(), []);
     }
@@ -1888,16 +1908,17 @@ mod tests {
                 statements: 1
             }
         );
-        let snapshot = other.store.get(first).unwrap().snapshot;
+        let record = RecordId::Revision(first);
         let request = FetchSnapshot {
-            snapshot,
+            of: record,
             have: Vec::new(),
             paths: Vec::new(),
             skip: 0,
         };
         let part = other.remote.snapshot(&request).unwrap();
         assert!(part.more && part.pack.objects.len() < 10, "{part:?}");
-        assert!(other.sync().need(snapshot, &[]).unwrap());
+        assert!(other.sync().need(record, &[]).unwrap());
+        let snapshot = other.store.snapshot_of(record).unwrap().unwrap();
         let empty = build(&other.store, &[]);
         assert_eq!(other.store.diff(empty, snapshot).unwrap().len(), 20);
     }
@@ -1912,7 +1933,8 @@ mod tests {
             .sync()
             .fetch_changes(&[ChangeId::from_bytes([1; 16])])
             .unwrap();
-        let snapshot = client.store.get(revision).unwrap().snapshot;
+        let record = RecordId::Revision(revision);
+        let snapshot = client.store.snapshot_of(record).unwrap().unwrap();
         let empty = build(&client.store, &[]);
 
         // A fetch cut short once the root was published, not what it holds.
@@ -1924,7 +1946,7 @@ mod tests {
         batch.commit().unwrap();
         drop(fetching);
         assert!(!client.store.holds(snapshot).unwrap());
-        assert!(client.sync().need(snapshot, &[]).unwrap(), "fetched again");
+        assert!(client.sync().need(record, &[]).unwrap(), "fetched again");
         assert!(client.store.holds(snapshot).unwrap());
         assert_eq!(client.store.diff(empty, snapshot).unwrap().len(), 1);
 
@@ -1935,7 +1957,7 @@ mod tests {
             .unwrap();
         client.store.remove(&[src.id]).unwrap();
         assert!(client.store.diff(empty, snapshot).is_err());
-        client.sync().repair(snapshot).unwrap();
+        client.sync().repair(record).unwrap();
         assert_eq!(client.store.diff(empty, snapshot).unwrap().len(), 1);
     }
 
