@@ -20,10 +20,10 @@
 
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
-use std::iter;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
+use std::{iter, mem};
 
 use origin_platform::{LockedFile, Native};
 use origin_shared::access::{PathAccess, Rights, Token};
@@ -616,7 +616,8 @@ impl OriginService {
     /// what it holds, which a later pack may rely on, statements before
     /// the revisions they're about, and promotions come last, each checked
     /// against its original by [`Store::claim`],
-    /// once the original and both subjects are stored. Issues
+    /// once the original and both subjects are stored, before the
+    /// statements needing one. Issues
     /// `core.divergent` for the changes the revisions made diverge, and
     /// retries the landings waiting for evidence about what the statements
     /// are about.
@@ -628,8 +629,8 @@ impl OriginService {
     /// has, or one of another kind, if the caller may not put a record, or
     /// doesn't see what a statement is about, if a reserved kind's issuer
     /// may not issue it, if a promotion doesn't match its original, which
-    /// leaves the other records stored, or if the objects cannot be
-    /// written.
+    /// leaves stored the other records that don't need it, or if the
+    /// objects cannot be written.
     pub fn put_records(&self, caller: &Caller, pack: Pack) -> Result<Stored, ServiceError> {
         self.push(caller, pack, &[])
     }
@@ -669,9 +670,8 @@ impl OriginService {
         // every object is checked otherwise.
         let mut stored: HashMap<ObjectId, (ObjectId, ObjectKind)> = HashMap::new();
         let mut snapshots = SnapshotLayers::default();
-        let mut statements = Vec::new();
+        let mut statements = StatementRounds::default();
         let mut revisions = Vec::new();
-        let mut promotions = Vec::new();
         let mut decoded = Vec::new();
         let mut changes = HashSet::new();
         let mut subjects = HashSet::new();
@@ -721,14 +721,9 @@ impl OriginService {
                     revisions.push(object);
                     decoded.push((id, record));
                 }
-                Object::Statement(ref statement) if statement.promoted_from.is_some() => {
-                    subjects.insert(statement.subject);
-                    promotions.push((object, statement.clone()));
-                    decoded.push((id, record));
-                }
                 Object::Statement(ref statement) => {
                     subjects.insert(statement.subject);
-                    statements.push(object);
+                    statements.add(object, statement.clone());
                     decoded.push((id, record));
                 }
             }
@@ -738,15 +733,7 @@ impl OriginService {
         let mut new = self.store.write_layers(&snapshots.layers())?;
         self.check_writes(caller, &held, &decoded)?;
         let pushing = self.lock_heads(caller, !revisions.is_empty(), expect)?;
-        // In layers, each durable before the next, as a workspace writes
-        // them: statements before the revisions they're about, so a crash
-        // never publishes a revision without its `core.conflict`.
-        for layer in [statements, revisions] {
-            if !layer.is_empty() {
-                new += self.store.write_all(&layer)?;
-            }
-        }
-        new += self.put_promotions(promotions)?;
+        new += self.put_statements(statements, revisions)?;
         if !changes.is_empty() {
             self.annotations(|annotations| {
                 for &change in &changes {
@@ -968,9 +955,45 @@ impl OriginService {
         self.resume(None)
     }
 
-    /// Writes the `promotions` [`OriginService::put_records`] puts, once
-    /// [`Store::claim`] accepts each, returning how many were new. Their
-    /// originals are never promotions, so they're stored by now.
+    /// Writes the statements and revisions [`OriginService::put_records`]
+    /// puts, returning how many were new. In layers, each durable before
+    /// the next, as a workspace writes them: statements before the
+    /// revisions they're about, so a crash never publishes a revision
+    /// without its `core.conflict`, then promotions, and what needs them, a
+    /// round at a time.
+    fn put_statements(
+        &self,
+        statements: StatementRounds,
+        mut revisions: Vec<EncodedObject>,
+    ) -> Result<usize, ServiceError> {
+        let mut new = 0;
+        for (
+            round,
+            Round {
+                statements,
+                promotions,
+            },
+        ) in statements.rounds().into_iter().enumerate()
+        {
+            let revisions = if round == 0 {
+                mem::take(&mut revisions)
+            } else {
+                Vec::new()
+            };
+            for layer in [statements, revisions] {
+                if !layer.is_empty() {
+                    new += self.store.write_all(&layer)?;
+                }
+            }
+            new += self.put_promotions(promotions)?;
+        }
+        Ok(new)
+    }
+
+    /// Writes the `promotions` of a round [`OriginService::put_records`]
+    /// puts, once [`Store::claim`] accepts each, returning how many were
+    /// new. Their originals, and whatever else they need, are stored by
+    /// now: see [`StatementRounds`].
     fn put_promotions(
         &self,
         promotions: Vec<(EncodedObject, Statement)>,
@@ -1365,6 +1388,76 @@ impl SnapshotLayers {
     }
 }
 
+/// The statements of a pack, which [`OriginService::push`] writes in
+/// rounds: in each, the statements, then the promotions, each once
+/// [`Store::claim`] accepts it. Whatever needs a promotion of the pack
+/// comes a round after it, so a promotion refused leaves nothing stored
+/// that needs it.
+#[derive(Debug, Default)]
+struct StatementRounds(Vec<(EncodedObject, Statement)>);
+
+/// The statements of one of the [`StatementRounds`], and the promotions.
+#[derive(Debug, Default)]
+struct Round {
+    statements: Vec<EncodedObject>,
+    promotions: Vec<(EncodedObject, Statement)>,
+}
+
+impl StatementRounds {
+    /// Adds `object`, which decodes as `statement`.
+    fn add(&mut self, object: EncodedObject, statement: Statement) {
+        self.0.push((object, statement));
+    }
+
+    /// The rounds, at least one. A statement's is the last of those of the
+    /// statements of the pack it needs, or the one after, if that one is a
+    /// promotion.
+    fn rounds(self) -> Vec<Round> {
+        let statements = self.0;
+        let at: HashMap<ObjectId, usize> = statements
+            .iter()
+            .enumerate()
+            .map(|(at, (object, _))| (object.id(), at))
+            .collect();
+        let mut rounds = vec![0; statements.len()];
+        let mut unmet = vec![0_usize; statements.len()];
+        let mut needed_by = vec![Vec::new(); statements.len()];
+        for (at_dependent, (_, statement)) in statements.iter().enumerate() {
+            for (needed, _) in Dependencies::of_statement(statement).records {
+                if let Some(&at) = at.get(&needed) {
+                    unmet[at_dependent] += 1;
+                    needed_by[at].push(at_dependent);
+                }
+            }
+        }
+        // Each once everything it needs has its round: content addressing
+        // makes no cycle.
+        let mut ready: Vec<usize> = (0..statements.len()).filter(|&at| unmet[at] == 0).collect();
+        while let Some(at) = ready.pop() {
+            let after = rounds[at] + usize::from(statements[at].1.promoted_from.is_some());
+            for &dependent in &needed_by[at] {
+                rounds[dependent] = rounds[dependent].max(after);
+                unmet[dependent] -= 1;
+                if unmet[dependent] == 0 {
+                    ready.push(dependent);
+                }
+            }
+        }
+        let mut grouped: Vec<Round> = iter::repeat_with(Round::default)
+            .take(rounds.iter().max().map_or(1, |&last| last + 1))
+            .collect();
+        for ((object, statement), round) in statements.into_iter().zip(rounds) {
+            let round = &mut grouped[round];
+            if statement.promoted_from.is_some() {
+                round.promotions.push((object, statement));
+            } else {
+                round.statements.push(object);
+            }
+        }
+        grouped
+    }
+}
+
 /// What an object needs the repository to have for it to be usable, as
 /// [`OriginService::put_records`] lists, and the kind each must be: the
 /// records it refers to, and the content, snapshots and blobs. A
@@ -1626,7 +1719,7 @@ impl ServiceError {
 #[cfg(test)]
 mod tests {
     use origin_shared::landing::Landing;
-    use origin_shared::{EntryKind, Record, Tree};
+    use origin_shared::{EntryKind, Record, Tree, Verdict};
 
     use super::*;
     use crate::permissions::Scope;
@@ -1742,6 +1835,43 @@ mod tests {
             snapshots.layers(),
             [vec![blob], vec![leaf], vec![middle], vec![root]]
         );
+    }
+
+    #[test]
+    fn statements_needing_a_refused_promotion_are_not_stored() {
+        let (repo, service) = requiring_ci();
+        let tested = repo.change_on_main(1, &[("src/a", "a")]);
+        let same = repo.change_on_main(2, &[("src/a", "a")]);
+        let original = ci_test(tested, "user:ci");
+        let forged = Statement {
+            subject: RecordId::Revision(same),
+            verdict: Some(Verdict::Fail),
+            promoted_from: Some(original.encode().id().into()),
+            ..original.clone()
+        };
+        let rerun = Statement {
+            supersedes: Some(forged.encode().id().into()),
+            ..ci_test(same, "user:ci")
+        };
+        let about = Statement {
+            subject: RecordId::Statement(rerun.encode().id().into()),
+            ..ci_test(same, "user:ci")
+        };
+        // Listed before what they need: the pack's order doesn't matter.
+        let objects = [&about, &rerun, &forged, &original].map(Statement::encode);
+
+        let refused = service.put_records(
+            &Caller::Owner,
+            Pack {
+                objects: objects.to_vec(),
+            },
+        );
+        assert!(
+            matches!(refused, Err(ServiceError::Statement { id, .. }) if id == objects[2].id().into()),
+            "{refused:?}"
+        );
+        let stored = repo.store.present(objects.iter().map(EncodedObject::id));
+        assert_eq!(stored.unwrap(), [objects[3].id()], "only the original");
     }
 
     #[test]
