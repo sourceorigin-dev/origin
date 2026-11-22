@@ -17,6 +17,12 @@
 //! `workspace` file naming it. Only the statements a new revision needs,
 //! such as its unresolved conflicts, come before it, so it's never found
 //! without them.
+//!
+//! A command that moves the working copy to a new revision, such as a
+//! merge, checks its files out before it writes the revision. A file edited
+//! in the meantime refuses the checkout, which then takes back the files it
+//! changed, leaving those edited as they are: the working copy and its
+//! change stay where they were, and the command can run again.
 
 mod annotate;
 mod land;
@@ -70,6 +76,8 @@ struct WorkingCopy {
     /// The files as the snapshot found them: the draft, which is the
     /// revision's snapshot once recorded.
     files: TreeId,
+    /// The stat cache of the snapshot, which proves files unedited since.
+    cache: StatCache,
     /// Keeps garbage collection away from the objects the snapshot found
     /// stored, until the command that saves it is done.
     _held: LockedFile,
@@ -213,13 +221,17 @@ impl Workspace {
         let held = self.store.hold_objects()?;
         let revision: Revision = self.store.get(self.revision)?;
         let path = self.meta("state");
-        let (files, cache) =
-            Worktree::new(&self.root, &self.store).snapshot(&StatCache::load(&path))?;
-        if let Some(cache) = cache {
-            cache
-                .save(&path)
-                .map_err(|source| WorkspaceError::io(&path, source))?;
-        }
+        let loaded = StatCache::load(&path);
+        let (files, cache) = Worktree::new(&self.root, &self.store).snapshot(&loaded)?;
+        let cache = match cache {
+            Some(cache) => {
+                cache
+                    .save(&path)
+                    .map_err(|source| WorkspaceError::io(&path, source))?;
+                cache
+            }
+            None => loaded,
+        };
         let index = Index::open(&self.store)?;
         let conflicts = self
             .conflicts(self.revision, &revision)?
@@ -231,6 +243,7 @@ impl Workspace {
             conflicts,
             index,
             files,
+            cache,
             _held: held,
         })
     }
@@ -346,10 +359,52 @@ impl Workspace {
         Ok(())
     }
 
-    /// Makes the files match `to`, given that they match `from`, durably.
-    fn checkout(&self, from: TreeId, to: TreeId) -> Result<(), WorkspaceError> {
+    /// Moves the working copy, whose files `working_copy` found, to
+    /// `revision`, `to`: checks it out over them, then writes `unwritten`,
+    /// the layers that write it if it's new, and makes it the working copy.
+    /// A checkout that fails, such as one refused by a file edited since
+    /// the snapshot, writes nothing, and takes back the files it changed as
+    /// best it can, so the working copy and its change stay where they
+    /// were.
+    fn switch_to(
+        &mut self,
+        working_copy: &WorkingCopy,
+        to: RevisionId,
+        revision: &Revision,
+        unwritten: &[Vec<EncodedObject>],
+    ) -> Result<(), WorkspaceError> {
+        let checkout = self.checkout(
+            working_copy.files,
+            revision.snapshot,
+            Some(&working_copy.cache),
+        );
+        if let Err(error) = checkout {
+            // Best effort: the checkout's error says what went wrong.
+            let _ = self.restore(revision.snapshot, working_copy.files);
+            return Err(error);
+        }
+        self.write(unwritten)?;
+        self.point_at(to)
+    }
+
+    /// Makes the files still as `from` has them match `to`, durably, and
+    /// leaves those edited since as they are.
+    fn restore(&self, from: TreeId, to: TreeId) -> Result<(), WorkspaceError> {
         let changes = self.store.diff(from, to)?;
-        Ok(Worktree::new(&self.root, &self.store).checkout(&changes)?)
+        Ok(Worktree::new(&self.root, &self.store).restore(&changes)?)
+    }
+
+    /// Makes the files match `to`, given that they match `from`, durably.
+    /// With `unchanged`, the stat cache of the snapshot that found `from`,
+    /// it changes nothing if a file it changes was edited since.
+    fn checkout(
+        &self,
+        from: TreeId,
+        to: TreeId,
+        unchanged: Option<&StatCache>,
+    ) -> Result<(), WorkspaceError> {
+        let changes = self.store.diff(from, to)?;
+        Ok(Worktree::new(&self.root, &self.store).checkout(&changes, unchanged)?)
     }
 
     /// `origin status`: prints the working copy's change, what it is on
@@ -569,8 +624,7 @@ impl Workspace {
         let head = Self::single_head(index, change)?;
         let revision: Revision = self.store.get(head)?;
         if head != working_copy.id {
-            self.checkout(working_copy.revision.snapshot, revision.snapshot)?;
-            self.point_at(head)?;
+            self.switch_to(&working_copy, head, &revision, &[])?;
         }
         println!("Working copy: {}", self.headline(&revision)?);
         Ok(())
@@ -636,9 +690,7 @@ impl Workspace {
         let mut layers = self.revision_layers(vec![reason, empty], &encoded, &conflicts);
         // Published before the revision that replaces the change.
         layers[1].push(statement);
-        self.write(&layers)?;
-        self.checkout(working_copy.revision.snapshot, revision.snapshot)?;
-        self.point_at(encoded.id().into())?;
+        self.switch_to(&working_copy, encoded.id().into(), &revision, &layers)?;
         println!("Abandoned change {}", change.short());
         println!("Working copy: {}", self.headline(&revision)?);
         println!("On top of: {}", self.describe_base(revision.base)?);
@@ -709,10 +761,11 @@ impl Workspace {
         };
         let encoded = revision.encode();
         let id = encoded.id().into();
-        self.write(&self.revision_layers(Vec::new(), &encoded, &conflicts))?;
+        let layers = self.revision_layers(Vec::new(), &encoded, &conflicts);
         if change == working_copy.revision.change {
-            self.checkout(working_copy.revision.snapshot, revision.snapshot)?;
-            self.point_at(id)?;
+            self.switch_to(&working_copy, id, &revision, &layers)?;
+        } else {
+            self.write(&layers)?;
         }
         println!(
             "Converged change {}: revision {} evolves from {}, merging their files",

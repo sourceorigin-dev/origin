@@ -48,7 +48,7 @@ fn from_store(bencher: Bencher<'_, '_>) {
         .with_inputs(|| tempfile::tempdir().unwrap())
         .bench_local_refs(|workspace| {
             Worktree::new(workspace.path(), &store)
-                .checkout(&MAIN.changes)
+                .checkout(&MAIN.changes, None)
                 .unwrap();
         });
 }
