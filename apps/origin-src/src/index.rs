@@ -469,21 +469,30 @@ pub enum FindError<I: Prefixed> {
 }
 
 /// What the index keeps of one record: its id, and the fields it's looked
-/// up by.
+/// up by. The op log records batches of them.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Entry {
+pub enum Entry {
+    /// A revision.
     Revision {
+        /// Its id.
         id: RevisionId,
+        /// Its change.
         change: ChangeId,
+        /// The revisions it evolves from.
         predecessors: Vec<RevisionId>,
     },
+    /// A statement.
     Statement {
+        /// Its id.
         id: StatementId,
+        /// What it's about.
         subject: RecordId,
+        /// The statement it claims to supersede.
         supersedes: Option<StatementId>,
         /// Its promotion group, if it's promotable.
         group: Option<Digest>,
     },
+    /// An acceptance.
     Acceptance(AcceptanceId),
 }
 
@@ -523,7 +532,9 @@ impl Entry {
         })
     }
 
-    fn record(&self) -> RecordId {
+    /// The record.
+    #[must_use]
+    pub fn record(&self) -> RecordId {
         match *self {
             Self::Revision { id, .. } => RecordId::Revision(id),
             Self::Statement { id, .. } => RecordId::Statement(id),
@@ -539,7 +550,7 @@ impl Entry {
     /// change and a `u32` count of predecessors and their ids, and for a
     /// statement its subject's kind and id, and the statement it supersedes
     /// and its promotion group, each a 0 byte, or a 1 byte and the id.
-    fn write(&self, out: &mut Writer) {
+    pub(crate) fn write(&self, out: &mut Writer) {
         Log::write_record(self.record(), out);
         match self {
             Self::Revision {
@@ -567,7 +578,7 @@ impl Entry {
         }
     }
 
-    fn read(reader: &mut Reader<'_>) -> Result<Self, DecodeError> {
+    pub(crate) fn read(reader: &mut Reader<'_>) -> Result<Self, DecodeError> {
         Ok(match Log::read_record(reader)? {
             RecordId::Revision(id) => {
                 let change = ChangeId::from_bytes(reader.array()?);

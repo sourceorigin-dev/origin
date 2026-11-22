@@ -39,6 +39,7 @@ use origin_shared::object::{DecodeError, IdMismatch};
 use origin_shared::{EncodedObject, ObjectId, TargetName, TypedId};
 
 use crate::index::Entry;
+use crate::oplog::Actor;
 use crate::targets::Head;
 
 pub use packs::Compaction;
@@ -52,6 +53,8 @@ pub struct Store<P = Native> {
     root: PathBuf,
     pub(crate) platform: P,
     packs: Arc<Packs>,
+    /// Who the op log says writes.
+    pub(crate) actor: Actor,
 }
 
 impl<P: Platform> Store<P> {
@@ -71,7 +74,20 @@ impl<P: Platform> Store<P> {
             root: root.into(),
             platform,
             packs: Arc::default(),
+            actor: Actor::default(),
         }
+    }
+
+    /// The store, writing for `actor` from now on.
+    #[must_use]
+    pub fn with_actor(self, actor: Actor) -> Self {
+        Self { actor, ..self }
+    }
+
+    /// Who the op log says writes.
+    #[must_use]
+    pub fn actor(&self) -> &Actor {
+        &self.actor
     }
 
     /// Opens the storage in `root` for writing, refusing a network file
@@ -141,8 +157,8 @@ impl<P: Platform> Store<P> {
         Ok(())
     }
 
-    /// Creates the directories of an empty store and its empty index,
-    /// durably, refusing a network file system. Creating every object shard
+    /// Creates the directories of an empty store, its empty index and op
+    /// log, durably, refusing a network file system. Creating every object shard
     /// up front means batches only ever sync the shards they write to, never
     /// a directory they had to create.
     ///
@@ -161,6 +177,7 @@ impl<P: Platform> Store<P> {
         for dir in [self.packs_dir(), self.targets_dir()] {
             fs::create_dir_all(&dir).map_err(|source| StoreError::io(&dir, source))?;
         }
+        self.oplog().init()?;
         let objects = self.root.join("objects");
         let parent = DurableWrite::<P>::parent(&self.root);
         for dir in [&loose, &objects, &self.root, parent] {
@@ -639,9 +656,26 @@ pub enum StoreError {
     /// An acceptance was appended to a target it doesn't belong to.
     #[error("the acceptance does not belong to target `{0}`")]
     WrongTarget(TargetName),
-    /// A target file isn't in the format the store writes.
-    #[error("malformed target file {}", .0.display())]
+    /// A file isn't in the format the store writes.
+    #[error("malformed file {}", .0.display())]
     Malformed(PathBuf),
+    /// A file in a binary format the store writes doesn't decode.
+    #[error("cannot decode {}", path.display())]
+    DecodeFile {
+        /// The file.
+        path: PathBuf,
+        /// Why decoding failed.
+        source: DecodeError,
+    },
+    /// The op log no longer keeps the entries after a cursor: retention
+    /// deleted them.
+    #[error("the op log no longer keeps the entries after #{after}: its oldest is #{oldest}")]
+    Expired {
+        /// The cursor.
+        after: u64,
+        /// The oldest entry the log keeps.
+        oldest: u64,
+    },
 }
 
 impl StoreError {
