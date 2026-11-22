@@ -801,6 +801,114 @@
           }
         }
       }
+    },
+    "/api/v1/repos/{repo}/tokens": {
+      "post": {
+        "summary": "Issues a token acting for the caller, with a scope narrowing their\nrights, signed by the server, which verifies it without storing it.",
+        "operationId": "issue_token",
+        "parameters": [
+          {
+            "name": "repo",
+            "in": "path",
+            "description": "The repository whose policy the scope is checked against",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TokenRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IssuedToken"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller isn't signed in, or the scope reaches beyond their rights",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The repository does not exist",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/repos/{repo}/whoami": {
+      "get": {
+        "summary": "Tells the caller who they are and what they may do in the repository.",
+        "operationId": "whoami",
+        "parameters": [
+          {
+            "name": "repo",
+            "in": "path",
+            "description": "The repository",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The caller's rights",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Rights"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "The token is invalid or expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The repository does not exist",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1037,6 +1145,12 @@
         ],
         "description": "Why a landing waits."
       },
+      "Capability": {
+        "type": "string",
+        "examples": [
+          "write src"
+        ]
+      },
       "ChangeId": {
         "type": "string",
         "examples": [
@@ -1058,6 +1172,7 @@
           "conflict",
           "expired",
           "unauthorized",
+          "forbidden",
           "internal"
         ]
       },
@@ -1380,10 +1495,41 @@
           }
         }
       },
+      "IssuedToken": {
+        "type": "object",
+        "description": "A token a server issued.",
+        "required": [
+          "token",
+          "principal",
+          "expires"
+        ],
+        "properties": {
+          "expires": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When it expires, in seconds since the Unix epoch.",
+            "minimum": 0
+          },
+          "principal": {
+            "$ref": "#/components/schemas/Principal",
+            "description": "Who it acts for."
+          },
+          "token": {
+            "type": "string",
+            "description": "The token, to send as `Authorization: Bearer <token>`."
+          }
+        }
+      },
       "Kind": {
         "type": "string",
         "examples": [
           "ci.test"
+        ]
+      },
+      "KindPattern": {
+        "type": "string",
+        "examples": [
+          "ci.*"
         ]
       },
       "LandRequest": {
@@ -1494,6 +1640,15 @@
           }
         }
       },
+      "Level": {
+        "type": "string",
+        "description": "What a caller may do with a path.",
+        "enum": [
+          "none",
+          "read",
+          "write"
+        ]
+      },
       "LogEntry": {
         "type": "object",
         "description": "One acceptance of a target's log.",
@@ -1561,6 +1716,16 @@
             "description": "The cursor after the entries read: pass it to the next read.",
             "minimum": 0
           }
+        }
+      },
+      "PathAccess": {
+        "type": "object",
+        "description": "What a caller may do with every path: the level of the most specific\npath it lists at or above it. The root is always listed.",
+        "additionalProperties": {
+          "$ref": "#/components/schemas/Level"
+        },
+        "propertyNames": {
+          "type": "string"
         }
       },
       "Pending": {
@@ -1790,6 +1955,68 @@
           }
         }
       },
+      "Rights": {
+        "type": "object",
+        "description": "What a caller may do, resolved from the policy in force and narrowed by\ntheir token's scope.",
+        "required": [
+          "paths",
+          "annotate",
+          "land",
+          "admin"
+        ],
+        "properties": {
+          "admin": {
+            "type": "boolean",
+            "description": "Whether they may land on `policy`."
+          },
+          "annotate": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/KindPattern"
+            },
+            "description": "The kinds of statements they may issue."
+          },
+          "groups": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PrincipalName"
+            },
+            "description": "The policy's groups the caller is a member of."
+          },
+          "land": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Targets"
+            },
+            "description": "The targets they may land on, but `policy`."
+          },
+          "paths": {
+            "$ref": "#/components/schemas/PathAccess",
+            "description": "What they may do with each path."
+          },
+          "principal": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Principal",
+                "description": "Who the caller is: `None` for an anonymous caller, or the node's own\nuser."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "scope": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/Capability"
+            },
+            "description": "The token's scope, if the caller came with a scoped token."
+          }
+        }
+      },
       "Source": {
         "oneOf": [
           {
@@ -1968,6 +2195,33 @@
         "examples": [
           "main"
         ]
+      },
+      "Targets": {
+        "type": "string",
+        "examples": [
+          "main"
+        ]
+      },
+      "TokenRequest": {
+        "type": "object",
+        "description": "Asks a server for a token with a narrower scope, for an agent or a CI\nrunner.",
+        "required": [
+          "scope",
+          "ttl"
+        ],
+        "properties": {
+          "scope": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Capability"
+            },
+            "description": "What it may do: a part of what the caller may do."
+          },
+          "ttl": {
+            "type": "string",
+            "description": "How long it lasts, such as `1h`."
+          }
+        }
       },
       "TreeId": {
         "type": "string",

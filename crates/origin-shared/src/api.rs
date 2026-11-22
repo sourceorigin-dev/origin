@@ -7,12 +7,13 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
+use crate::access::Capability;
 use crate::landing::{Landing, Proposal};
 use crate::policy::{KindPattern, Requirement};
 use crate::text::Period;
 use crate::{
-    Acceptance, AcceptanceId, ChangeId, Head, ObjectId, PrincipalName, RecordId, RepoPath,
-    Revision, RevisionId, Statement, StatementId, TargetName, TreeId,
+    Acceptance, AcceptanceId, ChangeId, Head, ObjectId, Principal, PrincipalName, RecordId,
+    RepoPath, Revision, RevisionId, Statement, StatementId, TargetName, TreeId,
 };
 
 /// The name of a repository on a server: ASCII letters, digits, `.`, `_`
@@ -411,6 +412,28 @@ where
     }
 }
 
+/// Asks a server for a token with a narrower scope, for an agent or a CI
+/// runner.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct TokenRequest {
+    /// What it may do: a part of what the caller may do.
+    pub scope: Vec<Capability>,
+    /// How long it lasts, such as `1h`.
+    #[schema(value_type = String)]
+    pub ttl: Period,
+}
+
+/// A token a server issued.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct IssuedToken {
+    /// The token, to send as `Authorization: Bearer <token>`.
+    pub token: String,
+    /// Who it acts for.
+    pub principal: Principal,
+    /// When it expires, in seconds since the Unix epoch.
+    pub expires: u64,
+}
+
 /// What went wrong with a request.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct ApiError {
@@ -444,6 +467,8 @@ pub enum ErrorCode {
     Expired,
     /// The credentials are invalid or expired.
     Unauthorized,
+    /// The caller may not do this.
+    Forbidden,
     /// The server failed.
     Internal,
 }

@@ -232,7 +232,7 @@ impl Workspace {
     }
 
     /// The repository's remote, which the command needs.
-    fn require_remote(&self) -> Result<&Remote, WorkspaceError> {
+    pub(super) fn require_remote(&self) -> Result<&Remote, WorkspaceError> {
         self.remote()?.ok_or(WorkspaceError::NoRemote)
     }
 

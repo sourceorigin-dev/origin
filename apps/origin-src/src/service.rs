@@ -14,8 +14,9 @@
 //! Landings on one target still go one at a time, through the target's
 //! queue lock.
 //!
-//! Every method takes the [`Caller`]. Nothing is checked yet: every caller
-//! may read and write everything.
+//! Every method takes the [`Caller`], whose [`Rights`] the policy in force
+//! resolves. Nothing is checked yet: every caller may read and write
+//! everything.
 
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
@@ -25,24 +26,26 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use origin_platform::Native;
+use origin_shared::access::{Rights, Token};
 use origin_shared::api::{
     Annotation, ErrorCode, EventsQuery, Expected, FetchSnapshot, Inventory, InventoryRequest,
-    LandRequest, Landings, LogEntry, LogQuery, NewTarget, RevisionEntry, Revisions, Stored,
-    TargetInfo,
+    IssuedToken, LandRequest, Landings, LogEntry, LogQuery, NewTarget, RevisionEntry, Revisions,
+    Stored, TargetInfo, TokenRequest,
 };
 use origin_shared::event::{Filter, Page};
 use origin_shared::landing::{Pending, Proposal};
 use origin_shared::object::DecodeError;
 use origin_shared::pack::{Pack, Packer, Part};
 use origin_shared::{
-    Base, ChangeId, Head, Kind, NodeKey, Object, ObjectId, ObjectKind, Principal, PrincipalName,
-    RecordId, Statement, StatementId, TargetName, TreeId,
+    AcceptanceId, Base, ChangeId, Head, Kind, NodeKey, Object, ObjectId, ObjectKind, Principal,
+    PrincipalName, RecordId, Statement, StatementId, TargetName, TreeId,
 };
 
 use crate::annotations::{AnnotateError, Annotations};
 use crate::events::{Events, Wakeup};
 use crate::index::Index;
 pub use crate::permissions::Caller;
+use crate::permissions::Forbidden;
 use crate::policy::{Policy, PolicyError};
 use crate::queue::{LandError, Queue};
 use crate::store::{Store, StoreError};
@@ -72,6 +75,9 @@ pub struct OriginService {
     node: Node,
     /// The record indexes kept open, but those in use: see the module.
     indexes: Mutex<Vec<Index>>,
+    /// The policy in force, and the acceptance of `policy` holding it, once
+    /// read.
+    policy: Mutex<Option<(AcceptanceId, Arc<Policy>)>>,
     wakeup: Wakeup,
     /// The most bytes a fetch's answer holds: [`Pack::LIMIT`], but in tests.
     pack_limit: usize,
@@ -80,6 +86,9 @@ pub struct OriginService {
 impl OriginService {
     /// The most events a page holds, and how many by default.
     const MAX_EVENTS: u32 = 1024;
+
+    /// The longest a token issued lasts.
+    pub const MAX_TOKEN_TTL: Duration = Duration::from_hours(7 * 24);
 
     /// The longest an event long-poll waits.
     pub const MAX_WAIT: Duration = Duration::from_mins(1);
@@ -94,6 +103,7 @@ impl OriginService {
             store,
             node,
             indexes: Mutex::default(),
+            policy: Mutex::default(),
             wakeup: Wakeup::default(),
             pack_limit: Pack::LIMIT,
         }
@@ -183,6 +193,95 @@ impl OriginService {
 
     fn kept_indexes(&self) -> MutexGuard<'_, Vec<Index>> {
         self.indexes.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The policy in force, read again only once `policy` moved.
+    fn policy(&self) -> Result<Arc<Policy>, ServiceError> {
+        let mut kept = self.policy.lock().unwrap_or_else(PoisonError::into_inner);
+        let head = self.store.head(&TargetName::POLICY)?;
+        if let (Some(head), Some((at, policy))) = (head, &*kept)
+            && head.acceptance == *at
+        {
+            return Ok(Arc::clone(policy));
+        }
+        let (at, policy) = match Policy::in_force(&self.store) {
+            Ok((at, policy)) => (at, Arc::new(policy)),
+            Err(PolicyError::Missing) => return Ok(Arc::new(Policy::default())),
+            Err(error) => return Err(error.into()),
+        };
+        *kept = Some((at, Arc::clone(&policy)));
+        Ok(policy)
+    }
+
+    /// What `caller` may do, under the policy in force.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the policy cannot be read.
+    pub fn rights(&self, caller: &Caller) -> Result<Rights, ServiceError> {
+        Ok(match caller {
+            Caller::Owner => Rights::all(),
+            Caller::Anonymous => self.policy()?.rights(None),
+            Caller::Principal { principal, scope } => {
+                let rights = self.policy()?.rights(Some(principal));
+                match scope {
+                    Some(scope) => rights.narrowed(scope.capabilities.clone()),
+                    None => rights,
+                }
+            }
+        })
+    }
+
+    /// `whoami`: what the caller may do, and who they are.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the policy cannot be read.
+    pub fn whoami(&self, caller: &Caller) -> Result<Rights, ServiceError> {
+        self.rights(caller)
+    }
+
+    /// Issues a token acting for the caller, with the request's scope, which
+    /// their rights must cover, for its `ttl`, at most
+    /// [`OriginService::MAX_TOKEN_TTL`], and never past the expiry of the
+    /// caller's own token, if it's a scoped one: so no token renews itself.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the caller isn't signed in, or the scope reaches beyond
+    /// their rights.
+    pub fn issue_token(
+        &self,
+        caller: &Caller,
+        request: &TokenRequest,
+    ) -> Result<IssuedToken, ServiceError> {
+        let Some(principal) = caller.principal() else {
+            return Err(Forbidden::NoPrincipal.into());
+        };
+        let rights = self.rights(caller)?;
+        if let Some(beyond) = request
+            .scope
+            .iter()
+            .find(|&capability| !rights.cover(std::slice::from_ref(capability)))
+        {
+            return Err(Forbidden::Scope(beyond.clone()).into());
+        }
+        let mut token = Token::new(
+            principal.clone(),
+            request.scope.clone(),
+            request.ttl.0.min(Self::MAX_TOKEN_TTL),
+        );
+        if let Caller::Principal {
+            scope: Some(scope), ..
+        } = caller
+        {
+            token.expires = token.expires.min(scope.expires);
+        }
+        Ok(IssuedToken {
+            token: token.sign(&self.node.key),
+            principal: token.principal,
+            expires: token.expires,
+        })
     }
 
     /// The records `ids` name, in their order, as a pack: revisions,
@@ -855,30 +954,6 @@ pub enum ServiceError {
     /// A blob, a tree or an attachment was fetched as a record.
     #[error("{0} is not a record: fetch snapshots by walking them")]
     NotARecord(ObjectId),
-    /// A target was proposed for landing without a target to land on.
-    #[error("landing a target needs a target to land on")]
-    NoTarget,
-    /// An object put isn't a well-formed object.
-    #[error("object {id} is malformed")]
-    Malformed {
-        /// The object.
-        id: ObjectId,
-        /// What is wrong.
-        source: DecodeError,
-    },
-    /// An acceptance was put.
-    #[error(
-        "acceptance {0} cannot be put: only a target's authority writes acceptances, by landing"
-    )]
-    Acceptance(origin_shared::AcceptanceId),
-    /// An object put needs one neither the batch nor the repository has.
-    #[error("object {id} needs object {needed}, which neither the batch nor the repository has")]
-    Missing {
-        /// The object put.
-        id: ObjectId,
-        /// What it needs.
-        needed: ObjectId,
-    },
     /// An object put refers to one as an object of another kind: a
     /// snapshot that isn't a tree, a file that is one, a description that
     /// isn't an attachment.
@@ -903,6 +978,33 @@ pub enum ServiceError {
         change: ChangeId,
         /// Its heads now.
         heads: Vec<origin_shared::RevisionId>,
+    },
+    /// The caller may not do this.
+    #[error(transparent)]
+    Forbidden(#[from] Forbidden),
+    /// A target was proposed for landing without a target to land on.
+    #[error("landing a target needs a target to land on")]
+    NoTarget,
+    /// An object put isn't a well-formed object.
+    #[error("object {id} is malformed")]
+    Malformed {
+        /// The object.
+        id: ObjectId,
+        /// What is wrong.
+        source: DecodeError,
+    },
+    /// An acceptance was put.
+    #[error(
+        "acceptance {0} cannot be put: only a target's authority writes acceptances, by landing"
+    )]
+    Acceptance(origin_shared::AcceptanceId),
+    /// An object put needs one neither the batch nor the repository has.
+    #[error("object {id} needs object {needed}, which neither the batch nor the repository has")]
+    Missing {
+        /// The object put.
+        id: ObjectId,
+        /// What it needs.
+        needed: ObjectId,
     },
     /// An events cursor is of another op log than the repository's.
     #[error("the cursor is of another op log, generation {0}: read from the end")]
@@ -946,6 +1048,7 @@ impl ServiceError {
                 AnnotateError::Store(error) => Self::store_code(error),
                 _ => ErrorCode::BadRequest,
             },
+            Self::Forbidden(_) => ErrorCode::Forbidden,
             Self::Moved { .. } => ErrorCode::Conflict,
             Self::OtherLog(_) => ErrorCode::Expired,
             Self::Land(error) => match error {

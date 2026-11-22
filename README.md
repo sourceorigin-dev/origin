@@ -54,6 +54,8 @@ origin remote [<url>]               # show or set the remote: http://host:port/<
 origin push [<change>...]           # share changes and the ones below them; lands nothing
 origin fetch [--target <t>] [--change <id>]  # new acceptances, and the records of known changes
 origin pull                         # fetch, then move the working copy onto its target's tip
+origin whoami | permissions         # who the remote thinks you are, and what you may do there
+origin token issue --scope "write src" [--ttl 1h]  # a short-lived token for an agent
 ```
 
 Landing rebases a change onto the target's tip, file by file, checks the
@@ -114,6 +116,14 @@ in its `config.toml` if `$USER` isn't the name you want, and the token to
 send each server under `[tokens]`, by its URL
 (`"http://127.0.0.1:7878" = "<token>"`), or in `$ORIGIN_TOKEN`. See
 [the design](docs/design.md) for the model.
+
+`origin token issue --scope <capability>... --ttl <period>` asks the remote
+for a token acting for you with a narrower scope, such as `write src`,
+`read /`, `annotate ci.*`, `land main` or `admin`; the server verifies it
+without storing it. A server's operator signs one for any principal with
+`origin token issue --config origin-server.toml --as user:agent-1 --scope
+...`. A token never grants more than its principal's rights, lasts at most
+7 days, and a token issued with a token expires with it.
 
 `converge` merges the files of a change's heads. A text file two heads
 changed holds both versions between conflict markers (`<<<<<<<`, `=======`,

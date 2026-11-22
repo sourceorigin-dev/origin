@@ -16,11 +16,11 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use origin_shared::ChangeId;
 use origin_shared::Head;
-use origin_shared::access::InvalidToken;
+use origin_shared::access::{InvalidToken, Rights};
 use origin_shared::api::{
     Annotation, ApiError, ErrorCode, EventsQuery, FetchRecords, FetchSnapshot, Inventory,
-    InventoryRequest, LandRequest, Landings, LogEntry, LogQuery, MORE, NewTarget, PutQuery,
-    RepoName, RepoSummary, Revisions, StatementsQuery, Stored, TargetInfo,
+    InventoryRequest, IssuedToken, LandRequest, Landings, LogEntry, LogQuery, MORE, NewTarget,
+    PutQuery, RepoName, RepoSummary, Revisions, StatementsQuery, Stored, TargetInfo, TokenRequest,
 };
 use origin_shared::event::Page;
 use origin_shared::landing::Pending;
@@ -68,6 +68,8 @@ impl Api {
             .routes(routes!(land))
             .routes(routes!(landings))
             .routes(routes!(events))
+            .routes(routes!(whoami))
+            .routes(routes!(issue_token))
             .routes(routes!(openapi_document))
     }
 
@@ -152,6 +154,7 @@ impl IntoResponse for HttpError {
             ErrorCode::Conflict => StatusCode::CONFLICT,
             ErrorCode::Expired => StatusCode::GONE,
             ErrorCode::Unauthorized => StatusCode::UNAUTHORIZED,
+            ErrorCode::Forbidden => StatusCode::FORBIDDEN,
             ErrorCode::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (status, Json(ApiError { code, message })).into_response()
@@ -510,6 +513,55 @@ async fn events(
 ) -> Result<Json<Page>, HttpError> {
     call(repos, repo, caller, move |service, caller| {
         service.events(caller, &query)
+    })
+    .await
+    .map(Json)
+}
+
+/// Tells the caller who they are and what they may do in the repository.
+#[utoipa::path(
+    get,
+    path = "/api/v1/repos/{repo}/whoami",
+    operation_id = "whoami",
+    params(("repo" = String, Path, description = "The repository")),
+    responses(
+        (status = 200, description = "The caller's rights", body = Rights),
+        (status = 401, description = "The token is invalid or expired", body = ApiError),
+        (status = 404, description = "The repository does not exist", body = ApiError)
+    )
+)]
+async fn whoami(
+    repos: Repos,
+    Path(repo): Path<RepoName>,
+    caller: Caller,
+) -> Result<Json<Rights>, HttpError> {
+    call(repos, repo, caller, OriginService::whoami)
+        .await
+        .map(Json)
+}
+
+/// Issues a token acting for the caller, with a scope narrowing their
+/// rights, signed by the server, which verifies it without storing it.
+#[utoipa::path(
+    post,
+    path = "/api/v1/repos/{repo}/tokens",
+    operation_id = "issue_token",
+    params(("repo" = String, Path, description = "The repository whose policy the scope is checked against")),
+    request_body = TokenRequest,
+    responses(
+        (status = 200, description = "The token", body = IssuedToken),
+        (status = 403, description = "The caller isn't signed in, or the scope reaches beyond their rights", body = ApiError),
+        (status = 404, description = "The repository does not exist", body = ApiError)
+    )
+)]
+async fn issue_token(
+    repos: Repos,
+    Path(repo): Path<RepoName>,
+    caller: Caller,
+    Json(request): Json<TokenRequest>,
+) -> Result<Json<IssuedToken>, HttpError> {
+    call(repos, repo, caller, move |service, caller| {
+        service.issue_token(caller, &request)
     })
     .await
     .map(Json)

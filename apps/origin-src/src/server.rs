@@ -14,8 +14,9 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::Context;
-use origin_shared::PrincipalName;
+use origin_shared::access::{Capability, Token};
 use origin_shared::api::{RepoName, RepoSummary};
+use origin_shared::{Principal, PrincipalName};
 use serde::Deserialize;
 
 use crate::auth::{Credentials, StaticTokens};
@@ -40,7 +41,8 @@ use crate::store::Store;
 /// ```
 ///
 /// Paths are relative to the file. Callers without a token are anonymous;
-/// the server also takes the scoped tokens it signed.
+/// the server also takes the scoped tokens it signed (see
+/// [`ServerConfig::issue_token`]).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
@@ -117,6 +119,26 @@ impl ServerConfig {
         );
         println!("Name it in the [repos] of the configuration to serve it");
         Ok(())
+    }
+
+    /// `origin token issue --config <file> --as <principal>`: signs a
+    /// token acting for `principal` with `scope`, valid for `ttl`, at most
+    /// [`OriginService::MAX_TOKEN_TTL`] as any token, with the server's key,
+    /// and returns it. The token acts with the principal's rights in each
+    /// repository, narrowed to the scope, so an operator can hand agents
+    /// identities of their own.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the key cannot be read or generated.
+    pub fn issue_token(
+        &self,
+        principal: Principal,
+        scope: Vec<Capability>,
+        ttl: Duration,
+    ) -> anyhow::Result<String> {
+        let ttl = ttl.min(OriginService::MAX_TOKEN_TTL);
+        Ok(Token::new(principal, scope, ttl).sign(&self.node()?.key))
     }
 
     /// `origin serve`: serves the repositories until interrupted, logging
@@ -265,5 +287,28 @@ impl Repositories {
         self.repos
             .get(name)
             .ok_or_else(|| ServiceError::UnknownRepository(name.clone()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::*;
+
+    #[test]
+    fn tokens_signed_with_the_key_last_at_most_a_week() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("origin-server.toml");
+        fs::write(&path, "listen = \"127.0.0.1:0\"\nnode = \"hosted\"\n").unwrap();
+        let config = ServerConfig::load(&path).unwrap();
+        let month = Duration::from_hours(30 * 24);
+        let text = config
+            .issue_token("user:agent".parse().unwrap(), Vec::new(), month)
+            .unwrap();
+        let token = Token::verify(&text, &config.node().unwrap().key.public()).unwrap();
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+        let cap = (now + OriginService::MAX_TOKEN_TTL).as_secs();
+        assert!(token.expires <= cap && token.expires + 60 > cap);
     }
 }

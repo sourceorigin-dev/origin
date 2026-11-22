@@ -66,6 +66,7 @@
 //! which publishes `moving` again first: a crash then finishes taking the
 //! files back, not the move that failed.
 
+mod access;
 mod annotate;
 mod land;
 mod ops;

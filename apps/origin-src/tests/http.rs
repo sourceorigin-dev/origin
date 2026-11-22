@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use origin_client::{Client, Error, Repo};
 use origin_shared::api::{
     ErrorCode, EventsQuery, Expected, FetchRecords, FetchSnapshot, InventoryRequest, LandRequest,
-    List, LogQuery, NewTarget, PutQuery, RepoName, StatementsQuery,
+    List, LogQuery, NewTarget, PutQuery, RepoName, StatementsQuery, TokenRequest,
 };
 use origin_shared::event::EventKind;
 use origin_shared::landing::{Blocked, Landing, Proposal};
@@ -26,13 +26,20 @@ use origin_src::server::Repositories;
 use origin_src::service::{Node, OriginService};
 
 /// A server hosting `demo`, whose policy requires nothing, and `strict`,
-/// whose `main` requires a passing `ci.test` from `user:ci`. The server's
-/// node, `hosted`, orders both. `user:ada` and `user:ci` have static tokens.
+/// whose `main` requires a passing `ci.test` from `user:ci`, and where
+/// only `user:ci` issues `ci.*` statements, `secrets` is withheld from
+/// everyone but `user:ada`, and only she lands. The server's node,
+/// `hosted`, orders both. `user:ada` and `user:ci` have static tokens.
 struct Server {
     _dir: tempfile::TempDir,
+    /// The server's base URL.
+    base: String,
     client: Client,
+    /// `demo` and `strict`, as `user:ada`.
     demo: Repo,
     strict: Repo,
+    /// `strict`, anonymously.
+    anonymous: Repo,
 }
 
 impl Server {
@@ -48,7 +55,11 @@ impl Server {
         let strict = format!(
             "[nodes]\nhosted = \"{}\"\n[targets.policy]\nauthority = \"node:hosted\"\n\
              [targets.main]\nauthority = \"node:hosted\"\n\
-             require = [{{ kind = \"ci.test\", verdict = \"pass\", issuer = \"user:ci\" }}]\n",
+             require = [{{ kind = \"ci.test\", verdict = \"pass\", issuer = \"user:ci\" }}]\n\
+             [grants]\n\"user:ada\" = [\"land *\", \"annotate review\"]\n\
+             \"user:ci\" = [\"annotate ci.*\"]\n\
+             [[paths]]\npath = \"/\"\ngrants = {{ all = \"read\", \"user:ada\" = \"write\" }}\n\
+             [[paths]]\npath = \"secrets\"\ngrants = {{ all = \"none\", \"user:ada\" = \"write\" }}\n",
             node.key.public()
         );
         let tokens: StaticTokens = toml::from_str(Self::TOKENS).unwrap();
@@ -62,11 +73,14 @@ impl Server {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, Api::router(repositories)).await });
-        let client = Client::new(&format!("http://{address}")).with_token("ada-token");
+        let anonymous = Client::new(&format!("http://{address}"));
+        let client = anonymous.clone().with_token("ada-token");
         Self {
             _dir: dir,
+            base: format!("http://{address}"),
             demo: client.repo("demo".parse().unwrap()),
             strict: client.repo("strict".parse().unwrap()),
+            anonymous: anonymous.repo("strict".parse().unwrap()),
             client,
         }
     }
@@ -763,6 +777,58 @@ async fn events_long_poll() {
         matches!(&all.events[..], [event] if event.kind.name() == "target.advanced"),
         "the first event is `policy`'s first acceptance: {all:?}"
     );
+}
+
+#[tokio::test]
+async fn tells_callers_what_they_may_do_and_issues_narrower_tokens() {
+    let server = Server::start().await;
+    let path = |path: &str| RepoPath::new(path).unwrap();
+    let ada = server.strict.whoami().await.unwrap();
+    assert_eq!(ada.principal, Some("user:ada".parse().unwrap()));
+    assert!(ada.paths.writes(&path("secrets/key")) && ada.may_land(&TargetName::MAIN));
+    let anonymous = server.anonymous.whoami().await.unwrap();
+    assert_eq!(anonymous.principal, None);
+    assert!(anonymous.paths.reads(&path("README.md")));
+    assert!(!anonymous.paths.reads(&path("secrets/key")));
+    let stranger = Client::new(&server.base).with_token("nope");
+    assert_eq!(
+        code(stranger.repos().await.unwrap_err()),
+        ErrorCode::Unauthorized
+    );
+
+    // Ada hands an agent a token that only writes `src`.
+    let scope = |scope: &[&str]| TokenRequest {
+        scope: scope
+            .iter()
+            .map(|capability| capability.parse().unwrap())
+            .collect(),
+        ttl: Period(Duration::from_hours(1)),
+    };
+    let issued = server
+        .strict
+        .issue_token(&scope(&["write src"]))
+        .await
+        .unwrap();
+    assert_eq!(issued.principal, "user:ada".parse().unwrap());
+    let agent = Client::new(&server.base)
+        .with_token(issued.token)
+        .repo("strict".parse().unwrap());
+    let rights = agent.whoami().await.unwrap();
+    assert!(rights.paths.writes(&path("src/lib.rs")));
+    assert!(!rights.paths.reads(&path("README.md")));
+    assert!(rights.land.is_empty() && !rights.admin);
+    // Its token only narrows: what it lacks, it cannot pass on.
+    for wider in [&["write /"][..], &["land main"], &["read secrets"]] {
+        let error = agent.issue_token(&scope(wider)).await.unwrap_err();
+        assert_eq!(code(error), ErrorCode::Forbidden, "{wider:?}");
+    }
+    assert!(agent.issue_token(&scope(&["write src/net"])).await.is_ok());
+    let error = server
+        .anonymous
+        .issue_token(&scope(&["read /"]))
+        .await
+        .unwrap_err();
+    assert_eq!(code(error), ErrorCode::Forbidden);
 }
 
 #[tokio::test]
