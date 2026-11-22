@@ -1154,11 +1154,9 @@ impl OriginService {
         if !self.sees_repository(caller)? || self.store.head(target)?.is_none() {
             return Err(ServiceError::UnknownTarget(target.clone()));
         }
-        let mut ids = self.store.log_since(target, query.since)?;
-        if let Some(limit) = query.limit {
-            ids.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
-        }
-        ids.into_iter()
+        self.store
+            .log_since(target, query.since, query.limit)?
+            .into_iter()
             .map(|id| {
                 Ok(LogEntry {
                     id,

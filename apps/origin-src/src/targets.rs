@@ -19,6 +19,7 @@
 
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::ops::Range;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::slice;
@@ -104,6 +105,22 @@ impl TargetFiles {
             .collect()
     }
 
+    /// The lines `range` of the log, which must hold them all.
+    fn read_lines(&self, range: Range<u64>) -> Result<Vec<AcceptanceId>, StoreError> {
+        let path = self.log();
+        let line = Self::LINE as u64;
+        let len = usize::try_from((range.end - range.start) * line)
+            .map_err(|_| StoreError::Malformed(path.clone()))?;
+        let mut bytes = vec![0; len];
+        File::open(&path)
+            .and_then(|log| log.read_exact_at(&mut bytes, range.start * line))
+            .map_err(|source| match source.kind() {
+                io::ErrorKind::UnexpectedEof => StoreError::Malformed(path.clone()),
+                _ => StoreError::io(&path, source),
+            })?;
+        self.parse_log(&bytes)
+    }
+
     /// The complete entries of a locked log from position `since` on.
     fn entries_since(&self, log: &File, since: u64) -> Result<Vec<Head>, StoreError> {
         let mut bytes = Vec::new();
@@ -164,11 +181,12 @@ impl<P: Platform> Store<P> {
     ///
     /// Fails if the target's files cannot be read or are malformed.
     pub fn log(&self, target: &TargetName) -> Result<Vec<AcceptanceId>, StoreError> {
-        self.log_since(target, 0)
+        self.log_since(target, 0, None)
     }
 
-    /// The acceptances of `target` from position `since` on, oldest first.
-    /// Reads only those lines of the log.
+    /// The acceptances of `target` from position `since` on, oldest first,
+    /// at most `limit` of them. Reads only those lines of the log, and the
+    /// head's, which must match the head.
     ///
     /// # Errors
     ///
@@ -177,6 +195,7 @@ impl<P: Platform> Store<P> {
         &self,
         target: &TargetName,
         since: u64,
+        limit: Option<u64>,
     ) -> Result<Vec<AcceptanceId>, StoreError> {
         let files = self.target_files(target.id());
         let Some(head) = files.read_head()? else {
@@ -187,20 +206,17 @@ impl<P: Platform> Store<P> {
         }
         // The log can be ahead of the head while an append is in progress:
         // read only up to the head.
-        let path = files.log();
-        let line = TargetFiles::LINE as u64;
-        let len = usize::try_from((head.seq + 1 - since) * line)
-            .map_err(|_| StoreError::Malformed(path.clone()))?;
-        let mut bytes = vec![0; len];
-        File::open(&path)
-            .and_then(|log| log.read_exact_at(&mut bytes, since * line))
-            .map_err(|source| match source.kind() {
-                io::ErrorKind::UnexpectedEof => StoreError::Malformed(path.clone()),
-                _ => StoreError::io(&path, source),
-            })?;
-        let log = files.parse_log(&bytes)?;
-        if log.last() != Some(&head.acceptance) {
-            return Err(StoreError::Malformed(path));
+        let end = limit.map_or(head.seq + 1, |limit| {
+            since.saturating_add(limit).min(head.seq + 1)
+        });
+        let log = files.read_lines(since..end)?;
+        let at_head = if end > head.seq {
+            log.last().copied()
+        } else {
+            files.read_lines(head.seq..head.seq + 1)?.first().copied()
+        };
+        if at_head != Some(head.acceptance) {
+            return Err(StoreError::Malformed(files.log()));
         }
         Ok(log)
     }
@@ -223,12 +239,7 @@ impl<P: Platform> Store<P> {
         if seq >= head.seq {
             return Ok((seq == head.seq).then_some(head.acceptance));
         }
-        let path = files.log();
-        let mut line = [0; TargetFiles::LINE];
-        File::open(&path)
-            .and_then(|log| log.read_exact_at(&mut line, seq * TargetFiles::LINE as u64))
-            .map_err(|source| StoreError::io(&path, source))?;
-        Ok(files.parse_log(&line)?.first().copied())
+        Ok(files.read_lines(seq..seq + 1)?.first().copied())
     }
 
     /// The acceptance that landed `revision`, `id`, if one did. A revision
@@ -588,8 +599,11 @@ mod tests {
             assert_eq!(store.acceptance_at(main.id(), seq).unwrap(), Some(id));
         }
         assert_eq!(store.acceptance_at(main.id(), 3).unwrap(), None);
-        assert_eq!(store.log_since(&main, 1).unwrap(), ids[1..]);
-        assert_eq!(store.log_since(&main, 3).unwrap(), []);
+        assert_eq!(store.log_since(&main, 1, None).unwrap(), ids[1..]);
+        assert_eq!(store.log_since(&main, 0, Some(2)).unwrap(), ids[..2]);
+        assert_eq!(store.log_since(&main, 1, Some(9)).unwrap(), ids[1..]);
+        assert_eq!(store.log_since(&main, 0, Some(0)).unwrap(), []);
+        assert_eq!(store.log_since(&main, 3, None).unwrap(), []);
         let last = store.get(ids[2]).unwrap();
         assert_eq!(last.body().prev, Some(ids[1]));
         last.verify(&key().public()).unwrap();
