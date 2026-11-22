@@ -27,6 +27,11 @@ review bots read and write at the same time, written in Rust.
   what it reads and checks what it writes, by the rights `policy.rs`
   resolves from `policy.toml`. `plugin.rs` runs `origin <name>` as
   `origin-<name>` from `PATH`, passing the repository in the environment.
+- `apps/origin-ci`: the CI plugin, `origin-ci`. It reads `checks.toml`
+  from the revision it checks (`origin ci run`). It runs each check in a
+  checkout of the revision of its own, and issues the results. Like every
+  plugin, it uses only the public API: `Remote`, which is the SDK over HTTP
+  or the service in-process, never origin-src's internals.
 - `tools/xtask`: development tasks, run with `cargo xtask`, such as timing
   origin against git (`just bench-git`).
 

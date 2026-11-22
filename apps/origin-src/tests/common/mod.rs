@@ -86,13 +86,15 @@ impl User {
     }
 
     /// `origin` with `args`, run in `cwd` as this user, with the plugins
-    /// built with it on `$PATH`.
+    /// built with it on `$PATH`, keeping their state in the configuration
+    /// directory.
     pub fn command(&self, cwd: &Path, args: &[&str]) -> Command {
         let mut command = Command::new(origin());
         command
             .args(args)
             .current_dir(cwd)
             .env("ORIGIN_CONFIG_DIR", self.config())
+            .env("XDG_STATE_HOME", self.config().join("state"))
             .env("PATH", path_with_plugins())
             .env_remove("ORIGIN_TOKEN");
         if let Some(token) = &self.token {

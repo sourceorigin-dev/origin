@@ -43,6 +43,7 @@ use origin_shared::{
 };
 
 use crate::annotations::{AnnotateError, Annotations};
+use crate::config::{ConfigError, UserConfig};
 use crate::events::{Events, Wakeup};
 use crate::index::Index;
 pub use crate::permissions::Caller;
@@ -64,6 +65,19 @@ pub struct Node {
 }
 
 impl Node {
+    /// The node of the user's configuration, with its key, generated the
+    /// first time.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the key cannot be read, or generated and saved.
+    pub fn of(config: &UserConfig) -> Result<Self, ConfigError> {
+        Ok(Self {
+            name: config.node().clone(),
+            key: Arc::new(config.node_key()?),
+        })
+    }
+
     /// The node as a principal, which issues the statements it makes.
     fn principal(&self) -> Principal {
         Principal::Node(self.name.clone())

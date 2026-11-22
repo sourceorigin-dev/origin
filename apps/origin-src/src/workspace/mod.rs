@@ -81,7 +81,7 @@ use std::fs;
 use std::io;
 use std::mem;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 
 use origin_platform::{LockMode, LockedFile, Native};
 use origin_shared::api::{LogQuery, RevisionEntry, Revisions};
@@ -480,15 +480,7 @@ impl Workspace {
 
     /// This node, with its key.
     fn node(&self) -> Result<Node, WorkspaceError> {
-        Self::node_of(&self.config)
-    }
-
-    /// The node `config` names, with its key.
-    fn node_of(config: &UserConfig) -> Result<Node, WorkspaceError> {
-        Ok(Node {
-            name: config.node().clone(),
-            key: Arc::new(config.node_key()?),
-        })
+        Ok(Node::of(&self.config)?)
     }
 
     /// Snapshots the working copy into a draft, recording nothing, for the

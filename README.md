@@ -56,6 +56,8 @@ origin fetch [--target <t>] [--change <id>]  # new acceptances, and the records 
 origin pull                         # fetch, then move the working copy onto its target's tip
 origin whoami | permissions         # who the remote thinks you are, and what you may do there
 origin token issue --scope "write src" [--ttl 1h]  # a short-lived token for an agent
+
+origin ci run [<rev>]               # run the checks of checks.toml, and issue their results
 ```
 
 Landing rebases a change onto the target's tip, file by file, checks the
@@ -119,7 +121,7 @@ send each server under `[tokens]`, by its URL
 (`"http://127.0.0.1:7878" = "<token>"`), or in `$ORIGIN_TOKEN`. See
 [the design](docs/design.md) for the model.
 
-## Plugins
+## Plugins and CI
 
 `origin <name>` runs `origin-<name>` from `PATH` when `<name>` isn't a
 built-in command, with its arguments; its output and exit code are the
@@ -128,6 +130,40 @@ the plugin `ORIGIN_REPOSITORY`, the directory holding the repository's store,
 `ORIGIN_REVISION`, the working copy's revision, and `ORIGIN_REMOTE`, the
 remote, if there's one. Plugins use origin's public API only: a server's
 over HTTP, or for a local path, the same service in-process.
+
+The first is [`origin-ci`](apps/origin-ci). It reads the checks from
+`checks.toml`:
+
+```toml
+[checks.test]
+command   = "cargo test"
+inputs    = ["src", "Cargo.toml", "Cargo.lock"]   # the whole snapshot by default
+toolchain = "rustc -V"                            # its output is hashed
+
+[checks.links]
+command  = "lychee docs"
+inputs   = ["docs"]
+external = true          # reads the network: never promoted
+```
+
+Each check runs in a checkout of the revision of its own, removed
+afterwards, and issues a `ci.<name>` statement: `pass` if the command exits
+with 0, with the last 64 KiB of its output as the payload, declaring its
+inputs, `checks.toml` always among them, command and toolchain output, so
+its result is promoted to every revision where they're the same. A check a
+result of the same issuer already covers, ran or promoted, is skipped.
+`origin ci run` reads the checks from the revision it checks.
+Each command runs in a process group of its own. On Linux, what it leaves
+running in that group is killed once it ends, or if the run was killed, by
+the next run; a process that leaves the group escapes.
+On macOS, where origin can't tell which processes are still the check's,
+nothing a check leaves running is killed, so stop it yourself. The
+landing queue promotes results without running the toolchain command, so
+new tools with unchanged inputs don't stop old results from being
+promoted: pin the toolchain in an input, such as `rust-toolchain.toml`.
+`origin ci run` checks a revision of this repository as you, and fails if a
+check fails. Its checkouts
+live in `$XDG_STATE_HOME/origin-ci/` (or `~/.local/state/`).
 
 ## Permissions
 
