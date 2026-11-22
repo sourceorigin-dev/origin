@@ -46,9 +46,10 @@ impl Workspace {
     ///
     /// # Errors
     ///
-    /// Fails if `path` has files, the remote cannot be reached or has no
-    /// such target, or the repository cannot be written. A failed clone
-    /// leaves nothing behind, but the empty directory it was made in.
+    /// Fails if `path` has files, or another clone claimed it first, the
+    /// remote cannot be reached or has no such target, or the repository
+    /// cannot be written. A failed clone leaves nothing behind, but the
+    /// empty directory it was made in.
     pub fn clone(
         url: &str,
         path: Option<&Path>,
@@ -74,8 +75,10 @@ impl Workspace {
             .take_while(|dir| dir.symlink_metadata().is_err())
             .last()
             .map(Path::to_owned);
-        let remote = Remote::open_for(&url, &config)?;
-        let cloned = Self::clone_into(root.clone(), &url, remote, target, config, actor);
+        Self::claim(&root)?;
+        let cloned = Remote::open_for(&url, &config)
+            .map_err(WorkspaceError::from)
+            .and_then(|remote| Self::clone_into(root.clone(), &url, remote, target, config, actor));
         if cloned.is_err() {
             // Best effort: the error says what went wrong.
             let _ = Self::undo_clone(&root, created.as_deref());
@@ -83,9 +86,25 @@ impl Workspace {
         cloned
     }
 
-    /// Removes what a failed clone into `root` left: the topmost directory
-    /// it `created`, with `root`, if it created any, or else everything in
-    /// `root`, which was empty, such as the files it checked out.
+    /// Claims `root` for a clone, making it and its parents if missing, by
+    /// creating its `.origin`: that fails if anything, such as another
+    /// clone into it, got there first. So a clone only ever cleans up a
+    /// directory it claimed, never what another one wrote.
+    fn claim(root: &Path) -> Result<(), WorkspaceError> {
+        fs::create_dir_all(root).map_err(|source| WorkspaceError::io(root, source))?;
+        let meta = root.join(Self::META_DIR);
+        match fs::create_dir(&meta) {
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                Err(WorkspaceError::NotEmpty(root.to_owned()))
+            }
+            claimed => claimed.map_err(|source| WorkspaceError::io(&meta, source)),
+        }
+    }
+
+    /// Removes what a failed clone into `root`, which it claimed, left: the
+    /// topmost directory it `created`, with `root`, if it created any, or
+    /// else everything in `root`, which was empty, such as the files it
+    /// checked out.
     fn undo_clone(root: &Path, created: Option<&Path>) -> io::Result<()> {
         if let Some(created) = created {
             return fs::remove_dir_all(created);
@@ -394,6 +413,19 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_one_clone_claims_a_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("clone");
+        Workspace::claim(&root).unwrap();
+        fs::write(root.join(".origin/remote"), "elsewhere\n").unwrap();
+        // Another clone, which found the directory empty too, fails
+        // without cleaning up the first one's.
+        let error = Workspace::claim(&root).unwrap_err();
+        assert!(matches!(error, WorkspaceError::NotEmpty(_)), "{error}");
+        assert!(root.join(".origin/remote").exists());
+    }
 
     #[test]
     fn a_failed_clone_empties_the_directory_it_found_empty() {
