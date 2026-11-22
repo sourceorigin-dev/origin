@@ -24,6 +24,11 @@
 //! `describe`, a new change on top, or a merge, carries those it still has
 //! the entries of over, in a `core.conflict` of its own, published before
 //! the revision itself, so it's never found without it.
+//!
+//! The landing queue also issues `core.conflict`, as a node, when a revision
+//! doesn't rebase onto its target, even one the queue rebased itself. That
+//! one only blocks the landing on that target, which merges again whenever
+//! it's retried.
 
 use origin_platform::Platform;
 use origin_shared::{

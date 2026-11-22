@@ -1,0 +1,127 @@
+//! Landing changes: rebasing, stacks, and who may land.
+
+use std::sync::Mutex;
+use std::thread;
+
+use super::*;
+
+#[test]
+fn lands_rebases_and_skips_what_the_target_has() {
+    let repo = Repo::new("[targets.main]\nauthority = \"node:queue\"\n");
+    let a = repo.change_on_main(1, &[("a", "a")]);
+    let b = repo.change_on_main(2, &[("b", "b")]);
+
+    let [landing] = &repo.land(1)[..] else {
+        panic!()
+    };
+    assert_eq!(landed(landing), a, "made on the tip, it lands as it is");
+    let acceptance = repo
+        .store
+        .get(repo.tip(&TargetName::MAIN).acceptance)
+        .unwrap();
+    acceptance.verify(&repo.key.public()).unwrap();
+    assert_eq!(
+        acceptance.body().policy,
+        Some(repo.tip(&TargetName::POLICY).acceptance)
+    );
+
+    let [landing] = &repo.land(2)[..] else {
+        panic!()
+    };
+    let rebased = landed(landing);
+    assert_ne!(rebased, b, "made on an older tip, it is rebased");
+    let revision = repo.store.get(rebased).unwrap();
+    assert_eq!(revision.predecessors, [b]);
+    assert_eq!(revision.author, "node:queue".parse().unwrap());
+    let log = repo.store.log(&TargetName::MAIN).unwrap();
+    assert_eq!(
+        revision.base,
+        Base::Acceptance(log[1]),
+        "on the tip it landed after"
+    );
+    assert_eq!(
+        repo.state(&TargetName::MAIN),
+        repo.files(&[("a", "a"), ("b", "b")])
+    );
+
+    // Both changes are on `main` now: neither lands again, though `b`'s
+    // head is the rebased revision and `a`'s the original.
+    assert_eq!(repo.land(1), [Landing::Unchanged(change(1))]);
+    assert_eq!(repo.land(2), [Landing::Unchanged(change(2))]);
+    assert_eq!(repo.tip(&TargetName::MAIN).seq, 2);
+}
+
+#[test]
+fn stacks_land_from_the_bottom() {
+    let repo = Repo::new("[targets.main]\nauthority = \"node:queue\"\n");
+    let below = repo.change_on_main(1, &[("a", "a")]);
+    let above = repo.revision(2, &[], Base::Revision(below), &[("a", "a"), ("b", "b")]);
+    let landings = repo.land(2);
+    assert_eq!(landings.len(), 2, "{landings:?}");
+    assert_eq!(landed(&landings[0]), below);
+    assert_ne!(landed(&landings[1]), above, "rebased onto the first");
+    assert_eq!(
+        repo.state(&TargetName::MAIN),
+        repo.files(&[("a", "a"), ("b", "b")])
+    );
+}
+
+#[test]
+fn refuses_divergent_changes() {
+    let repo = Repo::new("[targets.main]\nauthority = \"node:queue\"\n");
+    let first = repo.change_on_main(1, &[("a", "a")]);
+    let base = Base::Acceptance(repo.tip(&TargetName::MAIN).acceptance);
+    repo.revision(1, &[first], base, &[("a", "left")]);
+    repo.revision(1, &[first], base, &[("a", "right")]);
+    let main = TargetName::MAIN;
+    let error = repo
+        .queue()
+        .land_change(ChangeId::from_bytes([1; 16]), &main)
+        .unwrap_err();
+    assert!(matches!(error, LandError::Divergent { .. }), "{error}");
+}
+
+#[test]
+fn only_the_authority_lands() {
+    let repo = Repo::new("[targets.main]\nauthority = \"node:queue\"\n");
+    repo.change_on_main(1, &[("a", "a")]);
+    let change = ChangeId::from_bytes([1; 16]);
+    let other = Queue::new(&repo.store, &repo.key, PrincipalName::new("other").unwrap());
+    let error = other.land_change(change, &TargetName::MAIN).unwrap_err();
+    assert!(matches!(error, LandError::NotAuthority { .. }), "{error}");
+
+    let impostor = NodeKey::from_bytes(&[8; 32]);
+    let queue = Queue::new(&repo.store, &impostor, PrincipalName::new("queue").unwrap());
+    let error = queue.land_change(change, &TargetName::MAIN).unwrap_err();
+    assert!(matches!(error, LandError::WrongKey(_)), "{error}");
+    assert_eq!(repo.tip(&TargetName::MAIN).seq, 0);
+}
+
+#[test]
+fn concurrent_landings_serialize() {
+    let repo = Repo::new("[targets.main]\nauthority = \"node:queue\"\n");
+    let (proposers, each) = (6_u8, 3_u8);
+    let changes: Vec<u8> = (0..proposers * each).map(|change| change + 1).collect();
+    for &change in &changes {
+        repo.change_on_main(change, &[(&format!("file-{change}"), "x")]);
+    }
+    let landed = Mutex::new(0);
+    thread::scope(|scope| {
+        for chunk in changes.chunks(usize::from(each)) {
+            let (repo, landed) = (&repo, &landed);
+            scope.spawn(move || {
+                for &change in chunk {
+                    assert!(matches!(repo.land(change)[..], [Landing::Landed { .. }]));
+                    *landed.lock().unwrap() += 1;
+                }
+            });
+        }
+    });
+    assert_eq!(*landed.lock().unwrap(), changes.len());
+    let log = repo.store.log(&TargetName::MAIN).unwrap();
+    assert_eq!(log.len(), changes.len() + 1);
+    for pair in log.windows(2) {
+        assert_eq!(repo.store.get(pair[1]).unwrap().body().prev, Some(pair[0]));
+    }
+    assert_eq!(repo.main_files().len(), changes.len(), "every file landed");
+}
