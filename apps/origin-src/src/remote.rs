@@ -23,7 +23,7 @@ use origin_shared::landing::Pending;
 use origin_shared::pack::{Pack, Part};
 use origin_shared::{ChangeId, Head};
 
-use crate::config::{ConfigError, UserConfig};
+use crate::config::UserConfig;
 use crate::service::{Caller, Node, OriginService, ServiceError};
 use crate::workspace::Workspace;
 
@@ -121,9 +121,9 @@ impl Remote {
     ///
     /// # Errors
     ///
-    /// Fails like [`Remote::open`], or if the node key cannot be loaded.
+    /// Fails like [`Remote::open`].
     pub fn open_for(url: &RemoteUrl, config: &UserConfig) -> Result<Self, RemoteError> {
-        Self::open(url, Node::of(config)?, url.token(config))
+        Self::open(url, Node::of(config), url.token(config))
     }
 
     /// Opens the remote at `url`: an `http://` URL whose last path segment
@@ -241,9 +241,6 @@ pub enum RemoteError {
     /// The client has no TLS support yet.
     #[error("HTTPS remotes are not supported yet")]
     HttpsUnsupported,
-    /// The user's node key cannot be loaded.
-    #[error(transparent)]
-    Config(#[from] ConfigError),
     /// The runtime for HTTP requests cannot start.
     #[error("cannot start the runtime for HTTP requests")]
     Runtime(#[source] std::io::Error),

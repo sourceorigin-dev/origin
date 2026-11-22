@@ -6,8 +6,8 @@
 //! every fetch was before cursors. Each includes the server's work and the
 //! client's durable writes, so run on a real disk.
 
+use std::sync::LazyLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, LazyLock};
 
 use divan::Bencher;
 use origin_platform::Native;
@@ -63,11 +63,8 @@ struct Setup {
 static SETUP: LazyLock<Setup> = LazyLock::new(|| {
     let [files, server, client] = [(); 3].map(|()| tempfile::tempdir().unwrap());
     TREE.write(files.path()).unwrap();
-    let node = Node {
-        name: "hosted".parse().unwrap(),
-        key: Arc::new(NodeKey::from_bytes(&[7; 32])),
-    };
-    let policy = Policy::initial(&node.name, &node.key.public(), None);
+    let node = Node::new("hosted".parse().unwrap(), NodeKey::from_bytes(&[7; 32]));
+    let policy = Policy::initial(&node.name, &node.key().unwrap().public(), None);
     let service = OriginService::create(server.path().join("demo"), node.clone(), &policy).unwrap();
     let mut cache = StatCache::default();
     let mut snapshot_into = |store: &Store, version: Option<u64>| {
@@ -127,7 +124,10 @@ static SETUP: LazyLock<Setup> = LazyLock::new(|| {
 fn serve(service: OriginService, node: &Node) -> (Runtime, RemoteUrl) {
     let runtime = Runtime::new().unwrap();
     let tokens: StaticTokens = toml::from_str("\"user:bench\" = \"bench\"").unwrap();
-    let mut repositories = Repositories::new(Credentials::new(node.clone(), Box::new(tokens)));
+    let mut repositories = Repositories::new(Credentials::new(
+        node.key().unwrap().public(),
+        Box::new(tokens),
+    ));
     repositories.insert("demo".parse().unwrap(), service);
     let base = runtime.block_on(async {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -279,11 +279,8 @@ struct History {
 
 static HISTORY_SETUP: LazyLock<History> = LazyLock::new(|| {
     let [server, client] = [(); 2].map(|()| tempfile::tempdir().unwrap());
-    let node = Node {
-        name: "hosted".parse().unwrap(),
-        key: Arc::new(NodeKey::from_bytes(&[7; 32])),
-    };
-    let policy = Policy::initial(&node.name, &node.key.public(), None);
+    let node = Node::new("hosted".parse().unwrap(), NodeKey::from_bytes(&[7; 32]));
+    let policy = Policy::initial(&node.name, &node.key().unwrap().public(), None);
     let service = OriginService::create(server.path().join("demo"), node.clone(), &policy).unwrap();
     let tip = service.store().head(&TargetName::MAIN).unwrap().unwrap();
     let state = service.store().get(tip.acceptance).unwrap().body().state;

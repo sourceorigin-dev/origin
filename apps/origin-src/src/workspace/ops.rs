@@ -227,7 +227,7 @@ impl Workspace {
         // It never touches the working copy, so others may meanwhile.
         self.lock = None;
         let remote = if local { None } else { self.remote()? };
-        let service = self.service(None)?;
+        let service = self.service(None);
         let mut query = EventsQuery {
             cursor: since,
             generation: None,

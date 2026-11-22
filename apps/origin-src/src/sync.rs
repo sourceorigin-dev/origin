@@ -1488,8 +1488,6 @@ pub enum SyncError {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use origin_platform::Native;
     use origin_shared::event::Filter;
     use origin_shared::{AcceptanceBody, Kind, NodeKey, Verdict};
@@ -1521,10 +1519,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let store = Store::new(dir.path().join(".origin"), Native::default());
             store.init().unwrap();
-            let node = Node {
-                name: "queue".parse().unwrap(),
-                key: Arc::new(NodeKey::from_bytes(&[7; 32])),
-            };
+            let node = Node::new("queue".parse().unwrap(), NodeKey::from_bytes(&[7; 32]));
             let service = OriginService::new(server.store.clone(), node).with_pack_limit(limit);
             let remote = Remote::Local(Box::new(service));
             Self {

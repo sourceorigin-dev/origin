@@ -455,12 +455,13 @@ impl Workspace {
     /// The service of this repository, run by this node, which the commands
     /// that the API also offers go through. It finds records through
     /// `index`, if the command just read it, or else reads it once needed.
-    fn service(&self, index: Option<Index>) -> Result<OriginService, WorkspaceError> {
-        let service = OriginService::new(self.store.clone(), self.node()?);
-        Ok(match index {
+    /// It loads the node's key only once a call signs.
+    fn service(&self, index: Option<Index>) -> OriginService {
+        let service = OriginService::new(self.store.clone(), Node::of(&self.config));
+        match index {
             Some(index) => service.with_index(index),
             None => service,
-        })
+        }
     }
 
     /// What a plugin run in this working copy learns of it, once its draft
@@ -476,11 +477,6 @@ impl Workspace {
             revision: self.refresh()?.id,
             remote: Self::remote_url(&self.store)?,
         })
-    }
-
-    /// This node, with its key.
-    fn node(&self) -> Result<Node, WorkspaceError> {
-        Ok(Node::of(&self.config)?)
     }
 
     /// Snapshots the working copy into a draft, recording nothing, for the
@@ -1394,7 +1390,7 @@ impl Workspace {
             since,
             limit: limit.map(|limit| u64::try_from(limit).unwrap_or(u64::MAX)),
         };
-        let log = self.service(None)?.log(&Caller::Owner, &query)?;
+        let log = self.service(None).log(&Caller::Owner, &query)?;
         if target.id() == on {
             for (id, revision) in &stack {
                 let marker = if *id == working_copy.id { '@' } else { '○' };
@@ -1438,7 +1434,7 @@ impl Workspace {
         let change = working_copy.find_change(change)?;
         let flags = self.flags(&working_copy.index, change)?;
         let Revisions { revisions, heads } = self
-            .service(Some(mem::take(&mut working_copy.index)))?
+            .service(Some(mem::take(&mut working_copy.index)))
             .revisions(&Caller::Owner, change)?;
         println!("Change {}{flags}", change.short());
         for RevisionEntry { id, revision } in revisions.iter().rev() {

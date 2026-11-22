@@ -4,7 +4,6 @@
 //! one that reads it per landing. Run on a real disk: syncs are most of the
 //! cost of a put.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -40,11 +39,8 @@ struct Hosted {
 impl Hosted {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let node = Node {
-            name: "hosted".parse().unwrap(),
-            key: Arc::new(NodeKey::from_bytes(&[7; 32])),
-        };
-        let policy = Policy::initial(&node.name, &node.key.public(), None);
+        let node = Node::new("hosted".parse().unwrap(), NodeKey::from_bytes(&[7; 32]));
+        let policy = Policy::initial(&node.name, &node.key().unwrap().public(), None);
         let service =
             OriginService::create(dir.path().join("demo"), node.clone(), &policy).unwrap();
         let revision = Self::put_change(&service, 0);
@@ -99,7 +95,7 @@ impl Hosted {
     fn serve(&self) -> (Runtime, Repo) {
         let runtime = Runtime::new().unwrap();
         let tokens: StaticTokens = toml::from_str("\"node:ci\" = \"bench\"").unwrap();
-        let credentials = Credentials::new(self.node.clone(), Box::new(tokens));
+        let credentials = Credentials::new(self.node.key().unwrap().public(), Box::new(tokens));
         let mut repositories = Repositories::new(credentials);
         repositories.insert("demo".parse().unwrap(), self.service());
         let url = runtime.block_on(async {

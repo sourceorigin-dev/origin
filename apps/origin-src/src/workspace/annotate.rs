@@ -159,7 +159,7 @@ impl Workspace {
             }
             issued => issued?,
         };
-        self.service(Some(annotations.into_index()))?
+        self.service(Some(annotations.into_index()))
             .resume(Some(&HashSet::from([subject])))?;
         if let Some(verdict) = statement.verdict {
             println!(
@@ -241,7 +241,7 @@ impl Workspace {
     pub fn statements(&mut self, rev: &str) -> Result<(), WorkspaceError> {
         let working_copy = self.snapshot()?;
         let revision = working_copy.find_revision(rev)?;
-        let service = self.service(Some(working_copy.index))?;
+        let service = self.service(Some(working_copy.index));
         let subject = RecordId::Revision(revision);
         if !self.print_statements(&service, subject, "", &mut HashSet::new())? {
             println!("No statements about revision {}", revision.short());
@@ -349,7 +349,7 @@ impl Workspace {
         let working_copy = self.refresh()?;
         let revision = working_copy.find_revision(rev)?;
         let promoted = self
-            .service(Some(working_copy.index))?
+            .service(Some(working_copy.index))
             .promote(&Caller::Owner, RecordId::Revision(revision))?;
         if promoted.is_empty() {
             println!("Nothing to promote to revision {}", revision.short());

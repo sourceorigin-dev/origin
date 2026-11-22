@@ -9,7 +9,6 @@
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::Arc;
 
 use divan::Bencher;
 use origin_ci::runner::{Outcome, Runner};
@@ -50,22 +49,22 @@ struct Hosted {
 impl Hosted {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let node = Node {
-            name: "hosted".parse().unwrap(),
-            key: Arc::new(NodeKey::from_bytes(&[7; 32])),
-        };
+        let node = Node::new("hosted".parse().unwrap(), NodeKey::from_bytes(&[7; 32]));
         let policy = format!(
             "[nodes]\nhosted = \"{}\"\n[targets.policy]\nauthority = \"node:hosted\"\n\
              [targets.main]\nauthority = \"node:hosted\"\n\
              require = [{{ kind = \"ci.test\", verdict = \"pass\", issuer = \"user:ci\" }}]\n",
-            node.key.public()
+            node.key().unwrap().public()
         );
         let root = dir.path().join("demo");
         let service = OriginService::create(root.clone(), node.clone(), &policy).unwrap();
 
         let runtime = Runtime::new().unwrap();
         let tokens: StaticTokens = toml::from_str("\"user:ci\" = \"ci\"").unwrap();
-        let mut repositories = Repositories::new(Credentials::new(node.clone(), Box::new(tokens)));
+        let mut repositories = Repositories::new(Credentials::new(
+            node.key().unwrap().public(),
+            Box::new(tokens),
+        ));
         repositories.insert(
             "demo".parse().unwrap(),
             OriginService::open(root, node.clone()).unwrap(),

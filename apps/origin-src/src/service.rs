@@ -44,7 +44,7 @@ use origin_shared::{
 };
 
 use crate::annotations::{AnnotateError, Annotations};
-use crate::config::{ConfigError, UserConfig};
+use crate::config::{ConfigError, LazyKey, UserConfig};
 use crate::events::{Events, Wakeup};
 use crate::index::Index;
 pub use crate::permissions::Caller;
@@ -54,29 +54,44 @@ use crate::queue::{LandError, Queue, Waiting};
 use crate::store::{Store, StoreError};
 use crate::tree::Snapshots;
 
-/// A node: its name, and the key it signs acceptances with as the
-/// authority of the targets its repositories' policies name it for. A
+/// A node: its name, and the key it signs acceptances and tokens with as
+/// the authority of the targets its repositories' policies name it for. A
 /// server's repositories share their node.
 #[derive(Clone, Debug)]
 pub struct Node {
     /// The node's name.
     pub name: PrincipalName,
-    /// Its key.
-    pub key: Arc<NodeKey>,
+    key: Arc<LazyKey>,
 }
 
 impl Node {
-    /// The node of the user's configuration, with its key, generated the
-    /// first time.
+    /// The node `name`, with its key in hand.
+    #[must_use]
+    pub fn new(name: PrincipalName, key: NodeKey) -> Self {
+        Self {
+            name,
+            key: Arc::new(LazyKey::Loaded(key)),
+        }
+    }
+
+    /// The node of the user's configuration, whose key is loaded, or
+    /// generated, only the first time it signs: calls that only read never
+    /// touch it.
+    #[must_use]
+    pub fn of(config: &UserConfig) -> Self {
+        Self {
+            name: config.node().clone(),
+            key: Arc::new(config.key_file().into()),
+        }
+    }
+
+    /// The node's key.
     ///
     /// # Errors
     ///
     /// Fails if the key cannot be read, or generated and saved.
-    pub fn of(config: &UserConfig) -> Result<Self, ConfigError> {
-        Ok(Self {
-            name: config.node().clone(),
-            key: Arc::new(config.node_key()?),
-        })
+    pub fn key(&self) -> Result<&NodeKey, ConfigError> {
+        self.key.get()
     }
 
     /// The node as a principal, which issues the statements it makes.
@@ -159,7 +174,7 @@ impl OriginService {
         }
         let store = Store::new(root, Native::default());
         store.init()?;
-        Queue::new(&store, &node.key, node.name.clone()).init(policy)?;
+        Queue::new(&store, node.key()?, node.name.clone()).init(policy)?;
         Ok(Self::new(store, node))
     }
 
@@ -298,7 +313,7 @@ impl OriginService {
             token.expires = token.expires.min(scope.expires);
         }
         Ok(IssuedToken {
-            token: token.sign(&self.node.key),
+            token: token.sign(self.node.key()?),
             principal: token.principal,
             expires: token.expires,
         })
@@ -1190,7 +1205,7 @@ impl OriginService {
                 Err(ServiceError::from(Forbidden::Land(onto.clone())))
             }
         };
-        let queue = Queue::new(&self.store, &self.node.key, self.node.name.clone())
+        let queue = Queue::new(&self.store, self.node.key()?, self.node.name.clone())
             .submitted_by(caller.clone(), rights.paths.clone());
         let landed = self.annotations(|annotations| {
             let landed = match &request.proposal {
@@ -1274,7 +1289,7 @@ impl OriginService {
         if !self.rights(caller)?.may_land(&request.name) {
             return Err(Forbidden::Land(request.name.clone()).into());
         }
-        let queue = Queue::new(&self.store, &self.node.key, self.node.name.clone());
+        let queue = Queue::new(&self.store, self.node.key()?, self.node.name.clone());
         let head = queue.create_target(&request.name, &request.from)?;
         self.wakeup.notify();
         Ok(head)
@@ -1705,6 +1720,9 @@ pub enum ServiceError {
     /// Records cannot be read or written.
     #[error(transparent)]
     Store(#[from] StoreError),
+    /// The node's key, needed to sign, cannot be loaded.
+    #[error(transparent)]
+    NodeKey(#[from] ConfigError),
 }
 
 impl From<PutError> for ServiceError {
@@ -1762,7 +1780,9 @@ impl ServiceError {
                 LandError::Policy(_) | LandError::Annotate(_) => ErrorCode::Internal,
             },
             Self::Store(error) => Self::store_code(error),
-            Self::NotARepository(_) | Self::NotEmpty(_) | Self::Policy(_) => ErrorCode::Internal,
+            Self::NotARepository(_) | Self::NotEmpty(_) | Self::Policy(_) | Self::NodeKey(_) => {
+                ErrorCode::Internal
+            }
         }
     }
 
@@ -1792,10 +1812,7 @@ mod tests {
     /// conflict: its description, the conflict's payload, the revision and
     /// the conflict.
     fn conflicted(repo: &crate::queue::tests::Repo) -> (OriginService, [EncodedObject; 4]) {
-        let node = Node {
-            name: "queue".parse().unwrap(),
-            key: Arc::new(NodeKey::from_bytes(&[7; 32])),
-        };
+        let node = Node::new("queue".parse().unwrap(), NodeKey::from_bytes(&[7; 32]));
         let service = OriginService::new(repo.store.clone(), node);
         let description = EncodedObject::attachment(b"");
         let revision = origin_shared::Revision {
@@ -1940,11 +1957,8 @@ mod tests {
     #[test]
     fn calls_using_the_index_do_not_wait_for_each_other() {
         let dir = tempfile::tempdir().unwrap();
-        let node = Node {
-            name: "hosted".parse().unwrap(),
-            key: Arc::new(NodeKey::from_bytes(&[7; 32])),
-        };
-        let policy = Policy::initial(&node.name, &node.key.public(), None);
+        let node = Node::new("hosted".parse().unwrap(), NodeKey::from_bytes(&[7; 32]));
+        let policy = Policy::initial(&node.name, &node.key().unwrap().public(), None);
         let service = OriginService::create(dir.path().join("repo"), node, &policy).unwrap();
         // A landing holds an index all along: a read meanwhile takes another.
         let read = service.annotations(|_| {
@@ -1984,10 +1998,7 @@ mod tests {
             "[targets.main]\nauthority = \"node:queue\"\n\
              require = [{ kind = \"ci.test\", verdict = \"pass\", issuer = \"user:ci\" }]\n",
         );
-        let node = Node {
-            name: "queue".parse().unwrap(),
-            key: Arc::new(NodeKey::from_bytes(&[7; 32])),
-        };
+        let node = Node::new("queue".parse().unwrap(), NodeKey::from_bytes(&[7; 32]));
         let service = OriginService::new(repo.store.clone(), node);
         (repo, service)
     }
