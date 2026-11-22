@@ -1029,10 +1029,7 @@ impl<'a> Sync<'a> {
         let changes = self.stack(&index, changes)?;
         let inventories = self.inventories(&index, &changes)?;
         let mut shared: HashSet<ObjectId> = HashSet::new();
-        for inventory in &inventories {
-            shared.extend(inventory.revisions.iter().map(|&id| ObjectId::from(id)));
-            shared.extend(inventory.statements.iter().map(|&id| ObjectId::from(id)));
-        }
+        Self::share(&mut shared, &inventories);
 
         let mut revisions = Vec::new();
         for &change in &changes {
@@ -1187,12 +1184,22 @@ impl<'a> Sync<'a> {
             .collect()
     }
 
+    /// Adds the records of `inventories`, which the remote has, to
+    /// `shared`.
+    fn share(shared: &mut HashSet<ObjectId>, inventories: &[Inventory]) {
+        for inventory in inventories {
+            shared.extend(inventory.revisions.iter().map(|&id| ObjectId::from(id)));
+            shared.extend(inventory.statements.iter().map(|&id| ObjectId::from(id)));
+        }
+    }
+
     /// The user's statements about the revisions of `changes`, and about
     /// statements about them, that the remote lacks, each after those of
     /// them it needs, adding each to `shared`; and those that need a record
-    /// that isn't in `shared`, which stay. Others' statements are theirs to
-    /// share, and this node's own, like divergence, the remote finds
-    /// itself.
+    /// that isn't in `shared`, which stay. A record about another change
+    /// is looked for on the remote first, which has those `shared` has of
+    /// `changes`. Others' statements are theirs to share, and this node's
+    /// own, like divergence, the remote finds itself.
     fn statements(
         &self,
         index: &Index,
@@ -1222,9 +1229,42 @@ impl<'a> Sync<'a> {
             }
         }
         let mut ordered = Vec::new();
+        let mut asked: HashSet<ChangeId> = changes.iter().copied().collect();
+        loop {
+            Self::order(&mut waiting, &mut ordered, shared);
+            let mut more = Vec::new();
+            for (_, statement) in &waiting {
+                for (needed, kind) in Dependencies::of_statement(statement).records {
+                    if !shared.contains(&needed)
+                        && let Some(change) = self.change_of(needed, kind)?
+                        && asked.insert(change)
+                    {
+                        more.push(change);
+                    }
+                }
+            }
+            if more.is_empty() {
+                break;
+            }
+            let inventories = self.remote.inventory(&InventoryRequest { changes: more })?;
+            Self::share(shared, &inventories);
+        }
+        Ok(Statements {
+            statements: ordered,
+            unsent: waiting.into_iter().map(|(id, _)| id).collect(),
+        })
+    }
+
+    /// Moves each of `waiting` whose needs `shared` has to `ordered`, after
+    /// those it needs, adding it to `shared`.
+    fn order(
+        waiting: &mut Vec<(StatementId, Statement)>,
+        ordered: &mut Vec<(StatementId, Statement)>,
+        shared: &mut HashSet<ObjectId>,
+    ) {
         loop {
             let before = waiting.len();
-            waiting.retain(|(id, statement): &(StatementId, Statement)| {
+            waiting.retain(|(id, statement)| {
                 let ready = Dependencies::of_statement(statement)
                     .records
                     .iter()
@@ -1239,10 +1279,28 @@ impl<'a> Sync<'a> {
                 break;
             }
         }
-        Ok(Statements {
-            statements: ordered,
-            unsent: waiting.into_iter().map(|(id, _)| id).collect(),
-        })
+    }
+
+    /// The change of the record `id`, of `kind`: a revision's, or that of
+    /// what a statement is about, through statements about statements.
+    /// `None` for other records, or if this node lacks one on the way.
+    fn change_of(
+        &self,
+        mut id: ObjectId,
+        mut kind: ObjectKind,
+    ) -> Result<Option<ChangeId>, SyncError> {
+        while kind == ObjectKind::Statement {
+            let Some(statement) = self.stored(StatementId::from(id))? else {
+                return Ok(None);
+            };
+            (id, kind) = (statement.subject.into(), statement.subject.kind());
+        }
+        if kind != ObjectKind::Revision {
+            return Ok(None);
+        }
+        Ok(self
+            .stored(RevisionId::from(id))?
+            .map(|revision| revision.change))
     }
 
     /// Puts the objects of `transfer`, in order, in requests of at most
@@ -1923,6 +1981,15 @@ mod tests {
         let pushed = client.sync().push(&[change]).unwrap();
         assert_eq!(pushed.statements, 0);
         assert_eq!(pushed.unsent, [StatementId::from(newer.encode().id())]);
+
+        // Once the remote has it, it goes.
+        client
+            .sync()
+            .push(&[ChangeId::from_bytes([2; 16])])
+            .unwrap();
+        let pushed = client.sync().push(&[change]).unwrap();
+        assert_eq!((pushed.statements, &pushed.unsent[..]), (1, &[][..]));
+        assert!(server.store.contains(newer.encode().id()).unwrap());
     }
 
     #[test]
