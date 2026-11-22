@@ -1,9 +1,12 @@
 //! Helpers for the end-to-end tests, which run the real `origin` binary.
+//! The tests of plugins, in other packages, include them too.
 
 // Each test binary uses its own subset of the helpers, and the others would
 // warn as unused in it.
 #![allow(dead_code)]
 
+use std::env;
+use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader};
 use std::os::unix::fs::PermissionsExt;
@@ -13,6 +16,29 @@ use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
+
+/// The `origin` binary: this package's, or for a plugin's tests, the one
+/// built beside the plugin's, in the target directory holding the tests.
+pub fn origin() -> PathBuf {
+    if let Some(origin) = option_env!("CARGO_BIN_EXE_origin") {
+        return PathBuf::from(origin);
+    }
+    let exe = env::current_exe().unwrap();
+    let origin = exe.parent().unwrap().parent().unwrap().join("origin");
+    assert!(
+        origin.exists(),
+        "build `origin` first, such as with `cargo build --bin origin`"
+    );
+    origin
+}
+
+/// `$PATH`, starting with the directory holding `origin` and the plugins
+/// built with it.
+pub fn path_with_plugins() -> OsString {
+    let bin = origin().parent().unwrap().to_owned();
+    let paths = env::var_os("PATH").unwrap_or_default();
+    env::join_paths([bin].into_iter().chain(env::split_paths(&paths))).unwrap()
+}
 
 /// A user, with a configuration directory, and so a node key, of their
 /// own, and the token they send servers, if any. Clones share it.
@@ -59,13 +85,15 @@ impl User {
         self.config.path()
     }
 
-    /// `origin` with `args`, run in `cwd` as this user.
+    /// `origin` with `args`, run in `cwd` as this user, with the plugins
+    /// built with it on `$PATH`.
     pub fn command(&self, cwd: &Path, args: &[&str]) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_origin"));
+        let mut command = Command::new(origin());
         command
             .args(args)
             .current_dir(cwd)
             .env("ORIGIN_CONFIG_DIR", self.config())
+            .env("PATH", path_with_plugins())
             .env_remove("ORIGIN_TOKEN");
         if let Some(token) = &self.token {
             command.env("ORIGIN_TOKEN", token);
@@ -116,6 +144,11 @@ impl Repo {
     /// The user's configuration directory.
     pub fn config(&self) -> &Path {
         self.user.config()
+    }
+
+    /// The repository's user.
+    pub fn user(&self) -> &User {
+        &self.user
     }
 
     /// Runs `origin` in `cwd` as the repository's user.
@@ -318,7 +351,7 @@ impl Server {
         )
         .unwrap();
         let origin = |args: &[&str]| {
-            let mut command = Command::new(env!("CARGO_BIN_EXE_origin"));
+            let mut command = Command::new(origin());
             command.args(args).arg("--config").arg(&config);
             command
         };
@@ -386,7 +419,7 @@ impl Server {
 
     /// Signs a token for `principal` with `scope` with the server's key.
     pub fn issue_token(&self, principal: &str, scope: &[&str]) -> String {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_origin"));
+        let mut command = Command::new(origin());
         command
             .args(["token", "issue", "--as", principal, "--config"])
             .arg(self.dir().join("origin-server.toml"));
