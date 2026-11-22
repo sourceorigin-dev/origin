@@ -4,6 +4,7 @@
 pub mod annotations;
 pub mod cli;
 pub mod config;
+pub mod conflict;
 #[cfg(feature = "fixture")]
 pub mod fixture;
 pub mod index;
