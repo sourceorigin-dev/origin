@@ -174,6 +174,15 @@
             }
           },
           {
+            "name": "generation",
+            "in": "query",
+            "description": "The generation of the op log the cursor is of, as its page said. A\ncursor of another generation, such as from before the repository\nwas restored, has expired.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "wait",
             "in": "query",
             "description": "How long to wait for events, such as `30s`. Without it, the answer\ncomes at once, possibly empty.",
@@ -1530,6 +1539,10 @@
               "$ref": "#/components/schemas/Event"
             },
             "description": "The events, oldest first."
+          },
+          "generation": {
+            "type": "string",
+            "description": "The generation of the op log the cursor is of: pass it with the\ncursor, which means nothing in another."
           },
           "next": {
             "type": "integer",

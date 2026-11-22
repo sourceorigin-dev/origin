@@ -804,6 +804,9 @@ pub enum StoreError {
         /// Why decoding failed.
         source: DecodeError,
     },
+    /// The operating system has no randomness to give.
+    #[error("cannot draw a random id")]
+    Random(#[source] getrandom::Error),
     /// The op log no longer keeps the entries after a cursor: retention
     /// deleted them.
     #[error("the op log no longer keeps the entries after #{after}: its oldest is #{oldest}")]

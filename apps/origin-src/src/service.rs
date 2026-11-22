@@ -707,8 +707,15 @@ impl OriginService {
     /// # Errors
     ///
     /// Fails if the op log no longer keeps the events after the cursor, or
-    /// it or a record cannot be read.
+    /// isn't of the generation the query names, or it or a record cannot
+    /// be read.
     pub fn events(&self, _caller: &Caller, query: &EventsQuery) -> Result<Page, ServiceError> {
+        let generation = self.store.oplog().generation()?;
+        if let Some(theirs) = &query.generation
+            && *theirs != generation
+        {
+            return Err(ServiceError::OtherLog(theirs.clone()));
+        }
         let events = Events::new(&self.store).waking_on(&self.wakeup);
         let cursor = match query.cursor {
             Some(cursor) => cursor,
@@ -723,7 +730,8 @@ impl OriginService {
             .unwrap_or(Self::MAX_EVENTS)
             .min(Self::MAX_EVENTS) as usize;
         let wait = query.wait.map_or(Duration::ZERO, |wait| wait.0);
-        Ok(events.wait(cursor, &filter, limit, wait.min(Self::MAX_WAIT))?)
+        let page = events.wait(cursor, &filter, limit, wait.min(Self::MAX_WAIT))?;
+        Ok(Page { generation, ..page })
     }
 }
 
@@ -873,6 +881,9 @@ pub enum ServiceError {
         /// Its heads now.
         heads: Vec<origin_shared::RevisionId>,
     },
+    /// An events cursor is of another op log than the repository's.
+    #[error("the cursor is of another op log, generation {0}: read from the end")]
+    OtherLog(String),
     /// A statement put isn't one the repository accepts: a promotion that
     /// doesn't match its original.
     #[error("statement {} cannot be put", .id.short())]
@@ -913,6 +924,7 @@ impl ServiceError {
                 _ => ErrorCode::BadRequest,
             },
             Self::Moved { .. } => ErrorCode::Conflict,
+            Self::OtherLog(_) => ErrorCode::Expired,
             Self::Land(error) => match error {
                 LandError::UnknownTarget(_) | LandError::UnknownChange(_) => ErrorCode::NotFound,
                 LandError::TargetExists(_)

@@ -126,7 +126,10 @@ a server), in parts of at most 64 MiB, compares the records of changes,
 lists statements, revisions, targets and their logs, lands changes and
 targets, and streams events by long-poll: `GET
 /api/v1/repos/<repo>/events?cursor=<n>&wait=30s` answers as soon as there
-are events after the cursor, with a JSON batch and the next cursor.
+are events after the cursor, with a JSON batch, the next cursor, and the
+generation of the op log it's of: pass it back as `generation`, and a
+cursor of another log, such as from before the repository was restored,
+is refused as expired.
 [`docs/openapi.json`](docs/openapi.json) describes it, and
 [`origin-client`](crates/origin-client) is its Rust SDK. Nothing
 authenticates callers yet.
