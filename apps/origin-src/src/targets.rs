@@ -150,18 +150,44 @@ impl<P: Platform> Store<P> {
     ///
     /// Fails if the target's files cannot be read or are malformed.
     pub fn log(&self, target: &TargetName) -> Result<Vec<AcceptanceId>, StoreError> {
+        self.log_since(target, 0)
+    }
+
+    /// The acceptances of `target` from position `since` on, oldest first.
+    /// Reads only those lines of the log.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the target's files cannot be read or are malformed.
+    pub fn log_since(
+        &self,
+        target: &TargetName,
+        since: u64,
+    ) -> Result<Vec<AcceptanceId>, StoreError> {
         let files = self.target_files(target.id());
         let Some(head) = files.read_head()? else {
             return Ok(Vec::new());
         };
-        let bytes = TargetFiles::read(&files.log())?.unwrap_or_default();
-        let mut log = files.parse_log(&bytes)?;
-        // The log can be ahead of the head while an append is in progress.
-        let published = usize::try_from(head.seq + 1).unwrap_or(usize::MAX);
-        if log.len() < published || log[published - 1] != head.acceptance {
-            return Err(StoreError::Malformed(files.log()));
+        if since > head.seq {
+            return Ok(Vec::new());
         }
-        log.truncate(published);
+        // The log can be ahead of the head while an append is in progress:
+        // read only up to the head.
+        let path = files.log();
+        let line = TargetFiles::LINE as u64;
+        let len = usize::try_from((head.seq + 1 - since) * line)
+            .map_err(|_| StoreError::Malformed(path.clone()))?;
+        let mut bytes = vec![0; len];
+        File::open(&path)
+            .and_then(|log| log.read_exact_at(&mut bytes, since * line))
+            .map_err(|source| match source.kind() {
+                io::ErrorKind::UnexpectedEof => StoreError::Malformed(path.clone()),
+                _ => StoreError::io(&path, source),
+            })?;
+        let log = files.parse_log(&bytes)?;
+        if log.last() != Some(&head.acceptance) {
+            return Err(StoreError::Malformed(path));
+        }
         Ok(log)
     }
 
@@ -436,6 +462,8 @@ mod tests {
             assert_eq!(store.acceptance_at(main.id(), seq).unwrap(), Some(id));
         }
         assert_eq!(store.acceptance_at(main.id(), 3).unwrap(), None);
+        assert_eq!(store.log_since(&main, 1).unwrap(), ids[1..]);
+        assert_eq!(store.log_since(&main, 3).unwrap(), []);
         let last = store.get(ids[2]).unwrap();
         assert_eq!(last.body().prev, Some(ids[1]));
         last.verify(&key().public()).unwrap();

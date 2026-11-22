@@ -1,7 +1,9 @@
 //! The target commands: `land`, `target new` and `targets`, and starting a
 //! change on a target with `new --on`.
 //!
-//! The queue runs in this process, as this node. After a landing, the
+//! They go through the repository's
+//! [`OriginService`](crate::service::OriginService), whose queue runs in
+//! this process, as this node. After a landing, the
 //! working copy of the workspace that ran it follows its change: when it
 //! landed, or the target already had it, the working copy starts a new
 //! change on the target's tip, so later edits are made on what the target
@@ -18,18 +20,17 @@
 
 use std::mem;
 
+use origin_shared::api::{LandRequest, Landings, NewTarget};
 use origin_shared::landing::{Blocked, Landing, Pending, Proposal};
 use origin_shared::{
     Base, ChangeId, EncodedObject, Record, Revision, RevisionId, Source, TargetName, TreeId,
 };
 
 use super::{Behind, WorkingCopy, Workspace, WorkspaceError};
-use crate::annotations::Annotations;
 use crate::conflict::Conflicts;
 use crate::index::Index;
 use crate::oplog::Why;
-use crate::policy::Policy;
-use crate::queue::Queue;
+use crate::service::Caller;
 use crate::tree::Merge;
 
 impl Workspace {
@@ -48,17 +49,13 @@ impl Workspace {
     ) -> Result<(), WorkspaceError> {
         let mut working_copy = self.save_draft()?;
         let change = working_copy.find_change(change.unwrap_or("@"))?;
-        let onto = match onto {
-            Some(onto) => onto,
-            None => self.target_of(Self::single_head(&working_copy.index, change)?)?,
+        let request = LandRequest {
+            proposal: Proposal::Change(change),
+            onto,
         };
-        let key = self.config.node_key()?;
-        let mut annotations = Annotations::new(&self.store, mem::take(&mut working_copy.index));
-        let landings = Queue::new(&self.store, &key, self.config.node().clone()).land_change(
-            &mut annotations,
-            change,
-            &onto,
-        )?;
+        let Landings { onto, landings } = self
+            .service(Some(mem::take(&mut working_copy.index)))?
+            .land(&Caller::Owner, &request)?;
         for landing in &landings {
             self.print_landing(landing, &onto)?;
         }
@@ -85,13 +82,15 @@ impl Workspace {
     /// Fails if a target doesn't exist, this node isn't the authority of
     /// `onto`, or the records cannot be read or written.
     pub fn land_target(&self, from: &TargetName, onto: &TargetName) -> Result<(), WorkspaceError> {
-        let key = self.config.node_key()?;
-        let landing = Queue::new(&self.store, &key, self.config.node().clone()).land_target(
-            &mut Annotations::open(&self.store)?,
-            from,
-            onto,
-        )?;
-        self.print_landing(&landing, onto)
+        let request = LandRequest {
+            proposal: Proposal::Target(from.clone()),
+            onto: Some(onto.clone()),
+        };
+        let landed = self.service(None)?.land(&Caller::Owner, &request)?;
+        for landing in &landed.landings {
+            self.print_landing(landing, onto)?;
+        }
+        Ok(())
     }
 
     /// `origin land --status`: lists the landings that wait, and why.
@@ -100,7 +99,7 @@ impl Workspace {
     ///
     /// Fails if the queues cannot be read.
     pub fn land_status(&self) -> Result<(), WorkspaceError> {
-        let pending = Queue::pending(&self.store)?;
+        let pending = self.service(None)?.landings(&Caller::Owner)?;
         if pending.is_empty() {
             println!("No landing waits.");
         }
@@ -118,16 +117,19 @@ impl Workspace {
     /// Fails if the name is taken, `from` doesn't exist, this node wouldn't
     /// be the target's authority, or the records cannot be written.
     pub fn target_new(&self, name: &TargetName, from: &TargetName) -> Result<(), WorkspaceError> {
-        let key = self.config.node_key()?;
-        Queue::new(&self.store, &key, self.config.node().clone()).create_target(name, from)?;
-        let tip = self
-            .store
-            .head(from)?
-            .ok_or_else(|| WorkspaceError::UnknownTarget(from.clone()))?;
-        println!(
-            "Created target `{name}` at {}",
-            self.describe_acceptance(tip.acceptance)?
-        );
+        let request = NewTarget {
+            name: name.clone(),
+            from: from.clone(),
+        };
+        let head = self
+            .service(None)?
+            .create_target(&Caller::Owner, &request)?;
+        let landed = self.store.get(head.acceptance)?.body().landed.clone();
+        let from = match landed[..] {
+            [Source::Target(from)] => self.describe_acceptance(from)?,
+            _ => format!("`{from}`"),
+        };
+        println!("Created target `{name}` at {from}");
         Ok(())
     }
 
@@ -138,22 +140,17 @@ impl Workspace {
     ///
     /// Fails if the targets or the policy cannot be read.
     pub fn targets(&self) -> Result<(), WorkspaceError> {
-        let policy = Policy::load(&self.store)?;
-        let mut targets = self.store.targets()?;
-        targets.sort();
-        for target in targets {
-            let Some(tip) = self.store.head(&target)? else {
-                continue;
-            };
-            let authority = policy
-                .authority(&target)
+        for target in self.service(None)?.targets(&Caller::Owner)? {
+            let authority = target
+                .authority
                 .map_or_else(|| "no authority".to_owned(), |node| format!("node:{node}"));
             println!(
-                "{target} #{} {} ({authority})",
-                tip.seq,
-                tip.acceptance.short()
+                "{} #{} {} ({authority})",
+                target.name,
+                target.head.seq,
+                target.head.acceptance.short()
             );
-            for requirement in policy.requirements(&target) {
+            for requirement in &target.requirements {
                 println!("    requires {requirement}");
             }
         }
@@ -283,20 +280,6 @@ impl Workspace {
         let target = self.target_name(landing.body().target)?;
         self.rebase_onto_tip(working_copy, below.snapshot, &target)?;
         Ok(true)
-    }
-
-    /// The target a revision's stack is on: that of the acceptance at its
-    /// bottom.
-    fn target_of(&self, revision: RevisionId) -> Result<TargetName, WorkspaceError> {
-        let mut base = self.store.get(revision)?.base;
-        loop {
-            match base {
-                Base::Revision(id) => base = self.store.get(id)?.base,
-                Base::Acceptance(id) => {
-                    return self.target_name(self.store.get(id)?.body().target);
-                }
-            }
-        }
     }
 
     /// Moves the working copy onto `rebased`, the landing queue's rebase of
