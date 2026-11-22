@@ -192,9 +192,13 @@ fn pending_landings_round_trip() {
 
 #[test]
 fn only_the_creator_of_a_change_abandons_it() {
-    let repo = Repo::new("[targets.main]\nauthority = \"node:queue\"\n");
+    let repo = Repo::new(
+        "[targets.main]\nauthority = \"node:queue\"\n\
+         [grants]\nall = [\"land *\", \"annotate *\"]\n\"user:root\" = [\"admin\"]\n",
+    );
     let revision = repo.change_on_main(1, &[("file", "work")]);
-    let abandon = |issuer: &str| Statement {
+    let given_up = repo.change_on_main(2, &[("other", "work")]);
+    let abandon = |issuer: &str, revision| Statement {
         subject: RecordId::Revision(revision),
         kind: Kind::ABANDON,
         verdict: None,
@@ -205,9 +209,24 @@ fn only_the_creator_of_a_change_abandons_it() {
         promoted_from: None,
     };
     repo.store
-        .write_all(&[abandon("user:eve").encode()])
+        .write_all(&[
+            abandon("user:eve", revision).encode(),
+            abandon("user:root", given_up).encode(),
+        ])
         .unwrap();
     assert!(matches!(repo.land(1)[..], [Landing::Landed { .. }]));
+    let error = repo
+        .queue()
+        .land_change(
+            &mut repo.annotations(),
+            ChangeId::from_bytes([2; 16]),
+            &TargetName::MAIN,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(error, LandError::Abandoned(_)),
+        "an admin may: {error}"
+    );
 }
 
 #[test]

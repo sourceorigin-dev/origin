@@ -1127,10 +1127,10 @@ impl Workspace {
     ///
     /// # Errors
     ///
-    /// Fails if the change cannot be found or diverged, the user didn't
-    /// create it, so readers would ignore the statement, or the records
-    /// cannot be written. Then no abandonment is written and nothing is
-    /// checked out.
+    /// Fails if the change cannot be found or diverged, the user neither
+    /// created it nor is an `admin`, so readers would ignore the statement,
+    /// or the records cannot be written. Then no abandonment is written and
+    /// nothing is checked out.
     pub fn abandon(&mut self, change: Option<&str>, reason: &str) -> Result<(), WorkspaceError> {
         let mut working_copy = self.refresh()?;
         let index = &working_copy.index;
@@ -1150,7 +1150,8 @@ impl Workspace {
             supersedes: None,
             promoted_from: None,
         };
-        if !self.store.authorizes(&statement)? {
+        // As readers count it.
+        if !Policy::load(&self.store)?.authorizes(&self.store, &statement)? {
             return Err(AnnotateError::Reserved {
                 kind: statement.kind,
                 issuer: statement.issuer,
@@ -1476,16 +1477,24 @@ impl Workspace {
     }
 
     /// Who abandoned a revision, and why: only those who may, as
-    /// [`Store::authorizes`] says.
+    /// [`Policy::authorizes`] says, as the landing queue counts them.
     fn abandonments(
         &self,
         index: &Index,
         revision: RevisionId,
     ) -> Result<Vec<(Principal, String)>, WorkspaceError> {
         let mut abandonments = Vec::new();
+        let mut policy = None;
         for &id in index.statements(RecordId::Revision(revision)) {
             let statement = self.store.get(id)?;
-            if statement.kind == Kind::ABANDON && self.store.authorizes(&statement)? {
+            if statement.kind != Kind::ABANDON {
+                continue;
+            }
+            let policy = match &policy {
+                Some(policy) => policy,
+                None => policy.insert(Policy::load(&self.store)?),
+            };
+            if policy.authorizes(&self.store, &statement)? {
                 let reason = match statement.payload {
                     Some(payload) => self.text(payload)?,
                     None => String::new(),

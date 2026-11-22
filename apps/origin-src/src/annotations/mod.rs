@@ -3,7 +3,7 @@
 //!
 //! Core interprets only the reserved kinds: [`Kind::ABANDON`],
 //! [`Kind::CONFLICT`] and [`Kind::DIVERGENT`], and only from the issuers
-//! [`Store::authorizes`] names. Every other kind belongs to whoever issues
+//! [`RevisionView::authorizes`] names. Every other kind belongs to whoever issues
 //! it. Supersession counts only within one issuer: a statement claiming to
 //! supersede another issuer's is issued like any other, and the one it
 //! names still stands. [`Annotations::supersede`] supersedes an issuer's
@@ -18,7 +18,8 @@ use std::collections::HashSet;
 use origin_platform::{Native, Platform};
 use origin_shared::api::Annotation;
 use origin_shared::{
-    ChangeId, EncodedObject, Kind, Principal, Record, RecordId, RevisionId, Statement, StatementId,
+    ChangeId, EncodedObject, Kind, Principal, Record, RecordId, Revision, RevisionId, Statement,
+    StatementId,
 };
 
 use crate::index::Index;
@@ -282,13 +283,23 @@ impl<'a, P: Platform> Annotations<'a, P> {
     }
 }
 
-impl<P: Platform> Store<P> {
+/// Where the revisions are read that decide who may issue a reserved kind:
+/// a store.
+pub trait RevisionView {
+    /// The revision `id`.
+    ///
+    /// # Errors
+    ///
+    /// Fails if it cannot be found or read.
+    fn revision(&self, id: RevisionId) -> Result<Revision, StoreError>;
+
     /// Whether `statement`'s issuer may issue a statement of its kind, if
     /// that kind is reserved:
     ///
     /// - `core.abandon`, about a revision, only the change's creator: the
     ///   author of its first revision, so no one who took it over, or
-    ///   rebased it, gives it up for them;
+    ///   rebased it, gives it up for them; or an `admin`, which
+    ///   [`Policy::authorizes`](crate::policy::Policy::authorizes) adds;
     /// - `core.conflict`, a node, as a landing queue that could not rebase
     ///   the record, or the author of the revision it's about, listing
     ///   the conflicts its files still have;
@@ -299,8 +310,8 @@ impl<P: Platform> Store<P> {
     ///
     /// # Errors
     ///
-    /// Fails if a revision cannot be read.
-    pub fn authorizes(&self, statement: &Statement) -> Result<bool, StoreError> {
+    /// Fails if the revision it's about cannot be read.
+    fn authorizes(&self, statement: &Statement) -> Result<bool, StoreError> {
         let issuer = &statement.issuer;
         if !statement.kind.is_reserved() {
             return Ok(true);
@@ -316,7 +327,7 @@ impl<P: Platform> Store<P> {
         Ok(if *kind == Kind::ABANDON {
             self.created(subject, issuer)?
         } else if *kind == Kind::CONFLICT {
-            is_node || self.get(subject)?.author == *issuer
+            is_node || self.revision(subject)?.author == *issuer
         } else {
             *kind == Kind::DIVERGENT && is_node
         })
@@ -325,6 +336,11 @@ impl<P: Platform> Store<P> {
     /// Whether `author` created the change of `revision`: made each
     /// revision it evolves from that evolves from none. Records being
     /// immutable, there is always one, and no one adds another later.
+    /// History this view lacks leaves it unknown: no.
+    ///
+    /// # Errors
+    ///
+    /// Fails if a revision cannot be read.
     fn created(&self, revision: RevisionId, author: &Principal) -> Result<bool, StoreError> {
         let mut seen = HashSet::new();
         let mut next = vec![revision];
@@ -332,13 +348,23 @@ impl<P: Platform> Store<P> {
             if !seen.insert(id) {
                 continue;
             }
-            let revision = self.get(id)?;
+            let revision = match self.revision(id) {
+                Ok(revision) => revision,
+                Err(StoreError::NotFound(_)) => return Ok(false),
+                Err(error) => return Err(error),
+            };
             if revision.predecessors.is_empty() && revision.author != *author {
                 return Ok(false);
             }
             next.extend(revision.predecessors);
         }
         Ok(true)
+    }
+}
+
+impl<P: Platform> RevisionView for Store<P> {
+    fn revision(&self, id: RevisionId) -> Result<Revision, StoreError> {
+        self.get(id)
     }
 }
 

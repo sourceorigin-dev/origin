@@ -53,11 +53,12 @@ use origin_shared::access::{Capability, Level, PathAccess, Rights, Targets};
 use origin_shared::policy::{KindPattern, Principals, Requirement};
 use origin_shared::{
     AcceptanceBody, AcceptanceId, EncodedObject, EntryKind, EntryName, InvalidName, InvalidPeriod,
-    Kind, NodePublicKey, Period, Principal, PrincipalName, Record, RepoPath, TargetName, Tree,
-    TreeEntry, TreeId,
+    Kind, NodePublicKey, Period, Principal, PrincipalName, Record, RepoPath, Statement, TargetName,
+    Tree, TreeEntry, TreeId,
 };
 use serde::Deserialize;
 
+use crate::annotations::RevisionView;
 use crate::store::{Store, StoreError};
 
 /// The policy of a repository.
@@ -246,6 +247,39 @@ impl Policy {
             }
             (Grantee::Principals(_), None) => false,
         }
+    }
+
+    /// Whether `statement`'s issuer may issue a statement of its kind: as
+    /// [`Store::authorizes`] says, or for `core.abandon`, if the policy
+    /// makes them `admin`.
+    ///
+    /// # Errors
+    ///
+    /// Fails if a revision cannot be read.
+    pub fn authorizes(
+        &self,
+        revisions: &impl RevisionView,
+        statement: &Statement,
+    ) -> Result<bool, StoreError> {
+        let admin = self.rights(Some(&statement.issuer)).admin;
+        Self::authorizes_admin(revisions, statement, admin)
+    }
+
+    /// [`Policy::authorizes`], for an issuer who is `admin` or not: as the
+    /// token they put the statement with narrows their rights, say.
+    ///
+    /// # Errors
+    ///
+    /// Fails if a revision cannot be read.
+    pub fn authorizes_admin(
+        revisions: &impl RevisionView,
+        statement: &Statement,
+        admin: bool,
+    ) -> Result<bool, StoreError> {
+        if statement.kind == Kind::ABANDON && statement.promoted_from.is_none() && admin {
+            return Ok(true);
+        }
+        revisions.authorizes(statement)
     }
 
     /// What `principal`, or an anonymous caller, may do, as the module
