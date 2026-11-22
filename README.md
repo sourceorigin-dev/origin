@@ -23,6 +23,7 @@ origin evolog <change>              # every revision of a change
 origin edit <change>                # switch the working copy to another change
 origin abandon --reason "Too slow"  # give a change up, keeping it for others to see
 origin converge <change>            # end a change's divergence
+origin resolve <path>...            # accept conflicted files as they are
 origin index rebuild                # rebuild the record index from the store
 
 origin annotate @ ci.test --pass --inputs src Cargo.toml   # a statement about a revision
@@ -39,6 +40,13 @@ the revision's id. Your name and node key live in `$ORIGIN_CONFIG_DIR`, or
 else `origin` in `$XDG_CONFIG_HOME` or `~/.config`: set `user = "<name>"`
 in its `config.toml` if `$USER` isn't the name you want. See
 [the design](docs/design.md) for the model.
+
+`converge` merges the files of a change's heads. A text file two heads
+changed holds both versions between conflict markers (`<<<<<<<`, `=======`,
+`>>>>>>>`), and a binary one keeps one side. A `core.conflict` statement
+records which files conflict and what the merge wrote there, until they
+change: edit them, or accept a file as it is with `origin resolve <path>`. `status` lists those left, and every new
+revision, `describe` included, keeps them.
 
 ## Development
 
