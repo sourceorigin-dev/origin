@@ -19,6 +19,7 @@
 //! without them.
 
 mod annotate;
+mod land;
 
 pub use annotate::{Annotated, Payload};
 
@@ -39,6 +40,7 @@ use crate::config::{ConfigError, UserConfig};
 use crate::conflict::Conflicts;
 use crate::index::{FindChangeError, FindError, Index};
 use crate::output::FileDiff;
+use crate::policy::PolicyError;
 use crate::queue::{LandError, Queue};
 use crate::store::{Store, StoreError};
 use crate::worktree::{SnapshotError, StatCache, Worktree};
@@ -1077,6 +1079,9 @@ pub enum WorkspaceError {
     /// A statement cannot be issued.
     #[error(transparent)]
     Annotate(#[from] AnnotateError),
+    /// The policy cannot be read.
+    #[error(transparent)]
+    Policy(#[from] PolicyError),
     /// A landing failed.
     #[error(transparent)]
     Land(#[from] LandError),

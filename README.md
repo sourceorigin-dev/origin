@@ -32,7 +32,21 @@ origin annotate @ review --withdraw -m "Spoke too soon"    # take your statement
 origin annotate --on <id> flaky --neutral -m "Timeout on CI"  # a statement about a statement
 origin statements [<rev>]           # the statements about a revision, and those about them
 origin promote [<rev>]              # carry results over from revisions with the same inputs
+
+origin land [<change>] [--onto <target>]   # land a change and the ones below it
+origin land --from <target> --onto <target> # land a target's tip on another
+origin land --status                # the landings waiting for evidence or a conflict fix
+origin targets                      # every target, its tip, authority and requirements
+origin target new <name> --from <target>
+origin new [description] --on <target>     # start a change on a target's tip
 ```
+
+Landing rebases a change onto the target's tip, file by file, checks the
+statements `policy.toml` requires (promoting results whose inputs didn't
+change), and appends an acceptance signed by your node, which must be the
+target's authority. A landing that conflicts or lacks evidence waits: issue
+the statements, or a new revision, and run `origin land` again. Policy is a
+target too: edit it with `origin new --on policy`, then `origin land`.
 
 Changes are named by a unique prefix of their id, or `@` for the working
 copy's. A revision is `@`, a change (for its head), or a unique prefix of
@@ -44,8 +58,9 @@ in its `config.toml` if `$USER` isn't the name you want. See
 `converge` merges the files of a change's heads. A text file two heads
 changed holds both versions between conflict markers (`<<<<<<<`, `=======`,
 `>>>>>>>`), and a binary one keeps one side. A `core.conflict` statement
-records which files conflict and what the merge wrote there, until they
-change: edit them, or accept a file as it is with `origin resolve <path>`. `status` lists those left, and every new
+records which files conflict and what the merge wrote there, and the change
+doesn't land while they're unchanged: edit them, or accept a file as it is
+with `origin resolve <path>`. `status` lists those left, and every new
 revision, `describe` included, keeps them.
 
 ## Development
