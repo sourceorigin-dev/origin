@@ -61,7 +61,12 @@ impl Repo {
 
     /// Runs a command that must fail, returning its error.
     fn fails(&self, args: &[&str]) -> String {
-        let output = self.run(self.dir.path(), args);
+        self.fails_in(self.dir.path(), args)
+    }
+
+    /// Runs `origin` in `cwd`, which must fail, returning its errors.
+    fn fails_in(&self, cwd: &Path, args: &[&str]) -> String {
+        let output = self.run(cwd, args);
         assert!(
             !output.status.success(),
             "`origin {}` succeeded",
@@ -1057,6 +1062,27 @@ fn a_move_that_fails_takes_its_files_back() {
 }
 
 #[test]
+fn a_clean_workspace_behind_its_change_is_removed() {
+    let repo = Repo::new();
+    repo.write("shared", "base\n");
+    repo.ok(&["describe", "Shared"]);
+    let change = repo.change();
+    let others = tempfile::tempdir().unwrap();
+    let (clean, edited) = (others.path().join("clean"), others.path().join("edited"));
+    repo.workspace(&clean, &["--change", &change]);
+    repo.workspace(&edited, &["--change", &change]);
+    assert!(repo.ok(&["land"]).contains(" on main #1\n"));
+
+    repo.ok(&["workspace", "rm", clean.to_str().unwrap()]);
+    assert!(!clean.exists());
+    // Edits made since would be lost: no revision holds them.
+    fs::write(edited.join("notes"), "mine\n").unwrap();
+    let refused = repo.fails(&["workspace", "rm", edited.to_str().unwrap()]);
+    assert!(refused.contains("`origin pull`"), "{refused}");
+    assert!(edited.join("notes").exists());
+}
+
+#[test]
 fn removing_a_workspace_keeps_its_work() {
     let repo = Repo::new();
     let others = tempfile::tempdir().unwrap();
@@ -1443,4 +1469,169 @@ fn workspaces_land_their_own_changes() {
         "{status}"
     );
     assert!(!repo.path("a").exists());
+}
+
+#[test]
+fn pull_follows_a_rebase_waiting_to_land() {
+    let repo = Repo::new();
+    repo.write("own", "own\n");
+    repo.ok(&["describe", "Feature"]);
+    let change = repo.change();
+    let others = tempfile::tempdir().unwrap();
+    let other = others.path().join("other");
+    repo.workspace(&other, &["--change", &change]);
+    repo.ok(&["new", "--on", "main"]);
+    repo.write("upstream", "upstream\n");
+    repo.ok(&["land"]);
+    // Landing on main now needs a check nobody runs.
+    repo.ok(&["new", "--on", "policy"]);
+    let policy = repo
+        .read("policy.toml")
+        .replace("# [groups]", "[groups]")
+        .replace("# runners", "runners")
+        .replace("# require", "require");
+    repo.write("policy.toml", &policy);
+    repo.ok(&["land"]);
+    repo.ok(&["edit", &change]);
+    assert!(repo.ok(&["land"]).contains("waits for ci.test"));
+
+    // The other workspace's edits stay unrecorded, rather than fork the
+    // change from the queue's rebase, until `pull` merges them onto it.
+    fs::write(other.join("own"), "edited\n").unwrap();
+    let status = repo.ok_in(&other, &["status"]);
+    assert!(
+        status.contains(&format!(
+            "Behind: the landing queue rebased change {change} onto main #1"
+        )),
+        "{status}"
+    );
+    repo.ok_in(&other, &["pull"]);
+    assert_eq!(
+        fs::read_to_string(other.join("upstream")).unwrap(),
+        "upstream\n"
+    );
+    assert_eq!(fs::read_to_string(other.join("own")).unwrap(), "edited\n");
+    let status = repo.ok_in(&other, &["status"]);
+    assert!(status.contains("On top of: main #1\n"), "{status}");
+    assert!(
+        !status.contains("divergent") && !status.contains("Behind"),
+        "{status}"
+    );
+}
+
+#[test]
+fn a_workspace_follows_its_change_once_it_lands_elsewhere() {
+    let repo = Repo::new();
+    repo.write("shared", "base\n");
+    repo.ok(&["describe", "Shared"]);
+    let change = repo.change();
+    let others = tempfile::tempdir().unwrap();
+    let (clean, conflicting) = (
+        others.path().join("clean"),
+        others.path().join("conflicting"),
+    );
+    repo.workspace(&clean, &["--change", &change]);
+    repo.workspace(&conflicting, &["--change", &change]);
+    let pointer = clean.join(".origin/workspace");
+    let before = fs::read_to_string(&pointer).unwrap();
+
+    // The change lands from the main working copy, then main moves on.
+    assert!(repo.ok(&["land"]).contains(" on main #1\n"));
+    repo.write("shared", "main\n");
+    assert!(repo.ok(&["land"]).contains(" on main #2\n"));
+
+    // Reading the working copy never moves it: it says where the change
+    // went, and the commands that build on it refuse.
+    fs::write(clean.join("notes"), "mine\n").unwrap();
+    let status = repo.ok_in(&clean, &["status"]);
+    assert!(
+        status.contains(&format!(
+            "Behind: change {change} landed on main #1. Run `origin pull` to follow it, \
+             with the edits made since.\n"
+        )),
+        "{status}"
+    );
+    assert!(status.contains("A notes\n"), "{status}");
+    assert_eq!(fs::read_to_string(&pointer).unwrap(), before, "left alone");
+    assert_eq!(fs::read_to_string(clean.join("shared")).unwrap(), "base\n");
+    let refused = repo.fails_in(&clean, &["describe", "More"]);
+    assert!(
+        refused.contains("run `origin pull` to follow it first"),
+        "{refused}"
+    );
+
+    // `pull` starts a new change on the tip, with the edits.
+    let pulled = repo.ok_in(&clean, &["pull"]);
+    assert!(pulled.contains("On top of: main #2\n"), "{pulled}");
+    assert_eq!(fs::read_to_string(clean.join("shared")).unwrap(), "main\n");
+    assert!(
+        repo.ok_in(&clean, &["status"])
+            .ends_with("On top of: main #2\nA notes\n")
+    );
+
+    // Edits that conflict with the tip are both kept, between markers, and
+    // block the new change until they're resolved.
+    fs::write(conflicting.join("shared"), "mine\n").unwrap();
+    let pulled = repo.ok_in(&conflicting, &["pull"]);
+    assert!(
+        pulled.contains("Conflicts: shared hold both versions"),
+        "{pulled}"
+    );
+    let shared = fs::read_to_string(conflicting.join("shared")).unwrap();
+    assert!(
+        shared.contains("mine\n") && shared.contains("main\n") && shared.contains("<<<<<<<"),
+        "{shared}"
+    );
+    let refused = repo.fails_in(&conflicting, &["land"]);
+    assert!(refused.contains("shared"), "{refused}");
+    // Pulling again, once main moves on, keeps them unresolved.
+    repo.write("other", "main\n");
+    assert!(repo.ok(&["land"]).contains(" on main #3\n"));
+    let pulled = repo.ok_in(&conflicting, &["pull"]);
+    assert!(pulled.contains("On top of: main #3\n"), "{pulled}");
+    assert!(
+        pulled.contains("Conflicts: shared hold both versions"),
+        "{pulled}"
+    );
+    assert!(repo.fails_in(&conflicting, &["land"]).contains("shared"));
+    fs::write(conflicting.join("shared"), "resolved\n").unwrap();
+    assert!(
+        repo.ok_in(&conflicting, &["land"])
+            .contains(" on main #4\n")
+    );
+}
+
+#[test]
+fn a_refused_pull_writes_nothing() {
+    let repo = Repo::new();
+    repo.write("own", "own\n");
+    repo.ok(&["describe", "Feature"]);
+    let change = repo.change();
+    let others = tempfile::tempdir().unwrap();
+    let other = others.path().join("other");
+    repo.workspace(&other, &["--change", &change]);
+    repo.ok(&["new", "--on", "main"]);
+    repo.write("upstream", "upstream\n");
+    assert!(repo.ok(&["land"]).contains(" on main #1\n"));
+
+    // A socket, which snapshots skip, where the pull writes a file.
+    fs::write(other.join("own"), "edited\n").unwrap();
+    let socket = std::os::unix::net::UnixListener::bind(other.join("upstream")).unwrap();
+    // Recorded first, as the pull would.
+    repo.ok_in(&other, &["describe", "Feature"]);
+    let evolog = repo.ok_in(&other, &["evolog", &change]);
+    let refused = repo.fails_in(&other, &["pull"]);
+    assert!(
+        refused.contains("changed while origin was moving"),
+        "{refused}"
+    );
+    assert_eq!(repo.ok_in(&other, &["evolog", &change]), evolog);
+    assert_eq!(fs::read_to_string(other.join("own")).unwrap(), "edited\n");
+
+    drop(socket);
+    fs::remove_file(other.join("upstream")).unwrap();
+    let pulled = repo.ok_in(&other, &["pull"]);
+    assert!(pulled.contains("On top of: main #1\n"), "{pulled}");
+    let status = repo.ok_in(&other, &["status"]);
+    assert!(!status.contains("divergent"), "{status}");
 }

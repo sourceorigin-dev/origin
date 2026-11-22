@@ -113,8 +113,9 @@ impl Workspace {
     ///
     /// # Errors
     ///
-    /// Fails if `path` is the main working copy or no workspace, or if it
-    /// cannot be snapshotted or deleted.
+    /// Fails if `path` is the main working copy or no workspace, if the
+    /// workspace is behind its change with edits, which no revision holds
+    /// then, or if it cannot be snapshotted or deleted.
     pub fn remove_workspace(&self, path: &Path) -> Result<(), WorkspaceError> {
         let root = Self::canonical(path)?;
         if root == self.main_root() {
@@ -126,7 +127,13 @@ impl Workspace {
         }
         if Self::read_pointer(&root)?.is_some() {
             let mut workspace = Self::open(&root, self.config.clone())?;
-            let working_copy = workspace.refresh()?;
+            let working_copy = workspace.save_draft()?;
+            // Only behind its change are its edits left unsaved.
+            let working_copy = if working_copy.files == working_copy.revision.snapshot {
+                working_copy
+            } else {
+                workspace.following(working_copy)?
+            };
             println!(
                 "Kept its working copy: {}",
                 workspace.headline(&working_copy.revision)?

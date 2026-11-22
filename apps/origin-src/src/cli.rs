@@ -141,6 +141,9 @@ enum WorkspaceCommand {
     Target(TargetCommand),
     /// List the targets, with their tips, authorities and requirements.
     Targets,
+    /// Move the working copy where its change went from another
+    /// workspace, or onto its target's new tip, with the edits made since.
+    Pull,
     /// Manage workspaces: working copies sharing this repository.
     #[command(subcommand)]
     Workspace(WorkspacesCommand),
@@ -438,6 +441,7 @@ impl WorkspaceCommand {
                 workspace.target_new(&name, &from)?;
             }
             Self::Targets => workspace.targets()?,
+            Self::Pull => workspace.pull()?,
             Self::Workspace(WorkspacesCommand::New { change, path }) => {
                 workspace.add_workspace(change.as_deref(), path.as_deref())?;
             }
