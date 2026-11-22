@@ -258,6 +258,26 @@ impl<P: Platform> Store<P> {
             .then_some(next))
     }
 
+    /// The target the stack of `revision` is on: that of the acceptance at
+    /// the bottom of its stack, found by following bases.
+    ///
+    /// # Errors
+    ///
+    /// Fails if a record of the stack cannot be read, or the store doesn't
+    /// know the target's name.
+    pub fn stack_target(&self, revision: RevisionId) -> Result<TargetName, StoreError> {
+        let mut base = self.get(revision)?.base;
+        let acceptance = loop {
+            match base {
+                Base::Revision(id) => base = self.get(id)?.base,
+                Base::Acceptance(id) => break id,
+            }
+        };
+        let target = self.get(acceptance)?.body().target;
+        self.target_name(target)?
+            .ok_or(StoreError::NotFound(acceptance.into()))
+    }
+
     /// The name of the target `id`, or `None` if it doesn't exist.
     ///
     /// # Errors
