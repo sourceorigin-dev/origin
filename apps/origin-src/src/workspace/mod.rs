@@ -101,7 +101,7 @@ use crate::output::FileDiff;
 use crate::plugin::Context;
 use crate::policy::{Policy, PolicyError};
 use crate::queue::{LandError, Queue};
-use crate::remote::{Remote, RemoteError};
+use crate::remote::{Remote, RemoteError, RemoteUrl};
 use crate::service::{Caller, Node, OriginService, ServiceError};
 use crate::store::{Store, StoreError};
 use crate::sync::SyncError;
@@ -1636,6 +1636,14 @@ pub enum WorkspaceError {
     /// A command needs a remote, and the repository has none.
     #[error("this repository has no remote: set one with `origin remote <url>`")]
     NoRemote,
+    /// The remote is a repository on a local path that has a remote of its
+    /// own, such as a clone: it only holds the snapshots it read, and
+    /// syncing takes a remote to hold them all.
+    #[error(
+        "{0} has a remote of its own, so it lacks the snapshots it never read: use that remote \
+         instead"
+    )]
+    RemoteWithRemote(RemoteUrl),
     /// `clone` was given no path, and the URL names no directory.
     #[error("cannot tell the repository's name from its URL: pass a path")]
     Unnamed,

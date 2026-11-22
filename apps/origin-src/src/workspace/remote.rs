@@ -2,7 +2,8 @@
 //! fetching the snapshots a lazy clone lacks.
 //!
 //! A repository has at most one remote, named in `.origin/remote`, which
-//! its workspaces share. A clone holds the chains of the targets it
+//! its workspaces share. One on a local path has none of its own, so it
+//! holds every snapshot. A clone holds the chains of the targets it
 //! follows, the records of the changes it knows, and only the snapshots it
 //! read: whenever a command needs one it lacks, such as a checkout, it is
 //! fetched from the remote, skipping what the working copy already holds.
@@ -76,8 +77,7 @@ impl Workspace {
             .last()
             .map(Path::to_owned);
         Self::claim(&root)?;
-        let cloned = Remote::open_for(&url, &config)
-            .map_err(WorkspaceError::from)
+        let cloned = Self::open_remote(&url, &config)
             .and_then(|remote| Self::clone_into(root.clone(), &url, remote, target, config, actor));
         if cloned.is_err() {
             // Best effort: the error says what went wrong.
@@ -234,10 +234,24 @@ impl Workspace {
             return Ok(remote.as_ref());
         }
         let remote = match Self::remote_url(&self.store)? {
-            Some(url) => Some(Remote::open_for(&url, &self.config)?),
+            Some(url) => Some(Self::open_remote(&url, &self.config)?),
             None => None,
         };
         Ok(self.remote.get_or_init(|| remote).as_ref())
+    }
+
+    /// Opens the remote at `url` for the user of `config`, refusing a
+    /// repository on a local path that has a remote of its own, such as a
+    /// clone: it only holds the snapshots it read, and syncing takes a
+    /// remote to hold the snapshot of every record it has.
+    fn open_remote(url: &RemoteUrl, config: &UserConfig) -> Result<Remote, WorkspaceError> {
+        let remote = Remote::open_for(url, config)?;
+        if let Remote::Local(service) = &remote
+            && Self::remote_url(service.store())?.is_some()
+        {
+            return Err(WorkspaceError::RemoteWithRemote(url.clone()));
+        }
+        Ok(remote)
     }
 
     /// Syncs with `remote`, as this node, for its user.

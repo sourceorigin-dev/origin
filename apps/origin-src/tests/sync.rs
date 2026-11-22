@@ -257,3 +257,24 @@ fn a_clone_converges_heads_whose_merge_base_it_never_read() {
         "{file}"
     );
 }
+
+#[test]
+fn a_repository_with_a_remote_is_no_remote() {
+    let ada = User::new("ada");
+    let origin = Repo::init(&ada);
+    let clone = Repo::clone(&ada, origin.root().to_str().unwrap(), &[]);
+    let url = clone.root().to_str().unwrap();
+    // The clone lacks snapshots a push to it would take it to have.
+    let dir = tempfile::tempdir().unwrap();
+    let cloned = ada
+        .command(dir.path(), &["clone", url, "again"])
+        .output()
+        .unwrap();
+    let error = String::from_utf8_lossy(&cloned.stderr);
+    assert!(error.contains("has a remote of its own"), "{error}");
+    assert!(!dir.path().join("again").exists());
+    let other = Repo::init(&ada);
+    other.ok(&["remote", url]);
+    let error = other.fails(&["push"]);
+    assert!(error.contains("has a remote of its own"), "{error}");
+}
