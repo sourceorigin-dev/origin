@@ -66,6 +66,10 @@ name = "packs"
 harness = false
 
 [[bench]]
+name = "sync"
+harness = false
+
+[[bench]]
 name = "workspace"
 harness = false
 
