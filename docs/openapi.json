@@ -160,7 +160,7 @@
     },
     "/api/v1/repos/{repo}/events": {
       "get": {
-        "summary": "Reads the events after a cursor, waiting up to `wait` for some: a\nlong-poll. Pass the page's `next` as the next request's cursor.",
+        "summary": "Reads the events after a cursor, waiting up to `wait` for some: a\nlong-poll. Pass the page's `next` as the next request's cursor. While\nthe server has too many long-polls waiting, it waits for one to end\nfirst, which counts toward `wait`.",
         "operationId": "events",
         "parameters": [
           {

@@ -11,13 +11,14 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use origin_shared::access::{Capability, Token};
-use origin_shared::api::{RepoName, RepoSummary};
-use origin_shared::{Principal, PrincipalName};
+use origin_shared::api::{EventsQuery, RepoName, RepoSummary};
+use origin_shared::{Period, Principal, PrincipalName};
 use serde::Deserialize;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::auth::{Credentials, StaticTokens};
 use crate::config::KeyFile;
@@ -189,16 +190,23 @@ impl ServerConfig {
 }
 
 /// The repositories a server hosts, each served by the server's node and
-/// kept open while it runs, and how it tells its callers apart.
+/// kept open while it runs, how it tells its callers apart, and the places
+/// event long-polls wait in.
 #[derive(Debug)]
 pub struct Repositories {
     repos: BTreeMap<RepoName, OriginService>,
     credentials: Credentials,
+    polls: Arc<Semaphore>,
 }
 
 impl Repositories {
     /// How often [`Repositories::compact_in_background`] checks.
     const COMPACT_EVERY: Duration = Duration::from_mins(1);
+
+    /// How many event long-polls wait at once, each on a thread of the
+    /// blocking pool, of 512 threads: the rest stay free for every other
+    /// call.
+    const MAX_POLLS: usize = 256;
 
     /// No repositories yet, for callers `credentials` tells apart.
     #[must_use]
@@ -206,7 +214,28 @@ impl Repositories {
         Self {
             repos: BTreeMap::new(),
             credentials,
+            polls: Arc::new(Semaphore::new(Self::MAX_POLLS)),
         }
+    }
+
+    /// Takes one of the [`Repositories::MAX_POLLS`] places an event
+    /// long-poll waits in, to hold until it ends, if `query` waits. If none
+    /// is free, it waits for one, without taking a thread, for at most as
+    /// long as `query` would wait for events, and shortens that wait by as
+    /// much: to none if no place freed up, so the poll answers at once.
+    pub async fn poll(&self, query: &mut EventsQuery) -> Option<OwnedSemaphorePermit> {
+        let wait = query.wait?.duration().min(OriginService::MAX_WAIT);
+        if wait.is_zero() {
+            return None;
+        }
+        if let Ok(permit) = Arc::clone(&self.polls).try_acquire_owned() {
+            return Some(permit);
+        }
+        let start = Instant::now();
+        let permit = tokio::time::timeout(wait, Arc::clone(&self.polls).acquire_owned()).await;
+        let left = wait.saturating_sub(start.elapsed());
+        query.wait = Some(Period::from_secs(left.as_secs()));
+        permit.ok().and_then(Result::ok)
     }
 
     /// Opens the repositories at the given paths, served by `node`, and

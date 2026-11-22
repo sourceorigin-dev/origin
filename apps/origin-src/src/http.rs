@@ -609,7 +609,9 @@ async fn landings(
 }
 
 /// Reads the events after a cursor, waiting up to `wait` for some: a
-/// long-poll. Pass the page's `next` as the next request's cursor.
+/// long-poll. Pass the page's `next` as the next request's cursor. While
+/// the server has too many long-polls waiting, it waits for one to end
+/// first, which counts toward `wait`.
 #[utoipa::path(
     get,
     path = "/api/v1/repos/{repo}/events",
@@ -622,12 +624,15 @@ async fn landings(
     )
 )]
 async fn events(
-    repos: Repos,
+    State(repositories): Repos,
     Path(repo): Path<RepoName>,
     caller: Caller,
-    Query(query): Query<EventsQuery>,
+    Query(mut query): Query<EventsQuery>,
 ) -> Result<Json<Page>, HttpError> {
-    call(repos, repo, caller, move |service, caller| {
+    let permit = repositories.poll(&mut query).await;
+    call(State(repositories), repo, caller, move |service, caller| {
+        // Held until the poll ends.
+        let _permit = permit;
         service.events(caller, &query)
     })
     .await

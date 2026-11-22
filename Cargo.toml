@@ -43,7 +43,7 @@ serde_json = "1.0.154"
 similar = "3.2.0"
 tempfile = "3.27.0"
 thiserror = "2.0.21"
-tokio = { version = "1.53.3", features = ["macros", "net", "rt-multi-thread", "signal"] }
+tokio = { version = "1.53.3", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 toml = "1.1.8"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
