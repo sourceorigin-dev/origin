@@ -83,6 +83,18 @@ pub struct Scope {
 }
 
 impl Caller {
+    /// When the caller's token expires, in seconds since the Unix epoch, if
+    /// it's a scoped one.
+    #[must_use]
+    pub fn expires(&self) -> Option<u64> {
+        match self {
+            Self::Principal {
+                scope: Some(scope), ..
+            } => Some(scope.expires),
+            Self::Principal { scope: None, .. } | Self::Owner | Self::Anonymous => None,
+        }
+    }
+
     /// Who the caller is, unless the owner or anonymous.
     #[must_use]
     pub fn principal(&self) -> Option<&Principal> {

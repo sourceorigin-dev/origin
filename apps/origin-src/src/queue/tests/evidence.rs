@@ -126,7 +126,13 @@ fn promotes_only_what_the_submitter_sees() {
     let blind = PathAccess::new(Level::Write, [(secrets, Level::None)]);
     let waiting = repo
         .queue()
-        .submitted_by(blind)
+        .submitted_by(
+            Caller::Principal {
+                principal: "user:eve".parse().unwrap(),
+                scope: None,
+            },
+            blind,
+        )
         .land_change(
             &mut repo.annotations(),
             ChangeId::from_bytes([2; 16]),

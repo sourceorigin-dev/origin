@@ -118,8 +118,9 @@ impl Workspace {
     /// `origin annotate <rev> <kind> --pass|--fail|--neutral|--withdraw`:
     /// issues a statement about a revision as the user, superseding the
     /// user's latest one of the same kind about it, as
-    /// [`Annotations::supersede`] does. Without a `verdict`, it withdraws
-    /// that one: see [`Statement::withdraws`].
+    /// [`Annotations::supersede`] does, and resumes the landings waiting
+    /// for evidence about it. Without a `verdict`, it withdraws that one:
+    /// see [`Statement::withdraws`].
     ///
     /// # Errors
     ///
@@ -157,6 +158,8 @@ impl Workspace {
             }
             issued => issued?,
         };
+        self.service(Some(annotations.into_index()))?
+            .resume(Some(&HashSet::from([subject])))?;
         if let Some(verdict) = statement.verdict {
             println!(
                 "Issued statement {}: {} {verdict} about {}",

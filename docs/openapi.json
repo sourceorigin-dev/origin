@@ -1962,6 +1962,15 @@
             "$ref": "#/components/schemas/Blocked",
             "description": "Why it waits."
           },
+          "expires": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When the token of its submitter, whom it's retried for, expires, in\nseconds since the Unix epoch, if it's a scoped one. Once it has, the\nlanding is no longer retried: it waits until it's landed again.",
+            "minimum": 0
+          },
           "onto": {
             "$ref": "#/components/schemas/TargetName",
             "description": "The target it lands on."

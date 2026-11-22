@@ -64,6 +64,8 @@ change), and appends an acceptance signed by your node, which must be the
 target's authority. A landing that conflicts or lacks evidence waits: issue
 the statements, or a new revision, and run `origin land` again. Policy is a
 target too: edit it with `origin new --on policy`, then `origin land`.
+Issuing a statement a waiting landing lacks, to the repository that orders
+its target, lets it continue: the queue retries it for whoever submitted it.
 
 Workspaces work like git worktrees: each has its own current change and
 shares the repository's records, so agents can work side by side. A new
@@ -178,7 +180,10 @@ for a token acting for you with a narrower scope, such as `write src`,
 without storing it. A server's operator signs one for any principal with
 `origin token issue --config origin-server.toml --as user:agent-1 --scope
 ...`. A token never grants more than its principal's rights, lasts at most
-7 days, and a token issued with a token expires with it.
+7 days, and a token issued with a token expires with it. A landing that
+waits is retried for its submitter when its evidence arrives, until their
+token expires: then `origin land --status` says so, and it waits for
+someone to land it again.
 
 `converge` merges the files of a change's heads. A text file two heads
 changed holds both versions between conflict markers (`<<<<<<<`, `=======`,

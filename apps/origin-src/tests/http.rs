@@ -15,9 +15,9 @@ use origin_shared::event::EventKind;
 use origin_shared::landing::{Blocked, Landing, Proposal};
 use origin_shared::pack::Pack;
 use origin_shared::{
-    AttachmentId, Base, ChangeId, Digest, EncodedObject, EntryKind, EntryName, Inputs, Kind,
-    NodeKey, Period, Record, RecordId, RepoPath, Revision, RevisionId, Source, Statement,
-    TargetName, Tree, TreeEntry, TreeId, Verdict,
+    AcceptanceId, AttachmentId, Base, ChangeId, Digest, EncodedObject, EntryKind, EntryName,
+    Inputs, Kind, NodeKey, Period, Record, RecordId, RepoPath, Revision, RevisionId, Source,
+    Statement, TargetName, Tree, TreeEntry, TreeId, Verdict,
 };
 use origin_src::auth::{Credentials, StaticTokens};
 use origin_src::http::Api;
@@ -196,12 +196,17 @@ impl Made {
 
 /// The tip of `main`, to make revisions on.
 async fn main_tip(repo: &Repo) -> Base {
+    Base::Acceptance(main_head(repo).await)
+}
+
+/// The latest acceptance of `main`.
+async fn main_head(repo: &Repo) -> AcceptanceId {
     let targets = repo.targets().await.unwrap();
     let main = targets
         .iter()
         .find(|target| target.name == TargetName::MAIN)
         .unwrap();
-    Base::Acceptance(main.head.acceptance)
+    main.head.acceptance
 }
 
 fn ci_test(subject: RevisionId, issuer: &str) -> EncodedObject {
@@ -750,10 +755,16 @@ async fn landings_wait_for_evidence() {
         code(repo.put_records(&own).await.unwrap_err()),
         ErrorCode::Forbidden
     );
+    // The evidence arriving lands the change, for its submitter.
+    let before = main_head(repo).await;
     server.ci.put_records(&forged).await.unwrap();
-    let landed = repo.land(&land).await.unwrap();
-    assert!(matches!(landed.landings[..], [Landing::Landed { .. }]));
     assert_eq!(repo.landings().await.unwrap(), []);
+    assert_ne!(main_head(repo).await, before);
+    let landed = repo.land(&land).await.unwrap();
+    assert!(
+        matches!(landed.landings[..], [Landing::Unchanged(_)]),
+        "{landed:?}"
+    );
 }
 
 #[tokio::test]

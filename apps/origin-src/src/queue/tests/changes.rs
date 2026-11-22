@@ -170,10 +170,15 @@ fn pending_landings_round_trip() {
             verdict: Verdict::Pass,
             issuer: "group:runners".parse().unwrap(),
         }]),
+        expires: None,
+    };
+    let owner = Waiting {
+        pending: pending.clone(),
+        submitter: Caller::Owner,
     };
     assert_eq!(
-        PendingFile::decode(&PendingFile::encode(&pending)),
-        Some(pending.clone())
+        PendingFile::decode(&PendingFile::encode(&pending, &Caller::Owner)),
+        Some(owner)
     );
     let conflict = Pending {
         proposal: change(9),
@@ -183,10 +188,26 @@ fn pending_landings_round_trip() {
         },
         ..pending
     };
-    assert_eq!(
-        PendingFile::decode(&PendingFile::encode(&conflict)),
-        Some(conflict)
-    );
+    let scoped = |capabilities: &[&str]| Waiting {
+        pending: Pending {
+            expires: Some(1_900_000_000),
+            ..conflict.clone()
+        },
+        submitter: Caller::Principal {
+            principal: "user:agent".parse().unwrap(),
+            scope: Some(Scope {
+                capabilities: capabilities.iter().map(|c| c.parse().unwrap()).collect(),
+                expires: 1_900_000_000,
+            }),
+        },
+    };
+    // A token scoped to nothing stays scoped.
+    for scoped in [scoped(&["write src", "land *"]), scoped(&[])] {
+        assert_eq!(
+            PendingFile::decode(&PendingFile::encode(&scoped.pending, &scoped.submitter)),
+            Some(scoped)
+        );
+    }
     assert_eq!(PendingFile::decode("origin pending 2\n"), None);
 }
 

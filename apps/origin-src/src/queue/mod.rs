@@ -27,7 +27,9 @@
 //!    with the same input digest are promoted to it first, and a valid
 //!    promotion claims what its original does, as its original's issuer.
 //! 4. **Missing evidence** leaves the landing waiting, until the statements
-//!    are issued and the landing is retried.
+//!    are issued and the landing is retried, for its submitter, under the
+//!    policy in force then: the [service](crate::service) retries it
+//!    whenever statements about its subject arrive.
 //! 5. **Otherwise** this node signs an acceptance naming what landed, the
 //!    evidence and the policy, and appends it to the target's chain.
 //!
@@ -43,8 +45,8 @@
 //!
 //! The queue of each target lives in `queue/<target id>/`: a `lock` held
 //! while landing, so landings on one target never race, and a file for each
-//! landing that waits, `change-<id>` or `target-<target id>`, so waiting
-//! landings can be listed and retried.
+//! landing that waits, `change-<id>` or `target-<target id>`, naming its
+//! submitter, so waiting landings can be listed and retried.
 
 mod pending;
 mod session;
@@ -64,7 +66,7 @@ use origin_shared::{
 
 use crate::annotations::{AnnotateError, Annotations};
 use crate::conflict::Conflicts;
-use crate::permissions::Forbidden;
+use crate::permissions::{Caller, Forbidden};
 use crate::policy::{Policy, PolicyError};
 use crate::store::{Store, StoreError};
 
@@ -77,8 +79,19 @@ pub struct Queue<'a, P = Native> {
     store: &'a Store<P>,
     key: &'a NodeKey,
     node: PrincipalName,
+    /// Who submits the landings, which a waiting one is retried for.
+    submitter: Caller,
     /// What the submitter may do with each path.
-    submitter: PathAccess,
+    paths: PathAccess,
+}
+
+/// A landing that waits, and who submitted it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Waiting {
+    /// The landing.
+    pub pending: Pending,
+    /// Its submitter, whose rights it lands with when it's retried.
+    pub submitter: Caller,
 }
 
 impl<'a, P: Platform> Queue<'a, P> {
@@ -89,16 +102,18 @@ impl<'a, P: Platform> Queue<'a, P> {
             store,
             key,
             node,
-            submitter: PathAccess::uniform(Level::Write),
+            submitter: Caller::Owner,
+            paths: PathAccess::uniform(Level::Write),
         }
     }
 
-    /// The queues, landing for a submitter who may do `paths`: everything,
-    /// by default.
+    /// The queues, landing for `submitter`, who may do `paths`: the owner,
+    /// who may do everything, by default.
     #[must_use]
-    pub fn submitted_by(self, paths: PathAccess) -> Self {
+    pub fn submitted_by(self, submitter: Caller, paths: PathAccess) -> Self {
         Self {
-            submitter: paths,
+            submitter,
+            paths,
             ..self
         }
     }
@@ -297,9 +312,21 @@ impl<'a, P: Platform> Queue<'a, P> {
     ///
     /// # Errors
     ///
+    /// Fails like [`Queue::waiting`].
+    pub fn pending(store: &Store<P>) -> Result<Vec<Pending>, StoreError> {
+        Ok(Self::waiting(store)?
+            .into_iter()
+            .map(|waiting| waiting.pending)
+            .collect())
+    }
+
+    /// Every landing that waits, with its submitter, sorted by target.
+    ///
+    /// # Errors
+    ///
     /// Fails if the queues cannot be listed, or a landing cannot be read or
     /// is malformed.
-    pub fn pending(store: &Store<P>) -> Result<Vec<Pending>, StoreError> {
+    pub fn waiting(store: &Store<P>) -> Result<Vec<Waiting>, StoreError> {
         let root = store.queue_dir();
         let list = |dir: &PathBuf| match fs::read_dir(dir) {
             Ok(entries) => entries
@@ -322,15 +349,15 @@ impl<'a, P: Platform> Queue<'a, P> {
                     Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
                     Err(source) => return Err(StoreError::io(&path, source)),
                 };
-                let mut landing = PendingFile::decode(&text)
+                let mut waiting = PendingFile::decode(&text)
                     .ok_or_else(|| StoreError::Malformed(path.clone()))?;
-                if let Blocked::Conflict { statement, paths } = &mut landing.blocked {
+                if let Blocked::Conflict { statement, paths } = &mut waiting.pending.blocked {
                     *paths = Conflicts::listed(store, &store.get(*statement)?)?.paths();
                 }
-                pending.push(landing);
+                pending.push(waiting);
             }
         }
-        pending.sort_by(|a, b| a.onto.cmp(&b.onto));
+        pending.sort_by(|a, b| a.pending.onto.cmp(&b.pending.onto));
         Ok(pending)
     }
 

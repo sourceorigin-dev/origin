@@ -25,7 +25,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use origin_platform::Native;
+use origin_platform::{LockedFile, Native};
 use origin_shared::access::{PathAccess, Rights, Token};
 use origin_shared::api::{
     Annotation, At, BrowseQuery, ErrorCode, EventsQuery, Expected, FetchSnapshot, Inventory,
@@ -33,7 +33,7 @@ use origin_shared::api::{
     NewTarget, RevisionEntry, Revisions, Stored, TargetInfo, TokenRequest,
 };
 use origin_shared::event::{EventKind, Filter, Page};
-use origin_shared::landing::{Pending, Proposal};
+use origin_shared::landing::{Blocked, Pending, Proposal};
 use origin_shared::object::DecodeError;
 use origin_shared::pack::{Pack, Packer, Part};
 use origin_shared::{
@@ -48,7 +48,7 @@ use crate::index::Index;
 pub use crate::permissions::Caller;
 use crate::permissions::{Batch, Forbidden, PutError, Reader, Writer};
 use crate::policy::{Policy, PolicyError};
-use crate::queue::{LandError, Queue};
+use crate::queue::{LandError, Queue, Waiting};
 use crate::store::{Store, StoreError};
 use crate::tree::Snapshots;
 
@@ -601,7 +601,9 @@ impl OriginService {
     /// the revisions they're about, and promotions come last, each checked
     /// against its original by [`Store::claim`],
     /// once the original and both subjects are stored. Issues
-    /// `core.divergent` for the changes the revisions made diverge.
+    /// `core.divergent` for the changes the revisions made diverge, and
+    /// retries the landings waiting for evidence about what the statements
+    /// are about.
     ///
     /// # Errors
     ///
@@ -656,6 +658,7 @@ impl OriginService {
         let mut promotions = Vec::new();
         let mut decoded = Vec::new();
         let mut changes = HashSet::new();
+        let mut subjects = HashSet::new();
         for object in pack.objects {
             let id = object.id();
             let record = object
@@ -701,10 +704,12 @@ impl OriginService {
                     decoded.push((id, record));
                 }
                 Object::Statement(ref statement) if statement.promoted_from.is_some() => {
+                    subjects.insert(statement.subject);
                     promotions.push((object, statement.clone()));
                     decoded.push((id, record));
                 }
-                Object::Statement(_) => {
+                Object::Statement(ref statement) => {
+                    subjects.insert(statement.subject);
                     statements.push(object);
                     decoded.push((id, record));
                 }
@@ -717,18 +722,10 @@ impl OriginService {
             new += self.store.write_all(&snapshots)?;
         }
         self.check_writes(caller, &held, &decoded)?;
-        // Held until the records are published, so nothing else moves the
-        // changes in between: see `Store::lock_pushes`.
-        let _pushing = if !revisions.is_empty() || !expect.is_empty() {
-            let lock = self.store.lock_pushes()?;
-            self.check_heads(caller, expect)?;
-            Some(lock)
-        } else {
-            None
-        };
-        // Each layer durable before the next, as a workspace writes them:
-        // statements before the revisions they're about, so a crash never
-        // publishes a revision without its `core.conflict`.
+        let pushing = self.lock_heads(caller, !revisions.is_empty(), expect)?;
+        // In layers, each durable before the next, as a workspace writes
+        // them: statements before the revisions they're about, so a crash
+        // never publishes a revision without its `core.conflict`.
         for layer in [statements, revisions] {
             if !layer.is_empty() {
                 new += self.store.write_all(&layer)?;
@@ -743,8 +740,31 @@ impl OriginService {
                 Ok(())
             })?;
         }
+        // Landings take their queue's lock, then this one, to rebase.
+        drop(pushing);
         self.wakeup.notify();
+        self.resume(Some(&subjects))?;
         Ok(Stored { new: new as u64 })
+    }
+
+    /// Takes the lock every publication of revisions takes (see
+    /// [`Store::lock_pushes`]), if a put publishes `revisions` or `expect`s
+    /// heads, which it checks: held until the records are published, so
+    /// nothing else moves the changes in between.
+    fn lock_heads(
+        &self,
+        caller: &Caller,
+        revisions: bool,
+        expect: &[Expected],
+    ) -> Result<Option<LockedFile>, ServiceError> {
+        if !revisions && expect.is_empty() {
+            return Ok(None);
+        }
+        let lock = self.store.lock_pushes()?;
+        if !expect.is_empty() {
+            self.check_heads(caller, expect)?;
+        }
+        Ok(Some(lock))
     }
 
     /// Checks that the caller may put the records of `decoded`, which a
@@ -886,6 +906,51 @@ impl OriginService {
             }
             Ok(())
         })
+    }
+
+    /// Retries the landings waiting for evidence, about one of `subjects`,
+    /// which statements were just issued about, or all without them, each
+    /// for its submitter: the queue continues when the evidence arrives. A
+    /// retry the policy in force refuses, or that fails, leaves the landing
+    /// as it was, and is logged: the statements that triggered it stand. A
+    /// landing whose submitter's token expired isn't retried: it waits
+    /// until someone lands it again, as [`Pending::expired`] says.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the waiting landings cannot be read.
+    pub(crate) fn resume(&self, subjects: Option<&HashSet<RecordId>>) -> Result<(), ServiceError> {
+        if subjects.is_some_and(HashSet::is_empty) {
+            return Ok(());
+        }
+        for Waiting { pending, submitter } in Queue::waiting(&self.store)? {
+            let about = subjects.is_none_or(|subjects| subjects.contains(&pending.subject));
+            if !about || !matches!(pending.blocked, Blocked::Evidence(_)) || pending.expired() {
+                continue;
+            }
+            let request = LandRequest {
+                proposal: pending.proposal,
+                onto: Some(pending.onto),
+            };
+            if let Err(error) = self.land(&submitter, &request) {
+                tracing::warn!(
+                    error = %anyhow::Error::from(error),
+                    "a waiting landing cannot continue"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Retries every landing waiting for evidence, as a service just opened
+    /// does: the evidence may have arrived as a crash cut short the retry
+    /// it triggers.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the waiting landings cannot be read.
+    pub fn resume_waiting(&self) -> Result<(), ServiceError> {
+        self.resume(None)
     }
 
     /// Writes the `promotions` [`OriginService::put_records`] puts, once
@@ -1045,7 +1110,7 @@ impl OriginService {
             }
         };
         let queue = Queue::new(&self.store, &self.node.key, self.node.name.clone())
-            .submitted_by(rights.paths.clone());
+            .submitted_by(caller.clone(), rights.paths.clone());
         let landed = self.annotations(|annotations| {
             let landed = match &request.proposal {
                 Proposal::Change(change) => {
@@ -1433,9 +1498,12 @@ impl ServiceError {
 
 #[cfg(test)]
 mod tests {
-    use origin_shared::{EncodedObject, Record, RepoPath};
+    use origin_shared::Record;
+    use origin_shared::landing::Landing;
 
     use super::*;
+    use crate::permissions::Scope;
+    use crate::queue::tests::{Repo, ci_test};
 
     /// A service of `repo`, and the objects that put a revision with a
     /// conflict: its description, the conflict's payload, the revision and
@@ -1529,9 +1597,72 @@ mod tests {
         let policy = Policy::initial(&node.name, &node.key.public(), None);
         let service = OriginService::create(dir.path().join("repo"), node, &policy).unwrap();
         // A landing holds an index all along: a read meanwhile takes another.
-        service
-            .annotations(|_| service.annotations(|_| Ok(())))
-            .unwrap();
+        let read = service.annotations(|_| {
+            service.annotations(|annotations| Ok(annotations.index().changes().count()))
+        });
+        assert_eq!(read.unwrap(), 0);
         assert_eq!(service.kept_indexes().len(), 2, "both kept for later calls");
+    }
+
+    /// A repository whose `main` requires a passing `ci.test` from
+    /// `user:ci`, and its authority's service.
+    fn requiring_ci() -> (Repo, OriginService) {
+        let repo = Repo::new(
+            "[targets.main]\nauthority = \"node:queue\"\n\
+             require = [{ kind = \"ci.test\", verdict = \"pass\", issuer = \"user:ci\" }]\n",
+        );
+        let node = Node {
+            name: "queue".parse().unwrap(),
+            key: Arc::new(NodeKey::from_bytes(&[7; 32])),
+        };
+        let service = OriginService::new(repo.store.clone(), node);
+        (repo, service)
+    }
+
+    fn land(service: &OriginService, caller: &Caller, change: u8) -> Vec<Landing> {
+        let request = LandRequest {
+            proposal: Proposal::Change(ChangeId::from_bytes([change; 16])),
+            onto: Some(TargetName::MAIN),
+        };
+        service.land(caller, &request).unwrap().landings
+    }
+
+    #[test]
+    fn landings_whose_token_expired_wait_to_be_landed_again() {
+        let (repo, service) = requiring_ci();
+        let revision = repo.change_on_main(1, &[("src/a", "a")]);
+        let expired = Caller::Principal {
+            principal: "user:eve".parse().unwrap(),
+            scope: Some(Scope {
+                capabilities: ["land *", "read /", "write /"]
+                    .map(|capability| capability.parse().unwrap())
+                    .to_vec(),
+                expires: 1,
+            }),
+        };
+        assert!(matches!(
+            &land(&service, &expired, 1)[..],
+            [Landing::Pending(_)]
+        ));
+        let tip = repo.tip(&TargetName::MAIN);
+        let pass = ci_test(revision, "user:ci").encode();
+        service
+            .put_records(
+                &Caller::Owner,
+                Pack {
+                    objects: vec![pass],
+                },
+            )
+            .unwrap();
+        assert_eq!(repo.tip(&TargetName::MAIN), tip, "not for eve's token");
+        let waiting = service.landings(&Caller::Owner).unwrap();
+        assert!(
+            matches!(&waiting[..], [pending] if pending.expired()),
+            "{waiting:?}"
+        );
+        assert!(matches!(
+            &land(&service, &Caller::Owner, 1)[..],
+            [Landing::Landed { .. }]
+        ));
     }
 }

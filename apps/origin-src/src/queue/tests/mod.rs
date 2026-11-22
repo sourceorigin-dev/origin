@@ -19,6 +19,7 @@ use origin_shared::{
 use super::*;
 use crate::annotations::Annotations;
 use crate::conflict::Conflicts;
+use crate::permissions::{Caller, Scope};
 use crate::policy::{Policy, PolicyError};
 use crate::store::Store;
 use crate::tree::tests::build;
