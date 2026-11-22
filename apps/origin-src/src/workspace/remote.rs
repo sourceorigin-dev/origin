@@ -34,7 +34,7 @@ use crate::index::Index;
 use crate::oplog::{Actor, Why};
 use crate::remote::{Remote, RemoteUrl};
 use crate::store::Store;
-use crate::sync::{Advanced, Cursor, Fetch, Sync};
+use crate::sync::{Advanced, Cursor, Fetch, Pushed, Sync};
 
 impl Workspace {
     /// The file in the repository's `.origin` naming its remote.
@@ -378,12 +378,7 @@ impl Workspace {
             sync = sync.writing(rights.paths);
         }
         let pushed = sync.push(&changes)?;
-        for statement in &pushed.unsent {
-            println!(
-                "Statement {} stays here: it needs a statement the remote doesn't have",
-                statement.short()
-            );
-        }
+        Self::print_unsent(&pushed);
         if pushed.objects == 0 {
             println!("Everything up to date.");
         } else {
@@ -393,6 +388,17 @@ impl Workspace {
             );
         }
         Ok(())
+    }
+
+    /// Says which of the user's statements `pushed` left here.
+    pub(super) fn print_unsent(pushed: &Pushed) {
+        for statement in &pushed.unsent {
+            println!(
+                "Statement {} stays here: it, or one replacing it, needs a statement the remote \
+                 doesn't have",
+                statement.short()
+            );
+        }
     }
 
     /// Fetches the snapshots of `records`, revisions and acceptances, that

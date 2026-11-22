@@ -36,7 +36,8 @@
 //!   and attachments, then revisions, each with its reserved statements,
 //!   then the other statements. A statement that
 //!   needs one the remote neither has nor gets stays here, and the push
-//!   says so.
+//!   says so; so do those it supersedes, which the remote would otherwise
+//!   take without their replacement, and what needs them.
 //!
 //! Transfers are bounded, in both directions: a push is split into
 //! requests of at most [`Pack::LIMIT`], and a fetch's answers stop there,
@@ -155,7 +156,8 @@ pub struct Pushed {
     pub objects: usize,
     /// The user's statements that stay here: they need a record the remote
     /// neither has nor got, such as a statement they supersede about
-    /// another change, or the original they promote.
+    /// another change, or the original they promote, or one that stays
+    /// supersedes them.
     pub unsent: Vec<StatementId>,
 }
 
@@ -1196,10 +1198,11 @@ impl<'a> Sync<'a> {
     /// The user's statements about the revisions of `changes`, and about
     /// statements about them, that the remote lacks, each after those of
     /// them it needs, adding each to `shared`; and those that need a record
-    /// that isn't in `shared`, which stay. A record about another change
-    /// is looked for on the remote first, which has those `shared` has of
-    /// `changes`. Others' statements are theirs to share, and this node's
-    /// own, like divergence, the remote finds itself.
+    /// that isn't in `shared`, which stay, with those they supersede (see
+    /// [`Sync::hold_back`]). A record about another change is looked for
+    /// on the remote first, which has those `shared` has of `changes`.
+    /// Others' statements are theirs to share, and this node's own, like
+    /// divergence, the remote finds itself.
     fn statements(
         &self,
         index: &Index,
@@ -1249,6 +1252,7 @@ impl<'a> Sync<'a> {
             let inventories = self.remote.inventory(&InventoryRequest { changes: more })?;
             Self::share(shared, &inventories);
         }
+        Self::hold_back(&mut ordered, &mut waiting, shared);
         Ok(Statements {
             statements: ordered,
             unsent: waiting.into_iter().map(|(id, _)| id).collect(),
@@ -1274,6 +1278,41 @@ impl<'a> Sync<'a> {
                     ordered.push((*id, statement.clone()));
                 }
                 !ready
+            });
+            if waiting.len() == before {
+                break;
+            }
+        }
+    }
+
+    /// Moves back from `ordered` to `waiting`, and out of `shared`, each
+    /// statement one of `waiting` supersedes, and each that needs one moved
+    /// back: the remote would take a result, say, without the failure that
+    /// replaces it, and land with it.
+    fn hold_back(
+        ordered: &mut Vec<(StatementId, Statement)>,
+        waiting: &mut Vec<(StatementId, Statement)>,
+        shared: &mut HashSet<ObjectId>,
+    ) {
+        loop {
+            let held: HashSet<ObjectId> = waiting
+                .iter()
+                .flat_map(|(id, statement)| {
+                    iter::once(ObjectId::from(*id)).chain(statement.supersedes.map(Into::into))
+                })
+                .collect();
+            let before = waiting.len();
+            ordered.retain(|(id, statement)| {
+                let stays = held.contains(&(*id).into())
+                    || Dependencies::of_statement(statement)
+                        .records
+                        .iter()
+                        .any(|(needed, _)| held.contains(needed));
+                if stays {
+                    shared.remove(&(*id).into());
+                    waiting.push((*id, statement.clone()));
+                }
+                !stays
             });
             if waiting.len() == before {
                 break;
@@ -1990,6 +2029,45 @@ mod tests {
         let pushed = client.sync().push(&[change]).unwrap();
         assert_eq!((pushed.statements, &pushed.unsent[..]), (1, &[][..]));
         assert!(server.store.contains(newer.encode().id()).unwrap());
+    }
+
+    #[test]
+    fn a_push_never_sends_a_result_without_its_replacement() {
+        let server = Repo::new(MAIN_RULES);
+        let client = Client::new(&server);
+        client.sync().fetch_chains(&[TargetName::MAIN]).unwrap();
+        let base = main_tip(&client.store);
+        let revision = client.revision(1, &[], base, &[("a", "1")]);
+        let pass = ci_test(revision, "user:ada");
+        // A failure replacing it, promoted from another change's result,
+        // which the push leaves out and the remote lacks.
+        let other = client.revision(2, &[], base, &[("b", "1")]);
+        let original = Statement {
+            verdict: Some(Verdict::Fail),
+            ..ci_test(other, "user:ada")
+        };
+        let fail = Statement {
+            subject: RecordId::Revision(revision),
+            supersedes: Some(pass.encode().id().into()),
+            promoted_from: Some(original.encode().id().into()),
+            ..original.clone()
+        };
+        client
+            .store
+            .write_all(&[pass.encode(), original.encode(), fail.encode()])
+            .unwrap();
+
+        let change = ChangeId::from_bytes([1; 16]);
+        let pushed = client.sync().push(&[change]).unwrap();
+        assert_eq!(pushed.statements, 0, "{pushed:?}");
+        let mut unsent = pushed.unsent;
+        unsent.sort_unstable();
+        let mut held: Vec<StatementId> = [&fail, &pass]
+            .map(|statement| statement.encode().id().into())
+            .into();
+        held.sort_unstable();
+        assert_eq!(unsent, held);
+        assert!(!server.store.contains(pass.encode().id()).unwrap());
     }
 
     #[test]
