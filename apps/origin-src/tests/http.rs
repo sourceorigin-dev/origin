@@ -1,14 +1,22 @@
 //! The HTTP API, driven through the SDK against a real server: every SDK
 //! method, over the server's own repositories.
 
+use std::slice;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use origin_client::{Client, Error, Repo};
-use origin_shared::api::{ErrorCode, FetchRecords, LogQuery, RepoName};
+use origin_shared::api::{
+    ErrorCode, EventsQuery, FetchRecords, LandRequest, List, LogQuery, NewTarget, RepoName,
+    StatementsQuery,
+};
+use origin_shared::event::EventKind;
+use origin_shared::landing::{Blocked, Landing, Proposal};
 use origin_shared::pack::Pack;
 use origin_shared::{
     Base, BlobId, ChangeId, Digest, EncodedObject, EntryKind, EntryName, Inputs, Kind, NodeKey,
-    Record, RecordId, Revision, RevisionId, Statement, TargetName, Tree, TreeEntry, Verdict,
+    Period, Record, RecordId, Revision, RevisionId, Source, Statement, TargetName, Tree, TreeEntry,
+    Verdict,
 };
 use origin_src::http::Api;
 use origin_src::policy::Policy;
@@ -120,6 +128,20 @@ async fn main_tip(repo: &Repo) -> Base {
         .find(|target| target.name == TargetName::MAIN)
         .unwrap();
     Base::Acceptance(main.head.acceptance)
+}
+
+fn ci_test(subject: RevisionId) -> EncodedObject {
+    Statement {
+        subject: RecordId::Revision(subject),
+        kind: Kind::new("ci.test").unwrap(),
+        verdict: Some(Verdict::Pass),
+        issuer: "user:ci".parse().unwrap(),
+        inputs: None,
+        payload: None,
+        supersedes: None,
+        promoted_from: None,
+    }
+    .encode()
 }
 
 fn change(seed: u8) -> ChangeId {
@@ -333,6 +355,220 @@ async fn promotions_must_match_their_original() {
         .await
         .unwrap();
     assert_eq!(stored.new, 1, "the original was stored with the forgery");
+}
+
+#[tokio::test]
+async fn reads_statements_and_revisions() {
+    let server = Server::start().await;
+    let repo = &server.demo;
+    let base = main_tip(repo).await;
+    let first = Made::revision(change(1), base, vec![], &[("a.txt", "1")]);
+    let statement = ci_test(first.id);
+    let mut pack = first.pack();
+    pack.objects.push(statement.clone());
+    repo.put_records(&pack).await.unwrap();
+
+    let about_first = StatementsQuery {
+        subject: RecordId::Revision(first.id),
+    };
+    let found = repo.statements(&about_first).await.unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].id, statement.id().into());
+    assert_eq!(found[0].statement.kind.as_str(), "ci.test");
+    assert_eq!(found[0].superseded_by, None);
+
+    // Two revisions evolving from the same one make the change diverge,
+    // which the server flags.
+    let left = Made::revision(change(1), base, vec![first.id], &[("a.txt", "2")]);
+    let right = Made::revision(change(1), base, vec![first.id], &[("a.txt", "3")]);
+    for made in [&left, &right] {
+        repo.put_records(&made.pack()).await.unwrap();
+    }
+    let revisions = repo.revisions(change(1)).await.unwrap();
+    let ids: Vec<_> = revisions.revisions.iter().map(|entry| entry.id).collect();
+    assert_eq!(ids, [first.id, left.id, right.id]);
+    assert_eq!(revisions.heads, [left.id, right.id]);
+    let mut flagged = Vec::new();
+    for head in [left.id, right.id] {
+        let query = StatementsQuery {
+            subject: RecordId::Revision(head),
+        };
+        flagged.extend(repo.statements(&query).await.unwrap());
+    }
+    assert_eq!(flagged.len(), 1, "one statement names both heads");
+    assert_eq!(flagged[0].statement.kind, Kind::DIVERGENT);
+    assert_eq!(flagged[0].statement.issuer.to_string(), "node:hosted");
+
+    let error = repo.revisions(change(9)).await.unwrap_err();
+    assert_eq!(code(error), ErrorCode::NotFound);
+}
+
+#[tokio::test]
+async fn lands_changes_and_targets() {
+    let server = Server::start().await;
+    let repo = &server.demo;
+    let made = Made::revision(change(1), main_tip(repo).await, vec![], &[("a.txt", "a")]);
+    repo.put_records(&made.pack()).await.unwrap();
+
+    let land = LandRequest {
+        proposal: Proposal::Change(change(1)),
+        onto: None,
+    };
+    let landed = repo.land(&land).await.unwrap();
+    assert_eq!(landed.onto, TargetName::MAIN, "the target the change is on");
+    let [
+        Landing::Landed {
+            source, acceptance, ..
+        },
+    ] = landed.landings[..]
+    else {
+        panic!("expected a landing, got {:?}", landed.landings);
+    };
+    assert_eq!(
+        source,
+        Source::Revision(made.id),
+        "made on the tip, so not rebased"
+    );
+    assert_eq!(acceptance.seq, 1);
+
+    let log = repo
+        .log(&LogQuery {
+            target: TargetName::MAIN,
+            since: 1,
+        })
+        .await
+        .unwrap();
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0].id, acceptance.acceptance);
+    assert_eq!(log[0].acceptance.body().landed, [Source::Revision(made.id)]);
+
+    let release = TargetName::new("release").unwrap();
+    let new = NewTarget {
+        name: release.clone(),
+        from: TargetName::MAIN,
+    };
+    assert_eq!(repo.create_target(&new).await.unwrap().seq, 0);
+    let error = repo.create_target(&new).await.unwrap_err();
+    assert_eq!(code(error), ErrorCode::Conflict, "the name is taken");
+    let targets = repo.targets().await.unwrap();
+    let names: Vec<_> = targets.iter().map(|target| target.name.as_str()).collect();
+    assert_eq!(names, ["main", "policy", "release"]);
+    assert!(
+        targets
+            .iter()
+            .all(|target| target.authority == Some("hosted".parse().unwrap()))
+    );
+
+    let from_main = LandRequest {
+        proposal: Proposal::Target(TargetName::MAIN),
+        onto: Some(release),
+    };
+    let landed = repo.land(&from_main).await.unwrap();
+    assert!(matches!(landed.landings[..], [Landing::Unchanged(_)]));
+    let nowhere = LandRequest {
+        onto: None,
+        ..from_main
+    };
+    assert_eq!(
+        code(repo.land(&nowhere).await.unwrap_err()),
+        ErrorCode::BadRequest
+    );
+    let unknown = LandRequest {
+        proposal: Proposal::Change(change(9)),
+        onto: None,
+    };
+    assert_eq!(
+        code(repo.land(&unknown).await.unwrap_err()),
+        ErrorCode::NotFound
+    );
+}
+
+#[tokio::test]
+async fn landings_wait_for_evidence() {
+    let server = Server::start().await;
+    let repo = &server.strict;
+    let made = Made::revision(change(1), main_tip(repo).await, vec![], &[("a.txt", "a")]);
+    repo.put_records(&made.pack()).await.unwrap();
+    let land = LandRequest {
+        proposal: Proposal::Change(change(1)),
+        onto: None,
+    };
+
+    let landed = repo.land(&land).await.unwrap();
+    let [Landing::Pending(pending)] = &landed.landings[..] else {
+        panic!("expected a waiting landing, got {:?}", landed.landings);
+    };
+    assert_eq!(pending.subject, RecordId::Revision(made.id));
+    assert!(matches!(&pending.blocked, Blocked::Evidence(missing) if missing.len() == 1));
+    assert_eq!(repo.landings().await.unwrap(), slice::from_ref(pending));
+
+    let query = EventsQuery {
+        cursor: Some(0),
+        kind: List(vec!["check.requested".parse().unwrap()]),
+        ..EventsQuery::default()
+    };
+    let page = repo.events(&query).await.unwrap();
+    assert!(
+        matches!(&page.events[..], [event] if matches!(event.kind,
+            EventKind::CheckRequested { subject, .. } if subject == RecordId::Revision(made.id))),
+        "{page:?}"
+    );
+
+    repo.put_records(&Pack {
+        objects: vec![ci_test(made.id)],
+    })
+    .await
+    .unwrap();
+    let landed = repo.land(&land).await.unwrap();
+    assert!(matches!(landed.landings[..], [Landing::Landed { .. }]));
+    assert_eq!(repo.landings().await.unwrap(), []);
+}
+
+#[tokio::test]
+async fn events_long_poll() {
+    let server = Server::start().await;
+    let repo = server.demo.clone();
+    let now = repo.events(&EventsQuery::default()).await.unwrap();
+    assert!(
+        now.events.is_empty(),
+        "without a cursor, only new events come"
+    );
+
+    let query = EventsQuery {
+        cursor: Some(now.next),
+        wait: Some(Period(Duration::from_secs(30))),
+        kind: List(vec!["revision.created".parse().unwrap()]),
+        ..EventsQuery::default()
+    };
+    let start = Instant::now();
+    let poll = tokio::spawn(async move { repo.events(&query).await.unwrap() });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let made = Made::revision(change(1), main_tip(&server.demo).await, vec![], &[]);
+    server.demo.put_records(&made.pack()).await.unwrap();
+    let page = poll.await.unwrap();
+    assert!(
+        start.elapsed() < Duration::from_secs(10),
+        "it answered once a revision came"
+    );
+    assert!(
+        matches!(&page.events[..], [event] if event.kind.record() == RecordId::Revision(made.id)),
+        "{page:?}"
+    );
+    assert!(page.next > now.next);
+
+    let all = server
+        .demo
+        .events(&EventsQuery {
+            cursor: Some(0),
+            limit: Some(1),
+            ..EventsQuery::default()
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(&all.events[..], [event] if event.kind.name() == "target.advanced"),
+        "the first event is `policy`'s first acceptance: {all:?}"
+    );
 }
 
 #[tokio::test]

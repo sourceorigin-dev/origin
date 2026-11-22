@@ -12,10 +12,14 @@ use axum::extract::{DefaultBodyLimit, FromRequestParts, Path, Query, State};
 use axum::http::request::Parts;
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
+use origin_shared::ChangeId;
+use origin_shared::Head;
 use origin_shared::api::{
-    ApiError, ErrorCode, FetchRecords, LogEntry, LogQuery, RepoName, RepoSummary, Stored,
-    TargetInfo,
+    Annotation, ApiError, ErrorCode, EventsQuery, FetchRecords, LandRequest, Landings, LogEntry,
+    LogQuery, NewTarget, RepoName, RepoSummary, Revisions, StatementsQuery, Stored, TargetInfo,
 };
+use origin_shared::event::Page;
+use origin_shared::landing::Pending;
 use origin_shared::pack::{Pack, PackError};
 use utoipa::OpenApi;
 use utoipa_axum::router::OpenApiRouter;
@@ -48,8 +52,13 @@ impl Api {
             .routes(routes!(list_repos))
             .routes(routes!(fetch_records))
             .routes(routes!(put_records))
-            .routes(routes!(targets))
+            .routes(routes!(statements))
+            .routes(routes!(revisions))
+            .routes(routes!(targets, create_target))
             .routes(routes!(log))
+            .routes(routes!(land))
+            .routes(routes!(landings))
+            .routes(routes!(events))
             .routes(routes!(openapi_document))
     }
 
@@ -209,6 +218,57 @@ async fn put_records(
     .map(Json)
 }
 
+/// Lists the statements about a record, in the order the repository
+/// received them.
+#[utoipa::path(
+    get,
+    path = "/api/v1/repos/{repo}/statements",
+    operation_id = "statements",
+    params(("repo" = String, Path, description = "The repository"), StatementsQuery),
+    responses(
+        (status = 200, description = "The statements", body = Vec<Annotation>),
+        (status = 404, description = "The repository does not exist", body = ApiError)
+    )
+)]
+async fn statements(
+    repos: Repos,
+    Path(repo): Path<RepoName>,
+    caller: Caller,
+    Query(query): Query<StatementsQuery>,
+) -> Result<Json<Vec<Annotation>>, HttpError> {
+    call(repos, repo, caller, move |service, caller| {
+        service.statements(caller, query.subject)
+    })
+    .await
+    .map(Json)
+}
+
+/// Lists the revisions of a change, and its heads.
+#[utoipa::path(
+    get,
+    path = "/api/v1/repos/{repo}/changes/{change}/revisions",
+    operation_id = "revisions",
+    params(
+        ("repo" = String, Path, description = "The repository"),
+        ("change" = String, Path, description = "The change's id")
+    ),
+    responses(
+        (status = 200, description = "The revisions, in the order the repository received them", body = Revisions),
+        (status = 404, description = "The repository or the change does not exist", body = ApiError)
+    )
+)]
+async fn revisions(
+    repos: Repos,
+    Path((repo, change)): Path<(RepoName, ChangeId)>,
+    caller: Caller,
+) -> Result<Json<Revisions>, HttpError> {
+    call(repos, repo, caller, move |service, caller| {
+        service.revisions(caller, change)
+    })
+    .await
+    .map(Json)
+}
+
 /// Lists the targets, with their tips, authorities and requirements.
 #[utoipa::path(
     get,
@@ -230,6 +290,32 @@ async fn targets(
         .map(Json)
 }
 
+/// Creates a target at the tip of another, ordered by this server.
+#[utoipa::path(
+    post,
+    path = "/api/v1/repos/{repo}/targets",
+    operation_id = "create_target",
+    params(("repo" = String, Path, description = "The repository")),
+    request_body = NewTarget,
+    responses(
+        (status = 200, description = "The new target's first acceptance", body = Head),
+        (status = 404, description = "The repository or the target to start from does not exist", body = ApiError),
+        (status = 409, description = "The name is taken, or this server wouldn't order the target", body = ApiError)
+    )
+)]
+async fn create_target(
+    repos: Repos,
+    Path(repo): Path<RepoName>,
+    caller: Caller,
+    Json(request): Json<NewTarget>,
+) -> Result<Json<Head>, HttpError> {
+    call(repos, repo, caller, move |service, caller| {
+        service.create_target(caller, &request)
+    })
+    .await
+    .map(Json)
+}
+
 /// Lists the acceptances of a target, oldest first.
 #[utoipa::path(
     get,
@@ -249,6 +335,81 @@ async fn log(
 ) -> Result<Json<Vec<LogEntry>>, HttpError> {
     call(repos, repo, caller, move |service, caller| {
         service.log(caller, &query.target, query.since)
+    })
+    .await
+    .map(Json)
+}
+
+/// Submits a change, or a target's tip, to a target's landing queue, run
+/// by this server.
+#[utoipa::path(
+    post,
+    path = "/api/v1/repos/{repo}/land",
+    operation_id = "land",
+    params(("repo" = String, Path, description = "The repository")),
+    request_body = LandRequest,
+    responses(
+        (status = 200, description = "How each landing went: landed, unchanged, or waiting for evidence or a conflict's resolution", body = Landings),
+        (status = 400, description = "A target was proposed without a target to land on", body = ApiError),
+        (status = 404, description = "The repository, the change or a target does not exist", body = ApiError),
+        (status = 409, description = "The change diverged or was abandoned, or this server doesn't order the target", body = ApiError)
+    )
+)]
+async fn land(
+    repos: Repos,
+    Path(repo): Path<RepoName>,
+    caller: Caller,
+    Json(request): Json<LandRequest>,
+) -> Result<Json<Landings>, HttpError> {
+    call(repos, repo, caller, move |service, caller| {
+        service.land(caller, &request)
+    })
+    .await
+    .map(Json)
+}
+
+/// Lists the landings that wait, and why.
+#[utoipa::path(
+    get,
+    path = "/api/v1/repos/{repo}/landings",
+    operation_id = "landings",
+    params(("repo" = String, Path, description = "The repository")),
+    responses(
+        (status = 200, description = "The waiting landings, by target", body = Vec<Pending>),
+        (status = 404, description = "The repository does not exist", body = ApiError)
+    )
+)]
+async fn landings(
+    repos: Repos,
+    Path(repo): Path<RepoName>,
+    caller: Caller,
+) -> Result<Json<Vec<Pending>>, HttpError> {
+    call(repos, repo, caller, OriginService::landings)
+        .await
+        .map(Json)
+}
+
+/// Reads the events after a cursor, waiting up to `wait` for some: a
+/// long-poll. Pass the page's `next` as the next request's cursor.
+#[utoipa::path(
+    get,
+    path = "/api/v1/repos/{repo}/events",
+    operation_id = "events",
+    params(("repo" = String, Path, description = "The repository"), EventsQuery),
+    responses(
+        (status = 200, description = "The events, oldest first, and the next cursor: empty if none came in time", body = Page),
+        (status = 404, description = "The repository does not exist", body = ApiError),
+        (status = 410, description = "The server no longer keeps the events after the cursor", body = ApiError)
+    )
+)]
+async fn events(
+    repos: Repos,
+    Path(repo): Path<RepoName>,
+    caller: Caller,
+    Query(query): Query<EventsQuery>,
+) -> Result<Json<Page>, HttpError> {
+    call(repos, repo, caller, move |service, caller| {
+        service.events(caller, &query)
     })
     .await
     .map(Json)
