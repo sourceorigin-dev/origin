@@ -162,18 +162,20 @@ impl<T: Serialize> IntoResponse for Json<T> {
 }
 
 /// Runs a call on the service of repository `repo`, on the blocking thread
-/// pool: service calls do synchronous file system work, and event
-/// long-polls wait.
-async fn call<T: Send + 'static>(
+/// pool: service calls do synchronous file system work, event long-polls
+/// wait, and encoding or decoding a pack takes CPU time, which would hold
+/// up the async workers. It fails with a [`ServiceError`], or with an
+/// [`HttpError`] if it does more than call the service.
+async fn call<T: Send + 'static, E: From<ServiceError> + Into<HttpError> + Send + 'static>(
     State(repositories): Repos,
     repo: RepoName,
     caller: Caller,
-    call: impl FnOnce(&OriginService, &Caller) -> Result<T, ServiceError> + Send + 'static,
+    call: impl FnOnce(&OriginService, &Caller) -> Result<T, E> + Send + 'static,
 ) -> Result<T, HttpError> {
     tokio::task::spawn_blocking(move || call(repositories.get(&caller, &repo)?, &caller))
         .await
         .map_err(|error| HttpError::Panicked(error.to_string()))?
-        .map_err(HttpError::Service)
+        .map_err(Into::into)
 }
 
 /// A failed request, rendered as an [`ApiError`].
@@ -189,6 +191,12 @@ pub enum HttpError {
     Rejected(StatusCode, String),
     /// The service panicked.
     Panicked(String),
+}
+
+impl From<ServiceError> for HttpError {
+    fn from(error: ServiceError) -> Self {
+        Self::Service(error)
+    }
 }
 
 impl IntoResponse for HttpError {
@@ -260,18 +268,28 @@ async fn list_repos(
         .map_err(HttpError::Service)
 }
 
-/// A part of a fetch, as a response: its pack, with the [`MORE`] header if
-/// it stopped short.
-struct PackResponse(Part);
+/// A part of a fetch, as a response: its pack, encoded, with the [`MORE`]
+/// header if it stopped short. Made in the call, so the pack is encoded on
+/// the blocking thread pool.
+struct PackResponse {
+    pack: Vec<u8>,
+    more: bool,
+}
+
+impl From<Part> for PackResponse {
+    fn from(Part { pack, more }: Part) -> Self {
+        Self {
+            pack: pack.encode(),
+            more,
+        }
+    }
+}
 
 impl IntoResponse for PackResponse {
     fn into_response(self) -> Response {
-        let Part { pack, more } = self.0;
-        let mut response = (
-            [(header::CONTENT_TYPE, "application/octet-stream")],
-            pack.encode(),
-        )
-            .into_response();
+        let Self { pack, more } = self;
+        let mut response =
+            ([(header::CONTENT_TYPE, "application/octet-stream")], pack).into_response();
         if more {
             response
                 .headers_mut()
@@ -301,10 +319,11 @@ async fn fetch_records(
     Json(request): Json<FetchRecords>,
 ) -> Result<PackResponse, HttpError> {
     call(repos, repo, caller, move |service, caller| {
-        service.records(caller, &request.ids)
+        service
+            .records(caller, &request.ids)
+            .map(PackResponse::from)
     })
     .await
-    .map(PackResponse)
 }
 
 /// Fetches the objects of a snapshot the caller lacks, as a pack: the only
@@ -327,10 +346,9 @@ async fn fetch_snapshot(
     Json(request): Json<FetchSnapshot>,
 ) -> Result<PackResponse, HttpError> {
     call(repos, repo, caller, move |service, caller| {
-        service.snapshot(caller, &request)
+        service.snapshot(caller, &request).map(PackResponse::from)
     })
     .await
-    .map(PackResponse)
 }
 
 /// Puts a batch of objects, as a pack: snapshots, revisions and
@@ -357,9 +375,9 @@ async fn put_records(
     caller: Caller,
     body: Bytes,
 ) -> Result<Json<Stored>, HttpError> {
-    let pack = Pack::decode(&body).map_err(HttpError::Pack)?;
     call(repos, repo, caller, move |service, caller| {
-        service.push(caller, pack, &query.expect.0)
+        let pack = Pack::decode(&body).map_err(HttpError::Pack)?;
+        Ok::<_, HttpError>(service.push(caller, pack, &query.expect.0)?)
     })
     .await
     .map(Json)
