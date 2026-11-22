@@ -4,12 +4,13 @@ mod changes;
 mod conflicts;
 mod evidence;
 mod policy;
+mod targets;
 
 use origin_platform::Native;
 use origin_shared::{
-    Base, BlobId, ChangeId, Digest, EncodedObject, Inputs, Kind, NodeKey, PrincipalName, Record,
-    RecordId, RepoPath, Revision, RevisionId, Source, Statement, StatementId, TargetName, TreeId,
-    Verdict,
+    AcceptanceBody, Base, BlobId, ChangeId, Digest, EncodedObject, Inputs, Kind, NodeKey,
+    PrincipalName, Record, RecordId, RepoPath, Revision, RevisionId, Source, Statement,
+    StatementId, TargetName, TreeId, Verdict,
 };
 
 use super::*;

@@ -10,6 +10,7 @@ use origin_shared::{
     RevisionId, Source, StatementId, TargetName, TreeId,
 };
 
+use crate::ancestry::Ancestry;
 use crate::annotations::{AnnotateError, Annotations, Claim};
 use crate::conflict::Conflicts;
 use crate::policy::{Policy, PolicyError, Requirement};
@@ -199,7 +200,13 @@ impl<P: Platform> Session<'_, '_, P> {
             None
         };
         let mut records: Vec<EncodedObject> = candidate.revision.into_iter().collect();
-        let requirements = self.policy.requirements(&self.onto).to_vec();
+        // A landing that changes nothing, which only records another
+        // target's tip, needs no evidence.
+        let requirements = if candidate.state == self.state {
+            Vec::new()
+        } else {
+            self.policy.requirements(&self.onto).to_vec()
+        };
         let mut evidence = Vec::new();
         let mut missing = Vec::new();
         if !requirements.is_empty() {
@@ -315,5 +322,31 @@ impl<P: Platform> Session<'_, '_, P> {
             },
         };
         Ok(Landing::Pending(pending))
+    }
+
+    /// The history of `tips`, the target's and another target's, to merge
+    /// that one from: the state of the newest acceptance both histories
+    /// share, or the [merge](Ancestry::merge_base) of several, if each
+    /// lacks another, as after targets landed each other. An acceptance's
+    /// history is the one before it, and the acceptances of other targets
+    /// it landed: a target's first lands the one it was created from, so
+    /// targets created from the same one share it.
+    ///
+    /// The nearest shared acceptance can be an older one, through a target
+    /// that forked early and landed recently, so both histories are read
+    /// whole, each acceptance once.
+    pub(super) fn history(
+        &self,
+        tips: &[AcceptanceId],
+    ) -> Result<Ancestry<AcceptanceId>, StoreError> {
+        Ancestry::walk(tips, |id| {
+            let acceptance = self.store().get(id)?;
+            let body = acceptance.body();
+            let landed = body.landed.iter().filter_map(|source| match *source {
+                Source::Target(landed) => Some(landed),
+                Source::Revision(_) => None,
+            });
+            Ok::<_, StoreError>((landed.chain(body.prev).collect(), body.state))
+        })
     }
 }
