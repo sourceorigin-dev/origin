@@ -15,15 +15,25 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 /// A user, with a configuration directory, and so a node key, of their
-/// own. Clones share it.
+/// own, and the token they send servers, if any. Clones share it.
 #[derive(Clone)]
 pub struct User {
     config: Arc<tempfile::TempDir>,
+    token: Option<String>,
 }
 
 impl User {
-    /// A user named `name`, whose node is named after them.
+    /// A user named `name`, whose node is named after them, with the token
+    /// [`Server`] knows them by.
     pub fn new(name: &str) -> Self {
+        Self {
+            token: Some(Server::token(name)),
+            ..Self::anonymous(name)
+        }
+    }
+
+    /// A user named `name` without a token: servers don't know them.
+    pub fn anonymous(name: &str) -> Self {
         let config = tempfile::tempdir().unwrap();
         fs::write(
             config.path().join("config.toml"),
@@ -32,6 +42,15 @@ impl User {
         .unwrap();
         Self {
             config: Arc::new(config),
+            token: None,
+        }
+    }
+
+    /// The user, sending `token` instead.
+    pub fn with_token(&self, token: &str) -> Self {
+        Self {
+            token: Some(token.to_owned()),
+            ..self.clone()
         }
     }
 
@@ -46,7 +65,11 @@ impl User {
         command
             .args(args)
             .current_dir(cwd)
-            .env("ORIGIN_CONFIG_DIR", self.config());
+            .env("ORIGIN_CONFIG_DIR", self.config())
+            .env_remove("ORIGIN_TOKEN");
+        if let Some(token) = &self.token {
+            command.env("ORIGIN_TOKEN", token);
+        }
         command
     }
 }
@@ -260,7 +283,8 @@ impl Repo {
 }
 
 /// A running `origin serve` hosting one repository, `demo`, which its node,
-/// `hosted`, orders. Killed when dropped.
+/// `hosted`, orders. Each of [`Server::USERS`] signs in with
+/// [`Server::token`]. Killed when dropped.
 pub struct Server {
     dir: tempfile::TempDir,
     child: Child,
@@ -269,12 +293,28 @@ pub struct Server {
 }
 
 impl Server {
+    /// The users the server knows.
+    pub const USERS: [&str; 4] = ["ada", "bob", "carol", "alice"];
+
+    /// The static token of `user`.
+    pub fn token(user: &str) -> String {
+        format!("token-{user}")
+    }
+
     pub fn start() -> Self {
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("origin-server.toml");
+        let tokens: Vec<_> = Self::USERS
+            .iter()
+            .map(|user| format!("\"user:{user}\" = \"{}\"", Self::token(user)))
+            .collect();
+        let tokens = tokens.join("\n");
         fs::write(
             &config,
-            "listen = \"127.0.0.1:0\"\nnode = \"hosted\"\n[repos]\ndemo = \"repos/demo\"\n",
+            format!(
+                "listen = \"127.0.0.1:0\"\nnode = \"hosted\"\n[repos]\ndemo = \"repos/demo\"\n\
+                 [tokens]\n{tokens}"
+            ),
         )
         .unwrap();
         let origin = |args: &[&str]| {

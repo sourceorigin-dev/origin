@@ -18,6 +18,7 @@ use origin_shared::{
     Base, ChangeId, EncodedObject, Kind, NodeKey, Record, RecordId, Revision, Statement,
     TargetName, TreeId, Verdict,
 };
+use origin_src::auth::{Credentials, StaticTokens};
 use origin_src::fixture::FixtureTree;
 use origin_src::http::Api;
 use origin_src::policy::Policy;
@@ -83,11 +84,11 @@ static SETUP: LazyLock<Setup> = LazyLock::new(|| {
         .map(|version| snapshot_into(service.store(), Some(version)))
         .collect();
 
-    let (runtime, url) = serve(service);
+    let (runtime, url) = serve(service, &node);
 
     let store = Store::new(client.path().join(".origin"), Native::default());
     store.init().unwrap();
-    let remote = Remote::open(&url, node.clone()).unwrap();
+    let remote = Remote::open(&url, node.clone(), Some("bench".to_owned())).unwrap();
     let sync = Sync::new(&store, &remote, "laptop".parse().unwrap());
     sync.fetch_chains(&[TargetName::MAIN]).unwrap();
     sync.need(snapshot, &[]).unwrap();
@@ -108,11 +109,12 @@ static SETUP: LazyLock<Setup> = LazyLock::new(|| {
     }
 });
 
-/// Serves `service` over HTTP on localhost as `demo`, on a runtime of its
-/// own.
-fn serve(service: OriginService) -> (Runtime, RemoteUrl) {
+/// Serves `service` over HTTP on localhost as `demo`, where `user:bench`'s
+/// token is `bench`, on a runtime of its own.
+fn serve(service: OriginService, node: &Node) -> (Runtime, RemoteUrl) {
     let runtime = Runtime::new().unwrap();
-    let mut repositories = Repositories::default();
+    let tokens: StaticTokens = toml::from_str("\"user:bench\" = \"bench\"").unwrap();
+    let mut repositories = Repositories::new(Credentials::new(node.clone(), Box::new(tokens)));
     repositories.insert("demo".parse().unwrap(), service);
     let base = runtime.block_on(async {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -167,7 +169,7 @@ fn revision(base: Base, snapshot: TreeId) -> (EncodedObject, EncodedObject) {
 
 impl Setup {
     fn remote(&self) -> Remote {
-        Remote::open(&self.url, self.node.clone()).unwrap()
+        Remote::open(&self.url, self.node.clone(), Some("bench".to_owned())).unwrap()
     }
 }
 
@@ -284,11 +286,11 @@ static HISTORY_SETUP: LazyLock<History> = LazyLock::new(|| {
     service
         .put_records(&Caller::Owner, Pack { objects })
         .unwrap();
-    let (runtime, url) = serve(service);
+    let (runtime, url) = serve(service, &node);
 
     let store = Store::new(client.path().join(".origin"), Native::default());
     store.init().unwrap();
-    let remote = Remote::open(&url, node).unwrap();
+    let remote = Remote::open(&url, node, Some("bench".to_owned())).unwrap();
     let sync = Sync::new(&store, &remote, "laptop".parse().unwrap());
     let fetch = sync.fetch(&[TargetName::MAIN], &changes, None).unwrap();
     assert_eq!(fetch.fetched.revisions, HISTORY as usize);

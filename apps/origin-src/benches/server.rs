@@ -18,6 +18,7 @@ use origin_shared::{
     AttachmentId, Base, ChangeId, EncodedObject, EntryKind, EntryName, Kind, NodeKey, Period,
     Record, RecordId, Revision, RevisionId, Statement, TargetName, Tree, TreeEntry, Verdict,
 };
+use origin_src::auth::{Credentials, StaticTokens};
 use origin_src::http::Api;
 use origin_src::policy::Policy;
 use origin_src::server::Repositories;
@@ -97,7 +98,9 @@ impl Hosted {
     /// server and the SDK's handle on the repository.
     fn serve(&self) -> (Runtime, Repo) {
         let runtime = Runtime::new().unwrap();
-        let mut repositories = Repositories::default();
+        let tokens: StaticTokens = toml::from_str("\"node:ci\" = \"bench\"").unwrap();
+        let credentials = Credentials::new(self.node.clone(), Box::new(tokens));
+        let mut repositories = Repositories::new(credentials);
         repositories.insert("demo".parse().unwrap(), self.service());
         let url = runtime.block_on(async {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -105,7 +108,9 @@ impl Hosted {
             tokio::spawn(async move { axum::serve(listener, Api::router(repositories)).await });
             format!("http://{address}")
         });
-        let repo = origin_client::Client::new(&url).repo("demo".parse().unwrap());
+        let repo = origin_client::Client::new(&url)
+            .with_token("bench")
+            .repo("demo".parse().unwrap());
         (runtime, repo)
     }
 }

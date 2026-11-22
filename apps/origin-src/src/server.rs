@@ -18,6 +18,7 @@ use origin_shared::PrincipalName;
 use origin_shared::api::{RepoName, RepoSummary};
 use serde::Deserialize;
 
+use crate::auth::{Credentials, StaticTokens};
 use crate::config::KeyFile;
 use crate::http::Api;
 use crate::policy::Policy;
@@ -33,9 +34,13 @@ use crate::store::Store;
 ///
 /// [repos]
 /// origin = "repos/origin"   # name = path
+///
+/// [tokens]                  # static tokens, by principal
+/// "user:alice" = "a long random secret"
 /// ```
 ///
-/// Paths are relative to the file.
+/// Paths are relative to the file. Callers without a token are anonymous;
+/// the server also takes the scoped tokens it signed.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
@@ -49,6 +54,9 @@ pub struct ServerConfig {
     /// The repositories to serve, by name.
     #[serde(default)]
     pub repos: BTreeMap<RepoName, PathBuf>,
+    /// Static tokens.
+    #[serde(default)]
+    pub tokens: StaticTokens,
 }
 
 impl ServerConfig {
@@ -127,7 +135,8 @@ impl ServerConfig {
             .with_writer(std::io::stderr)
             .init();
         let node = self.node()?;
-        let repositories = Repositories::open(self.repos, &node)?;
+        let credentials = Credentials::new(node.clone(), Box::new(self.tokens));
+        let repositories = Repositories::open(self.repos, &node, credentials)?;
         repositories.compact_in_background();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -154,31 +163,49 @@ impl ServerConfig {
 }
 
 /// The repositories a server hosts, each served by the server's node and
-/// kept open while it runs.
-#[derive(Debug, Default)]
+/// kept open while it runs, and how it tells its callers apart.
+#[derive(Debug)]
 pub struct Repositories {
     repos: BTreeMap<RepoName, OriginService>,
+    credentials: Credentials,
 }
 
 impl Repositories {
     /// How often [`Repositories::compact_in_background`] checks.
     const COMPACT_EVERY: Duration = Duration::from_mins(1);
 
+    /// No repositories yet, for callers `credentials` tells apart.
+    #[must_use]
+    pub fn new(credentials: Credentials) -> Self {
+        Self {
+            repos: BTreeMap::new(),
+            credentials,
+        }
+    }
+
     /// Opens the repositories at the given paths, served by `node`.
     ///
     /// # Errors
     ///
     /// Fails if one has no repository.
-    pub fn open(repos: BTreeMap<RepoName, PathBuf>, node: &Node) -> anyhow::Result<Self> {
-        let repos = repos
-            .into_iter()
-            .map(|(name, path)| {
-                let service = OriginService::open(path, node.clone())
-                    .with_context(|| format!("cannot serve repository `{name}`"))?;
-                Ok((name, service))
-            })
-            .collect::<anyhow::Result<_>>()?;
-        Ok(Self { repos })
+    pub fn open(
+        repos: BTreeMap<RepoName, PathBuf>,
+        node: &Node,
+        credentials: Credentials,
+    ) -> anyhow::Result<Self> {
+        let mut repositories = Self::new(credentials);
+        for (name, path) in repos {
+            let service = OriginService::open(path, node.clone())
+                .with_context(|| format!("cannot serve repository `{name}`"))?;
+            repositories.insert(name, service);
+        }
+        Ok(repositories)
+    }
+
+    /// How the server tells its callers apart.
+    #[must_use]
+    pub fn credentials(&self) -> &Credentials {
+        &self.credentials
     }
 
     /// Compacts each repository once enough loose objects pile up in it

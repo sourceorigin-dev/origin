@@ -18,6 +18,7 @@ fixture = []
 [dependencies]
 anyhow.workspace = true
 axum.workspace = true
+blake3.workspace = true
 clap.workspace = true
 getrandom.workspace = true
 origin-client.workspace = true

@@ -442,6 +442,8 @@ pub enum ErrorCode {
     Conflict,
     /// The event cursor is older than anything the server still keeps.
     Expired,
+    /// The credentials are invalid or expired.
+    Unauthorized,
     /// The server failed.
     Internal,
 }

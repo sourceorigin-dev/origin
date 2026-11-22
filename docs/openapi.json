@@ -44,6 +44,16 @@
                 }
               }
             }
+          },
+          "401": {
+            "description": "The token is invalid or expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
           }
         }
       }
@@ -1047,6 +1057,7 @@
           "not_found",
           "conflict",
           "expired",
+          "unauthorized",
           "internal"
         ]
       },
