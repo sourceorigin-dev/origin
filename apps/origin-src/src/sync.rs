@@ -29,19 +29,24 @@
 //!   heads again as it publishes the revisions, so a push racing another
 //!   is refused too. Revisions only go to a remote that has the acceptance
 //!   they're based on. Each object goes after those it needs: snapshots
-//!   and attachments, then revisions, then statements. A statement that
+//!   and attachments, then revisions, each with its reserved statements,
+//!   then the other statements. A statement that
 //!   needs one the remote neither has nor gets stays here, and the push
 //!   says so.
 //!
 //! Transfers are bounded, in both directions: a push is split into
 //! requests of at most [`Pack::LIMIT`], and a fetch's answers stop there,
 //! with the rest asked for again (see [`Part`]). Each request of a push
-//! expects the heads the requests before it left. Fetched records are
+//! expects the heads the requests before it left. A revision goes in one
+//! request with its reserved statements, such as its conflicts and its
+//! abandonment, and the other statements about one record go in one
+//! request, so the remote never lands a revision whose abandonment, or a
+//! result whose replacement, is still to come. Fetched records are
 //! written before the chains that refer to them.
 
 use std::collections::hash_map::Entry;
-use std::collections::{BTreeSet, HashMap, HashSet};
-use std::mem;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::{iter, mem};
 
 use origin_platform::Native;
 use origin_shared::api::{
@@ -174,27 +179,154 @@ struct Chain {
     acceptances: Vec<(AcceptanceId, Acceptance)>,
 }
 
+/// Items, by position, joined into groups: each group is named by its
+/// first item.
+struct Groups(Vec<usize>);
+
+impl Groups {
+    /// `len` items, each in a group of its own.
+    fn new(len: usize) -> Self {
+        Self((0..len).collect())
+    }
+
+    /// The first item of the group of the one `at`.
+    fn root(&mut self, mut at: usize) -> usize {
+        while self.0[at] != at {
+            self.0[at] = self.0[self.0[at]];
+            at = self.0[at];
+        }
+        at
+    }
+
+    /// Joins the groups of `a` and `b`.
+    fn join(&mut self, a: usize, b: usize) {
+        let (a, b) = (self.root(a), self.root(b));
+        self.0[a.max(b)] = a.min(b);
+    }
+}
+
 impl Transfer {
-    /// Adds `revisions`, in order, and returns `statements`.
+    /// Adds `revisions`, each in one request with the reserved statements
+    /// of `statements` about it, such as its conflicts or its abandonment,
+    /// and the statements those need: so the remote never has a revision
+    /// without them. Those go after the last revision they need, in one
+    /// request with every revision from the first they're about. Returns
+    /// the other statements.
     fn add_revisions(
         &mut self,
         revisions: &[(RevisionId, Revision)],
         statements: Vec<(StatementId, Statement)>,
     ) -> Vec<(StatementId, Statement)> {
-        for (id, revision) in revisions {
+        let sent: HashMap<RecordId, usize> = revisions
+            .iter()
+            .enumerate()
+            .map(|(at, &(id, _))| (RecordId::Revision(id), at))
+            .collect();
+        let position = Self::positions(&statements);
+        // Those that go with a revision, grouped with those they need,
+        // which come before them.
+        let mut with: Vec<bool> = statements
+            .iter()
+            .map(|(_, statement)| {
+                statement.kind.is_reserved() && sent.contains_key(&statement.subject)
+            })
+            .collect();
+        let mut groups = Groups::new(statements.len());
+        for at in (0..statements.len()).rev() {
+            if !with[at] {
+                continue;
+            }
+            for (needed, _) in Dependencies::of_statement(&statements[at].1).records {
+                if let Some(&other) = position.get(&needed) {
+                    with[other] = true;
+                    groups.join(at, other);
+                }
+            }
+        }
+        // Each group's revisions: the first a reserved one is about, and
+        // the last any needs.
+        let mut spans: HashMap<usize, (usize, usize)> = HashMap::new();
+        for (at, (_, statement)) in statements.iter().enumerate() {
+            if let Some(&revision) = sent.get(&statement.subject)
+                && with[at]
+            {
+                let span = spans.entry(groups.root(at)).or_insert((usize::MAX, 0));
+                if statement.kind.is_reserved() {
+                    span.0 = span.0.min(revision);
+                }
+                span.1 = span.1.max(revision);
+            }
+        }
+        let mut joined = vec![false; revisions.len()];
+        let mut after = vec![Vec::new(); revisions.len()];
+        for &(first, last) in spans.values() {
+            joined[first + 1..=last].fill(true);
+        }
+        for at in (0..statements.len()).filter(|&at| with[at]) {
+            after[spans[&groups.root(at)].1].push(statements[at].0);
+        }
+        for (((id, revision), joined), after) in revisions.iter().zip(joined).zip(after) {
+            if joined {
+                self.joined.insert((*id).into());
+            }
             self.ids.push((*id).into());
             self.revisions.insert(
                 (*id).into(),
                 (revision.change, revision.predecessors.clone()),
             );
+            for statement in after {
+                self.joined.insert(statement.into());
+                self.ids.push(statement.into());
+            }
         }
         statements
+            .into_iter()
+            .zip(with)
+            .filter_map(|(statement, with)| (!with).then_some(statement))
+            .collect()
     }
 
-    /// Adds `statements`, in order.
+    /// Adds `statements`, each after those of them it needs, so that those
+    /// about one record, with those they need or that need them, go in
+    /// one request: then a landing waiting on the record never takes a
+    /// result whose replacement, or the change's abandonment, is still to
+    /// come.
     fn add_statements(&mut self, statements: &[(StatementId, Statement)]) {
-        self.ids
-            .extend(statements.iter().map(|&(id, _)| ObjectId::from(id)));
+        let position = Self::positions(statements);
+        let mut groups = Groups::new(statements.len());
+        let mut about: HashMap<RecordId, usize> = HashMap::new();
+        for (at, (_, statement)) in statements.iter().enumerate() {
+            let same_subject = *about.entry(statement.subject).or_insert(at);
+            let needed = Dependencies::of_statement(statement)
+                .records
+                .into_iter()
+                .filter_map(|(id, _)| position.get(&id).copied());
+            for other in iter::once(same_subject).chain(needed) {
+                groups.join(at, other);
+            }
+        }
+        let mut members: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        for at in 0..statements.len() {
+            members.entry(groups.root(at)).or_default().push(at);
+        }
+        for members in members.into_values() {
+            for (nth, at) in members.into_iter().enumerate() {
+                let id = statements[at].0.into();
+                if nth > 0 {
+                    self.joined.insert(id);
+                }
+                self.ids.push(id);
+            }
+        }
+    }
+
+    /// Where each of `statements` is among them.
+    fn positions(statements: &[(StatementId, Statement)]) -> HashMap<ObjectId, usize> {
+        statements
+            .iter()
+            .enumerate()
+            .map(|(at, &(id, _))| (id.into(), at))
+            .collect()
     }
 
     /// The heads the changes of `revisions`, which a request sends, must
@@ -1282,7 +1414,7 @@ mod tests {
 
     use origin_platform::Native;
     use origin_shared::event::Filter;
-    use origin_shared::{AcceptanceBody, NodeKey, RepoPath, Verdict};
+    use origin_shared::{AcceptanceBody, Kind, NodeKey, RepoPath, Verdict};
 
     use super::*;
     use crate::events::Events;
@@ -1905,6 +2037,201 @@ mod tests {
         assert_eq!(transfer.expect(&[r1.into()]), expected(vec![r0]));
         assert_eq!(transfer.expect(&[r2.into()]), expected(vec![r1]));
         assert_eq!(transfer.expect(&[]), []);
+    }
+
+    #[test]
+    fn revisions_go_with_their_reserved_statements() {
+        let [first, second] = [1, 2].map(|n| RevisionId::from(ObjectId::from_bytes([n; 32])));
+        let revision = |change| Revision {
+            change: ChangeId::from_bytes([change; 16]),
+            predecessors: Vec::new(),
+            base: Base::Revision(first),
+            deps: Vec::new(),
+            snapshot: TreeId::from(ObjectId::from_bytes([3; 32])),
+            description: ObjectId::from_bytes([4; 32]).into(),
+            author: "user:ada".parse().unwrap(),
+        };
+        let conflict = Statement {
+            kind: Kind::CONFLICT,
+            ..ci_test(first, "user:ada")
+        };
+        let result = ci_test(first, "user:ada");
+        let abandon = Statement {
+            kind: Kind::ABANDON,
+            ..ci_test(second, "user:ada")
+        };
+        // About the second, but it needs the first's conflict: all go in
+        // one request with both revisions.
+        let listing = Statement {
+            supersedes: Some(conflict.encode().id().into()),
+            ..Statement {
+                kind: Kind::CONFLICT,
+                ..ci_test(second, "user:ada")
+            }
+        };
+        let statements: Vec<_> = [conflict, result, abandon, listing]
+            .into_iter()
+            .map(|statement| (statement.encode().id().into(), statement))
+            .collect();
+        let [conflict, result, abandon, listing] =
+            [0, 1, 2, 3].map(|at| ObjectId::from(statements[at].0));
+        let mut transfer = Transfer::default();
+        let others =
+            transfer.add_revisions(&[(first, revision(1)), (second, revision(2))], statements);
+        assert_eq!(
+            others
+                .iter()
+                .map(|&(id, _)| id.into())
+                .collect::<Vec<ObjectId>>(),
+            [result]
+        );
+        assert_eq!(
+            transfer.ids,
+            [first.into(), second.into(), conflict, abandon, listing]
+        );
+        assert_eq!(
+            transfer.joined,
+            HashSet::from([second.into(), conflict, abandon, listing])
+        );
+
+        // Alone, each goes right after its revision.
+        let alone = |statement: Statement| (statement.encode().id().into(), statement);
+        let statements = vec![
+            alone(Statement {
+                kind: Kind::ABANDON,
+                ..ci_test(first, "user:ada")
+            }),
+            alone(Statement {
+                kind: Kind::DIVERGENT,
+                ..ci_test(second, "user:ada")
+            }),
+        ];
+        let [abandon, divergent] = [0, 1].map(|at| ObjectId::from(statements[at].0));
+        let mut transfer = Transfer::default();
+        transfer.add_revisions(&[(first, revision(1)), (second, revision(2))], statements);
+        assert_eq!(
+            transfer.ids,
+            [first.into(), abandon, second.into(), divergent]
+        );
+        assert_eq!(transfer.joined, HashSet::from([abandon, divergent]));
+    }
+
+    #[test]
+    fn statements_about_one_record_go_in_one_request() {
+        let [first, second] = [1, 2].map(|n| RevisionId::from(ObjectId::from_bytes([n; 32])));
+        let pass = ci_test(first, "user:ada");
+        let pass_id = StatementId::from(pass.encode().id());
+        let fail = Statement {
+            verdict: Some(Verdict::Fail),
+            supersedes: Some(pass_id),
+            ..pass.clone()
+        };
+        let other = ci_test(second, "user:ada");
+        // About the result, and what it needs: in one request with it.
+        let flaky = Statement {
+            subject: RecordId::Statement(pass_id),
+            kind: "flaky".parse().unwrap(),
+            ..other.clone()
+        };
+        let statements: Vec<_> = [pass, other, fail, flaky]
+            .into_iter()
+            .map(|statement| (statement.encode().id().into(), statement))
+            .collect();
+        let mut transfer = Transfer::default();
+        transfer.add_statements(&statements);
+        let [pass, other, fail, flaky] = [0, 1, 2, 3].map(|at| ObjectId::from(statements[at].0));
+        assert_eq!(transfer.ids, [pass, fail, flaky, other]);
+        assert_eq!(transfer.joined, HashSet::from([fail, flaky]));
+    }
+
+    #[test]
+    fn a_push_in_parts_never_lands_an_abandoned_revision() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        // Requests of one object, or of the default size, which the
+        // revision and its content fill.
+        for fill in [false, true] {
+            let server = Repo::new(MAIN_RULES);
+            let client = Client::new(&server);
+            client.sync().fetch_chains(&[TargetName::MAIN]).unwrap();
+            let revision = if fill {
+                let mut revision = Revision {
+                    change: ChangeId::from_bytes([1; 16]),
+                    predecessors: Vec::new(),
+                    base: main_tip(&client.store),
+                    deps: Vec::new(),
+                    snapshot: build(&client.store, &[("a", "gone")]),
+                    description: EncodedObject::blob(b"").id().into(),
+                    author: "user:ada".parse().unwrap(),
+                };
+                client
+                    .store
+                    .write_all(&[EncodedObject::blob(b"gone")])
+                    .unwrap();
+                let wire = |objects: Vec<EncodedObject>| Pack { objects }.encode().len();
+                let content = client
+                    .store
+                    .added(revision.snapshot, &[], &[])
+                    .unwrap()
+                    .iter()
+                    .map(|placed| client.store.read(placed.entry.id).unwrap())
+                    .collect();
+                let room = Pack::LIMIT
+                    - wire(content)
+                    - wire(vec![revision.encode(), EncodedObject::blob(b"")]);
+                let description = EncodedObject::blob(&vec![b'x'; room]);
+                revision.description = description.id().into();
+                let revision = revision.encode();
+                client
+                    .store
+                    .write_all(&[description, revision.clone()])
+                    .unwrap();
+                revision.id().into()
+            } else {
+                client.revision(1, &[], main_tip(&client.store), &[("a", "gone")])
+            };
+            let abandonment = Statement {
+                kind: Kind::ABANDON,
+                verdict: None,
+                ..ci_test(revision, "user:ada")
+            }
+            .encode();
+            client
+                .store
+                .write_all(std::slice::from_ref(&abandonment))
+                .unwrap();
+            // The remote can't take the abandonment, unless this runs as
+            // root, who writes there anyway: the shard is theirs.
+            let hex = abandonment.id().to_hex();
+            let shard = server.store.root().join("objects/loose").join(&hex[..2]);
+            std::fs::create_dir_all(&shard).unwrap();
+            let root = std::fs::metadata(&shard).unwrap().uid() == 0;
+            std::fs::set_permissions(&shard, std::fs::Permissions::from_mode(0o555)).unwrap();
+            let limit = if fill { Pack::LIMIT } else { 1 };
+            let pushed = client
+                .sync()
+                .with_pack_limit(limit)
+                .push(&[ChangeId::from_bytes([1; 16])]);
+            std::fs::set_permissions(&shard, std::fs::Permissions::from_mode(0o755)).unwrap();
+            if !root {
+                assert!(pushed.is_err(), "{pushed:?}");
+                assert!(!server.store.contains(revision.into()).unwrap());
+            }
+            // Pushed again, it's abandoned there too.
+            let change = ChangeId::from_bytes([1; 16]);
+            client
+                .sync()
+                .with_pack_limit(limit)
+                .push(&[change])
+                .unwrap();
+            let landed =
+                server
+                    .queue()
+                    .land_change(&mut server.annotations(), change, &TargetName::MAIN);
+            assert!(
+                matches!(landed, Err(crate::queue::LandError::Abandoned(_))),
+                "{landed:?}"
+            );
+        }
     }
 
     #[test]
