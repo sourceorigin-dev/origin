@@ -16,9 +16,15 @@
 //!    statement about the revision lists the paths, and the change waits,
 //!    blocked, until a new revision of it merges.
 //! 3. **Policy.** The policy in force now must name this node as the
-//!    target's authority.
-//! 4. **Otherwise** this node signs an acceptance naming what landed and
-//!    the policy, and appends it to the target's chain.
+//!    target's authority. Each of the target's requirements needs a
+//!    [claim](crate::annotations::Claim) about the revision that lands:
+//!    results with the same input digest are promoted to it first, and a
+//!    valid promotion claims what its original does, as its original's
+//!    issuer.
+//! 4. **Missing evidence** leaves the landing waiting, until the statements
+//!    are issued and the landing is retried.
+//! 5. **Otherwise** this node signs an acceptance naming what landed, the
+//!    evidence and the policy, and appends it to the target's chain.
 //!
 //! The queue of each target lives in `queue/<target id>/`: a `lock` held
 //! while landing, so landings on one target never race.
@@ -37,7 +43,7 @@ use origin_shared::{
 };
 
 use crate::annotations::{AnnotateError, Annotations};
-use crate::policy::{Policy, PolicyError};
+use crate::policy::{Policy, PolicyError, Requirement};
 use crate::store::{Store, StoreError};
 use crate::targets::Head;
 
@@ -83,7 +89,8 @@ pub struct Pending {
     pub onto: TargetName,
     /// What lands.
     pub proposal: Proposal,
-    /// The revision that didn't merge.
+    /// What the evidence must be about: the revision that would land. A
+    /// conflict is about the revision that didn't merge.
     pub subject: RecordId,
     /// Why it waits.
     pub blocked: Blocked,
@@ -92,6 +99,8 @@ pub struct Pending {
 /// Why a landing waits.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Blocked {
+    /// The target requires these statements about the subject.
+    Evidence(Vec<Requirement>),
     /// Both sides changed these paths. The `core.conflict` statement lists
     /// them too.
     Conflict {
@@ -256,6 +265,7 @@ impl<'a, P: Platform> Queue<'a, P> {
         Ok(Session {
             queue: self,
             onto: onto.clone(),
+            policy,
             policy_head,
             state: self.store.get(tip.acceptance)?.body().state,
             tip,

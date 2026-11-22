@@ -1,16 +1,18 @@
-//! Landing one candidate: rebasing it onto the target's tip, and appending
-//! its acceptance, or keeping it to wait on a conflict.
+//! Landing one candidate: rebasing it onto the target's tip, checking
+//! the evidence the policy requires, and appending its acceptance, or
+//! keeping it to wait.
 
 use std::collections::HashSet;
 
 use origin_platform::{LockedFile, Platform};
 use origin_shared::{
     AcceptanceBody, AcceptanceId, Base, ChangeId, EncodedObject, Kind, Record, RecordId, Revision,
-    RevisionId, Source, TargetName, TreeId,
+    RevisionId, Source, StatementId, TargetName, TreeId,
 };
 
-use crate::annotations::Annotations;
+use crate::annotations::{AnnotateError, Annotations, Claim};
 use crate::conflict::Conflicts;
+use crate::policy::{Policy, Requirement};
 use crate::store::{Store, StoreError};
 use crate::targets::Head;
 
@@ -20,7 +22,8 @@ use super::{Blocked, LandError, Landing, Pending, Proposal, Queue};
 pub(super) struct Session<'q, 'a, P> {
     pub(super) queue: &'q Queue<'a, P>,
     pub(super) onto: TargetName,
-    /// The acceptance of `policy` holding the policy in force.
+    pub(super) policy: Policy,
+    /// The acceptance of `policy` holding `policy`.
     pub(super) policy_head: AcceptanceId,
     /// The target's latest acceptance, and its snapshot.
     pub(super) tip: Head,
@@ -33,7 +36,11 @@ pub(super) struct Session<'q, 'a, P> {
 pub(super) struct Candidate {
     /// What lands.
     pub(super) proposal: Proposal,
+    /// What waits, if it waits: the landing of the stack it's in.
+    pub(super) kept_as: Proposal,
     pub(super) source: Source,
+    /// What the evidence must be about.
+    pub(super) subject: RecordId,
     /// The target's snapshot once it lands.
     pub(super) state: TreeId,
     /// The trees the merge made, to write first.
@@ -146,7 +153,9 @@ impl<P: Platform> Session<'_, '_, P> {
         if revision.base == tip {
             return self.submit(Candidate {
                 proposal,
+                kept_as: stack.clone(),
                 source: Source::Revision(id),
+                subject: RecordId::Revision(id),
                 state: merge.tree,
                 trees: merge.trees,
                 revision: None,
@@ -163,29 +172,68 @@ impl<P: Platform> Session<'_, '_, P> {
         let rebased_id = RevisionId::from(rebased.id());
         self.submit(Candidate {
             proposal,
+            kept_as: stack.clone(),
             source: Source::Revision(rebased_id),
+            subject: RecordId::Revision(rebased_id),
             state: merge.tree,
             trees: merge.trees,
             revision: Some(rebased),
         })
     }
 
-    /// Lands `candidate`. Writes the records in layers, each durable before
-    /// the next refers to it: the trees, then the rebased revision and the
-    /// acceptance.
+    /// Checks the policy for `candidate`, and lands it if its evidence is
+    /// there, or keeps it waiting. Writes the records in layers, each
+    /// durable before the next refers to it: the trees, then the rebased
+    /// revision, then the promoted statements and the acceptance.
     pub(super) fn submit(&mut self, candidate: Candidate) -> Result<Landing, LandError> {
         let store = self.queue.store;
         if !candidate.trees.is_empty() {
             store.write_all(&candidate.trees)?;
         }
         let mut records: Vec<EncodedObject> = candidate.revision.into_iter().collect();
+        let requirements = self.policy.requirements(&self.onto).to_vec();
+        let mut evidence = Vec::new();
+        let mut missing = Vec::new();
+        if !requirements.is_empty() {
+            // Promotion reads the revision.
+            store.write_all(&records)?;
+            records.clear();
+            let promotions = self
+                .annotations
+                .promotions(candidate.subject, &self.queue.principal())?;
+            let mut claims = self.annotations.claims(candidate.subject)?;
+            for promotion in promotions {
+                let encoded = promotion.encode();
+                let claim = store.claim(encoded.id().into(), promotion)?;
+                claims.push(claim.map_err(AnnotateError::from)?);
+                records.push(encoded);
+            }
+            for requirement in requirements {
+                match self.evidence(&claims, &requirement) {
+                    Some(id) if !evidence.contains(&id) => evidence.push(id),
+                    Some(_) => {}
+                    None => missing.push(requirement),
+                }
+            }
+        }
+        if !missing.is_empty() {
+            store.write_all(&records)?;
+            let pending = Pending {
+                onto: self.onto.clone(),
+                proposal: candidate.kept_as,
+                subject: candidate.subject,
+                blocked: Blocked::Evidence(missing),
+            };
+            return Ok(Landing::Pending(pending));
+        }
+
         let acceptance = AcceptanceBody {
             target: self.onto.id(),
             seq: self.tip.seq + 1,
             prev: Some(self.tip.acceptance),
             state: candidate.state,
             landed: vec![candidate.source],
-            evidence: Vec::new(),
+            evidence,
             policy: Some(self.policy_head),
         }
         .sign(self.queue.key);
@@ -202,6 +250,21 @@ impl<P: Platform> Session<'_, '_, P> {
             source: candidate.source,
             acceptance: self.tip,
         })
+    }
+
+    /// The first of `claims` that meets `requirement`: of the kind and
+    /// verdict required, from an issuer the policy admits, which for a
+    /// promotion is its original's.
+    fn evidence(&self, claims: &[Claim], requirement: &Requirement) -> Option<StatementId> {
+        claims
+            .iter()
+            .find(|claim| {
+                let claimed = claim.claimed();
+                claimed.kind == requirement.kind
+                    && claimed.verdict == Some(requirement.verdict)
+                    && self.policy.admits(&requirement.issuer, &claimed.issuer)
+            })
+            .map(Claim::id)
     }
 
     /// Blocks a landing on `conflicts`: issues a `core.conflict` statement
