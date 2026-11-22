@@ -21,7 +21,9 @@
 //! the lock. Such a process escapes, and so does one that closed the files
 //! it inherited, as processes Python's `subprocess` starts do, and every
 //! leftover where the platform can't tell which files a group holds, as on
-//! macOS: leaking a process beats killing someone else's. A command a
+//! macOS: leaking a process beats killing someone else's. One that keeps
+//! the lock fails the next command started in the checkout, which waits
+//! for it only [`Checkout::GRACE`]. A command a
 //! worker killed with `kill -9` left running still runs until the next
 //! sweep: dying with the worker would need code run between `fork` and
 //! `exec`, which takes `unsafe`.
@@ -38,6 +40,8 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{self, Child, Command};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use origin_platform::{LockMode, LockedFile, Native, Processes};
 use origin_shared::object::DecodeError;
@@ -272,6 +276,10 @@ impl State {
 }
 
 impl Checkout {
+    /// How long the processes [`Checkout::stop`] killed may take to die,
+    /// releasing what they held: the lock, and the command's output.
+    pub const GRACE: Duration = Duration::from_secs(5);
+
     /// The directory holding the files.
     #[must_use]
     pub fn path(&self) -> &Path {
@@ -303,15 +311,27 @@ impl Checkout {
     /// Starts `command` in the checkout, in a process group of its own,
     /// which inherits the checkout's `held` file, locked: so its processes
     /// hold the lock while any of them lives (see the module). Commands
-    /// must start one at a time, as others would inherit it too.
+    /// must start one at a time, as others would inherit it too. It waits
+    /// up to [`Checkout::GRACE`] for the processes of the last command,
+    /// which [`Checkout::stop`] killed, to release the lock.
     ///
     /// # Errors
     ///
-    /// Fails if the lock or the group's file cannot be written, or the
-    /// command cannot be started.
+    /// Fails if a process of an earlier command, which escaped being
+    /// stopped, still holds the lock after that, if the lock or the group's
+    /// file cannot be written, or if the command cannot be started.
     pub fn spawn(&self, mut command: Command) -> Result<Child, StateError> {
         let path = self.held();
-        let held = LockedFile::open(&self.platform, &path, LockMode::Exclusive)?;
+        let deadline = Instant::now() + Self::GRACE;
+        let held = loop {
+            if let Some(held) = LockedFile::try_open(&self.platform, &path, LockMode::Exclusive)? {
+                break held;
+            }
+            if Instant::now() >= deadline {
+                return Err(StateError::Held(path));
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
         self.platform
             .inherit(&held)
             .map_err(|source| StateError::io(&path, source))?;
@@ -379,6 +399,25 @@ impl Checkout {
     }
 }
 
+#[cfg(test)]
+impl Checkout {
+    /// An empty snapshot checked out in a new state, kept in `base`.
+    pub(crate) fn empty(base: &Path) -> Self {
+        use origin_shared::Record;
+
+        let url = RemoteUrl::parse(base.join("repo").to_str().unwrap()).unwrap();
+        let state = State::new(base, &url).unwrap();
+        let root = Tree::default().encode();
+        let snapshot = Snapshot::new(
+            root.id().into(),
+            Pack {
+                objects: vec![root],
+            },
+        );
+        state.checkout(&snapshot).unwrap()
+    }
+}
+
 impl Drop for Checkout {
     fn drop(&mut self) {
         // Best effort: the next run sweeps what's left.
@@ -400,6 +439,10 @@ pub enum StateError {
         /// What went wrong.
         source: io::Error,
     },
+    /// A process an earlier command started escaped being stopped, and
+    /// still holds the checkout's lock.
+    #[error("a process an earlier command started still holds {}", .0.display())]
+    Held(PathBuf),
     /// A file holds something unexpected.
     #[error("{} is malformed", .0.display())]
     Malformed(PathBuf),
@@ -432,8 +475,6 @@ impl StateError {
 mod tests {
     use std::process::Stdio;
 
-    use origin_shared::Record;
-
     use super::*;
 
     /// A command's group ended, but a process it started in a session of
@@ -442,16 +483,7 @@ mod tests {
     #[test]
     fn stopping_a_command_never_kills_a_group_that_took_its_number() {
         let base = tempfile::tempdir().unwrap();
-        let url = RemoteUrl::parse(base.path().join("repo").to_str().unwrap()).unwrap();
-        let state = State::new(base.path(), &url).unwrap();
-        let root = Tree::default().encode();
-        let snapshot = Snapshot::new(
-            root.id().into(),
-            Pack {
-                objects: vec![root],
-            },
-        );
-        let checkout = state.checkout(&snapshot).unwrap();
+        let checkout = Checkout::empty(base.path());
         let mut escaped = Command::new("sleep");
         escaped.arg("60");
         let mut escaped = checkout.spawn(escaped).unwrap();
@@ -472,5 +504,21 @@ mod tests {
             child.kill().unwrap();
             child.wait().unwrap();
         }
+    }
+
+    /// A process of a command that escaped being stopped still holds the
+    /// lock: the next command fails once the grace is over, rather than
+    /// wait for it.
+    #[test]
+    fn a_command_never_waits_past_the_grace_for_one_that_escaped() {
+        let base = tempfile::tempdir().unwrap();
+        let checkout = Checkout::empty(base.path());
+        let mut escaped = Command::new("sleep");
+        escaped.arg("60");
+        let mut escaped = checkout.spawn(escaped).unwrap();
+        let next = checkout.spawn(Command::new("true"));
+        escaped.kill().unwrap();
+        escaped.wait().unwrap();
+        assert!(matches!(next, Err(StateError::Held(_))), "{next:?}");
     }
 }

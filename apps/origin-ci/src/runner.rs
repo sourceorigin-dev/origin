@@ -36,6 +36,7 @@ use std::fmt;
 use std::io::{self, Read};
 use std::panic;
 use std::process::{Command, ExitStatus, Stdio};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -491,8 +492,10 @@ impl Runner {
     /// exited and what `read` makes of the pipe `reader` reads. The pipe is
     /// read on a thread until the command exits and what it left running
     /// is stopped, which closes their copies of it: so nothing it left
-    /// running keeps the runner waiting, unless it escaped being stopped
-    /// (see [`state`](crate::state)).
+    /// running keeps the runner waiting. One that escaped being stopped
+    /// (see [`state`](crate::state)) and keeps the pipe open past
+    /// [`Checkout::GRACE`] fails the command, leaving the thread to it,
+    /// rather than give output it may have cut short.
     fn collect(
         checkout: &Checkout,
         shell: Command,
@@ -504,12 +507,19 @@ impl Runner {
         // the pipe.
         let mut child = checkout.spawn(shell)?;
         let group = child.id();
-        let output = thread::spawn(move || read(reader));
+        let (sender, received) = mpsc::channel();
+        // The receiver is gone if it gave up waiting.
+        let reading = thread::spawn(move || drop(sender.send(read(reader))));
         let status = child.wait();
         checkout.stop(group)?;
-        let output = output
-            .join()
-            .unwrap_or_else(|panic| panic::resume_unwind(panic));
+        let output = match received.recv_timeout(Checkout::GRACE) {
+            Ok(output) => output,
+            Err(RecvTimeoutError::Timeout) => return Err(RunError::OutputHeld(kind.clone())),
+            // It panicked before sending.
+            Err(RecvTimeoutError::Disconnected) => {
+                panic::resume_unwind(reading.join().expect_err("the reader sent nothing"))
+            }
+        };
         let failed = |source| RunError::command(kind, source);
         Ok((status.map_err(failed)?, output.map_err(failed)?))
     }
@@ -651,6 +661,10 @@ pub enum RunError {
         /// What went wrong.
         source: io::Error,
     },
+    /// A process a command started escaped being stopped, and keeps its
+    /// output open.
+    #[error("a process the command of `{0}` started still holds its output open")]
+    OutputHeld(Kind),
     /// A toolchain command failed.
     #[error("the toolchain command of `{kind}`, `{command}`, failed: {status}")]
     Toolchain {
@@ -688,5 +702,29 @@ impl RunError {
             kind: kind.clone(),
             source,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Something keeps a command's output open past the grace, as a
+    /// process that escaped being stopped would: the command fails, rather
+    /// than wait for it.
+    #[test]
+    fn a_command_never_waits_past_the_grace_for_its_output() {
+        let base = tempfile::tempdir().unwrap();
+        let checkout = Checkout::empty(base.path());
+        let (reader, writer) = io::pipe().unwrap();
+        let mut shell = Runner::shell("true");
+        shell.stdout(writer.try_clone().unwrap());
+        let kind = Kind::new("ci.test").unwrap();
+        let collected = Runner::collect(&checkout, shell, reader, Runner::read_output, &kind);
+        drop(writer);
+        assert!(
+            matches!(collected, Err(RunError::OutputHeld(_))),
+            "{collected:?}"
+        );
     }
 }

@@ -622,17 +622,15 @@ fn checks_leave_nothing_running_once_they_end_or_their_run_is_killed() {
     // What a check leaves running is killed once it ends, without waiting
     // for it to close the output it holds; where the platform can't tell
     // which group still holds what it started, it escapes instead, and the
-    // run waits for it to close that output.
+    // check fails once it has held that output open a few seconds.
     check("sleep 60 & echo $! > {started}");
     let ran = Instant::now();
     let output = repo.run(repo.root(), &["ci", "run"]);
-    assert!(output.status.success());
-    if Native::SEES_HELD_FILES {
-        assert!(
-            ran.elapsed() < Duration::from_secs(30),
-            "it waited for sleep"
-        );
-    }
+    assert_eq!(output.status.success(), Native::SEES_HELD_FILES);
+    assert!(
+        ran.elapsed() < Duration::from_secs(30),
+        "it waited for sleep"
+    );
     ended(&written(&started));
 
     // A run killed while its check runs leaves it running, until the next
