@@ -12,7 +12,9 @@ use clap::{Args, CommandFactory, Parser, Subcommand};
 use origin_shared::{Digest, Inputs, Kind, RepoPath, TargetName, Verdict};
 
 use crate::config::UserConfig;
+use crate::events::Filter;
 use crate::oplog::Actor;
+use crate::policy::KindPattern;
 use crate::workspace::{Annotated, Payload, Workspace};
 
 /// A modern, git-compatible source control system.
@@ -154,6 +156,21 @@ enum WorkspaceCommand {
     /// Move this workspace's working copy back to where it was before its
     /// latest operation. Records and targets stay as they are.
     Undo,
+    /// Print events as they happen, one a line, starting with the cursor to
+    /// resume from. Runs until interrupted.
+    Watch {
+        /// Only events of this name, such as `check.requested`, or about
+        /// statements of this kind, such as `core.conflict` or `ci.*`.
+        #[arg(long)]
+        kind: Vec<KindPattern>,
+        /// Only events about this: a revision or change id prefix, or a
+        /// target name.
+        #[arg(long)]
+        subject: Vec<String>,
+        /// Start after this cursor instead of now: `0` for every event kept.
+        #[arg(long)]
+        since: Option<u64>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -474,6 +491,17 @@ impl WorkspaceCommand {
             Self::Workspace(WorkspacesCommand::Rm { path }) => workspace.remove_workspace(&path)?,
             Self::Op(OpCommand::Log { limit }) => workspace.op_log(limit)?,
             Self::Undo => workspace.undo()?,
+            Self::Watch {
+                kind,
+                subject,
+                since,
+            } => workspace.watch(
+                &Filter {
+                    kinds: kind,
+                    subjects: subject,
+                },
+                since,
+            )?,
         }
         Ok(())
     }

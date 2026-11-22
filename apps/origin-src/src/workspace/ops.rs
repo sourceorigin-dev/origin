@@ -1,4 +1,4 @@
-//! The op log commands: `op log` and `undo`.
+//! The op log commands: `op log`, `undo` and `watch`.
 //!
 //! `undo` takes back the latest operation of the workspace it runs in that
 //! moved its working copy, other than recording its draft: it moves the
@@ -18,10 +18,12 @@
 //! diverge.
 
 use std::collections::{BTreeMap, HashSet};
+use std::time::Duration;
 
 use origin_shared::{Record, RecordId, Revision, RevisionId};
 
 use super::{Workspace, WorkspaceError};
+use crate::events::{Events, Filter};
 use crate::index;
 use crate::oplog::{Effect, Entry, Move, Why};
 use crate::queue::Proposal;
@@ -201,5 +203,27 @@ impl Workspace {
             }
         }
         Err(WorkspaceError::NothingToUndo)
+    }
+
+    /// `origin watch [--kind <kind>]... [--subject <subject>]... [--since
+    /// <cursor>]`: prints the events that pass `filter` as they happen, one
+    /// a line, from `since`, or from now. Runs until interrupted.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the cursor expired, or the op log or a record cannot be read.
+    pub fn watch(&self, filter: &Filter, since: Option<u64>) -> Result<(), WorkspaceError> {
+        let events = Events::new(&self.store);
+        let mut cursor = match since {
+            Some(since) => since,
+            None => events.end()?,
+        };
+        loop {
+            let page = events.wait(cursor, filter, 256, Duration::from_secs(60))?;
+            for event in &page.events {
+                println!("{event}");
+            }
+            cursor = page.next;
+        }
     }
 }

@@ -47,6 +47,7 @@ origin workspace list | rm <path>
 
 origin op log [-n <count>]          # what this node did, operation by operation, in every workspace
 origin undo                         # move this workspace's working copy back one operation
+origin watch [--kind <kind>] [--subject <id>] [--since <cursor>]  # events, as they happen
 ```
 
 Landing rebases a change onto the target's tip, file by file, checks the
@@ -74,7 +75,11 @@ Every node keeps an op log of what it did: records written, landings left
 waiting and working copies moved, numbered in order. `origin undo` only
 moves the working copy of the workspace it runs in back to where it was
 before its latest operation; records and targets stay as they are, so an
-undone landing still landed.
+undone landing still landed. `origin watch` prints events derived from the
+op log, one a line starting with a cursor: `statement.issued`,
+`revision.created`, `target.advanced` and `check.requested`. `--kind`
+takes an event name or a statement kind (`core.conflict`, `ci.*`), and
+`--since` resumes after a cursor.
 
 Changes are named by a unique prefix of their id, or `@` for the working
 copy's. A revision is `@`, a change (for its head), or a unique prefix of
