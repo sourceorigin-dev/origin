@@ -86,9 +86,9 @@ use std::sync::OnceLock;
 use origin_platform::{LockMode, LockedFile, Native};
 use origin_shared::api::{LogQuery, RevisionEntry, Revisions};
 use origin_shared::{
-    AcceptanceId, AttachmentId, Base, ChangeId, EncodedObject, Kind, Principal, Record, RecordId,
-    RepoPath, Revision, RevisionId, Source, Statement, StatementId, TargetId, TargetName, Tree,
-    TreeId,
+    AcceptanceId, AttachmentId, Base, ChangeId, EncodedObject, Kind, ObjectKind, Principal, Record,
+    RecordId, RepoPath, Revision, RevisionId, Source, Statement, StatementId, TargetId, TargetName,
+    Tree, TreeId,
 };
 
 use crate::ancestry::Ancestry;
@@ -727,12 +727,54 @@ impl Workspace {
     }
 
     /// Writes `layers` of objects in order, each durable before the next,
-    /// so objects may refer to those of earlier layers.
+    /// so objects may refer to those of earlier layers. Revisions are
+    /// published holding the lock of every publication of revisions (see
+    /// [`Workspace::publishing`]).
     fn write(&self, layers: &[Vec<EncodedObject>]) -> Result<(), WorkspaceError> {
+        let mut publishing = None;
         for layer in layers.iter().filter(|layer| !layer.is_empty()) {
+            if publishing.is_none() {
+                publishing = self.publishing(layer)?;
+            }
             self.store.write_all(layer)?;
         }
         Ok(())
+    }
+
+    /// Takes the lock every publication of revisions takes (see
+    /// [`Store::lock_pushes`]) if `objects` hold a revision, once no
+    /// revision they hold evolves from one the landing queue rebased since
+    /// the command looked: the queue checks a change's heads under it
+    /// before it publishes a rebase, so the change never diverges.
+    fn publishing(&self, objects: &[EncodedObject]) -> Result<Option<LockedFile>, WorkspaceError> {
+        let mut revisions = Vec::new();
+        for object in objects {
+            if object.kind().ok() == Some(ObjectKind::Revision) {
+                let revision: Revision =
+                    object.decode_as().map_err(|source| StoreError::Decode {
+                        id: object.id(),
+                        source,
+                    })?;
+                revisions.push(revision);
+            }
+        }
+        if revisions.is_empty() {
+            return Ok(None);
+        }
+        let lock = self.store.lock_pushes()?;
+        let index = Index::open(&self.store)?;
+        for revision in &revisions {
+            for &predecessor in &revision.predecessors {
+                let before = self.store.get(predecessor)?;
+                if let Some(behind @ Behind::Rebased(_)) =
+                    self.behind(&index, predecessor, &before)?
+                {
+                    let behind = self.describe_behind(revision.change, &behind)?;
+                    return Err(WorkspaceError::Behind(behind));
+                }
+            }
+        }
+        Ok(Some(lock))
     }
 
     /// Durably records that the working copy, which has the files of

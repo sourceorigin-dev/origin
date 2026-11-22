@@ -2005,3 +2005,37 @@ fn watch_prints_events_from_a_cursor_or_as_they_happen() {
         "{issued}"
     );
 }
+
+#[test]
+fn revisions_never_follow_one_the_queue_rebased_meanwhile() {
+    let repo = Repo::new();
+    repo.write("file", "work\n");
+    repo.ok(&["describe", "Work"]);
+    let head: RevisionId = repo.revision().parse().unwrap();
+    let store = Store::new(repo.path(".origin"), Native::default());
+    // The queue checked the head is the change's only one, and is about to
+    // publish its rebase, while the user describes the change.
+    let publishing = store.lock_pushes().unwrap();
+    let describe = repo
+        .command(repo.root(), &["describe", "Edited"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    thread::sleep(Duration::from_millis(500));
+    let rebased = Revision {
+        predecessors: vec![head],
+        author: "node:queue".parse().unwrap(),
+        ..store.get(head).unwrap()
+    };
+    store.write_all(&[rebased.encode()]).unwrap();
+    drop(publishing);
+
+    // The description waited, then found the head rebased.
+    let described = describe.wait_with_output().unwrap();
+    let error = String::from_utf8_lossy(&described.stderr);
+    assert!(!described.status.success(), "{error}");
+    assert!(error.contains("rebased"), "{error}");
+    let status = repo.ok(&["status"]);
+    assert!(!status.contains("divergent"), "{status}");
+}
