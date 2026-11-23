@@ -8,7 +8,9 @@ use crate::{InvalidName, Kind, Principal, PrincipalName, Verdict};
 
 /// A statement that landing needs: of `kind`, with `verdict`, from one of
 /// `issuer`, about what lands.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, utoipa::ToSchema,
+)]
 pub struct Requirement {
     /// The statement's kind.
     pub kind: Kind,
