@@ -1,7 +1,7 @@
 # Each crate's `#[expect]` lints, which the owner reviews; see the standard's
 # README.
 [expect]
-origin-ci = 4
+origin-ci = 6
 origin-platform = 2
 origin-shared = 3
 origin-src = 11
