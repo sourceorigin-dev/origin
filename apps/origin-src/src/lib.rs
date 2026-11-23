@@ -8,6 +8,7 @@ pub mod config;
 pub mod conflict;
 #[cfg(feature = "fixture")]
 pub mod fixture;
+mod frames;
 pub mod index;
 pub mod output;
 pub mod policy;
