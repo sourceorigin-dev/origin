@@ -5,7 +5,7 @@
 //! use origin_shared::api::RepoName;
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! let client = Client::new("http://127.0.0.1:7878");
+//! let client = Client::new("http://127.0.0.1:7878").with_token("a long random secret");
 //! let repo = client.repo(RepoName::new("demo")?);
 //! for target in repo.targets().await? {
 //!     println!("{} is at #{}", target.name, target.head.seq);
@@ -115,11 +115,22 @@ endpoints! {
 
 /// A client for an origin server. Cloning it is cheap, and clones share
 /// their connections.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Client {
     http: reqwest::Client,
     /// The API's base URL, ending with `/`.
     api: String,
+    /// The bearer token sent with every request, if any.
+    token: Option<String>,
+}
+
+impl std::fmt::Debug for Client {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Client")
+            .field("api", &self.api)
+            .field("authenticated", &self.token.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl Client {
@@ -130,6 +141,18 @@ impl Client {
         Self {
             http: reqwest::Client::new(),
             api: format!("{}/api/v1/", url.trim_end_matches('/')),
+            token: None,
+        }
+    }
+
+    /// Returns the client with every request authenticated by `token`: a static
+    /// token from the server's configuration, or one the server issued. Without
+    /// a token, the server treats requests as anonymous, which may only read.
+    #[must_use]
+    pub fn with_token(self, token: impl Into<String>) -> Self {
+        Self {
+            token: Some(token.into()),
+            ..self
         }
     }
 
@@ -144,7 +167,11 @@ impl Client {
 
     /// Starts a request to `path`, relative to the API's base URL.
     fn request(&self, method: Method, path: &str) -> RequestBuilder {
-        self.http.request(method, format!("{}{path}", self.api))
+        let request = self.http.request(method, format!("{}{path}", self.api));
+        match &self.token {
+            Some(token) => request.bearer_auth(token),
+            None => request,
+        }
     }
 }
 

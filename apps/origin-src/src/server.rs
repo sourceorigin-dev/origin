@@ -11,13 +11,15 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
-use origin_shared::PrincipalName;
-use origin_shared::api::{RepoName, RepoSummary};
+use origin_shared::api::{EventsQuery, RepoName, RepoSummary};
+use origin_shared::{Period, PrincipalName};
 use serde::Deserialize;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
+use crate::auth::{Credentials, StaticTokens};
 use crate::config::KeyFile;
 use crate::http::Api;
 use crate::policy::Policy;
@@ -33,9 +35,13 @@ use crate::store::Store;
 ///
 /// [repos]
 /// origin = "repos/origin"   # name = path
+///
+/// [tokens]                  # static tokens, by principal
+/// "user:alice" = "a long random secret"
 /// ```
 ///
-/// Paths are relative to the file.
+/// Paths are relative to the file. Callers without a token are anonymous. The
+/// server also accepts the scoped tokens it signed.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
@@ -49,6 +55,9 @@ pub struct ServerConfig {
     /// The repositories to serve, by name.
     #[serde(default)]
     pub repos: BTreeMap<RepoName, PathBuf>,
+    /// Static tokens.
+    #[serde(default)]
+    pub tokens: StaticTokens,
 }
 
 impl ServerConfig {
@@ -125,7 +134,8 @@ impl ServerConfig {
             .with_writer(std::io::stderr)
             .init();
         let node = self.node()?;
-        let repositories = Repositories::open(self.repos, &node)?;
+        let credentials = Credentials::new(node.clone(), Box::new(self.tokens));
+        let repositories = Repositories::open(self.repos, &node, credentials)?;
         repositories.compact_in_background();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -152,31 +162,78 @@ impl ServerConfig {
 }
 
 /// The repositories a server hosts, each served by the server's node and kept
-/// open while the server runs.
-#[derive(Debug, Default)]
+/// open while the server runs, with the credentials that identify callers and
+/// the slots event long-polls wait in.
+#[derive(Debug)]
 pub struct Repositories {
     repos: BTreeMap<RepoName, OriginService>,
+    credentials: Credentials,
+    polls: Arc<Semaphore>,
 }
 
 impl Repositories {
     /// How often [`Repositories::compact_in_background`] checks.
     const COMPACT_EVERY: Duration = Duration::from_mins(1);
 
+    /// How many event long-polls may wait at once. Each holds a thread of the
+    /// blocking pool, which has 512, so the rest stay free for other calls.
+    const MAX_POLLS: usize = 256;
+
+    /// Creates a server with no repositories yet, whose callers `credentials`
+    /// identifies.
+    #[must_use]
+    pub fn new(credentials: Credentials) -> Self {
+        Self {
+            repos: BTreeMap::new(),
+            credentials,
+            polls: Arc::new(Semaphore::new(Self::MAX_POLLS)),
+        }
+    }
+
+    /// If `query` waits, takes one of the [`Repositories::MAX_POLLS`] slots for
+    /// event long-polls, which the poll holds until it ends. If none is free, waits
+    /// for one without holding a thread, for at most as long as `query` would wait
+    /// for events, and shortens that wait by as much. Returns `None` if `query`
+    /// doesn't wait, or if no slot freed up in time: then its wait is zero, so the
+    /// poll answers at once.
+    pub async fn poll(&self, query: &mut EventsQuery) -> Option<OwnedSemaphorePermit> {
+        let wait = query.wait?.duration().min(OriginService::MAX_WAIT);
+        if wait.is_zero() {
+            return None;
+        }
+        if let Ok(permit) = Arc::clone(&self.polls).try_acquire_owned() {
+            return Some(permit);
+        }
+        let start = Instant::now();
+        let permit = tokio::time::timeout(wait, Arc::clone(&self.polls).acquire_owned()).await;
+        let left = wait.saturating_sub(start.elapsed());
+        query.wait = Some(Period::from_secs(left.as_secs()));
+        permit.ok().and_then(Result::ok)
+    }
+
     /// Opens the repositories at the given paths, served by `node`.
     ///
     /// # Errors
     ///
     /// Fails if one has no repository.
-    pub fn open(repos: BTreeMap<RepoName, PathBuf>, node: &Node) -> anyhow::Result<Self> {
-        let repos = repos
-            .into_iter()
-            .map(|(name, path)| {
-                let service = OriginService::open(path, node.clone())
-                    .with_context(|| format!("cannot serve repository `{name}`"))?;
-                Ok((name, service))
-            })
-            .collect::<anyhow::Result<_>>()?;
-        Ok(Self { repos })
+    pub fn open(
+        repos: BTreeMap<RepoName, PathBuf>,
+        node: &Node,
+        credentials: Credentials,
+    ) -> anyhow::Result<Self> {
+        let mut repositories = Self::new(credentials);
+        for (name, path) in repos {
+            let service = OriginService::open(path, node.clone())
+                .with_context(|| format!("cannot serve repository `{name}`"))?;
+            repositories.insert(name, service);
+        }
+        Ok(repositories)
+    }
+
+    /// Returns the credentials that identify the server's callers.
+    #[must_use]
+    pub fn credentials(&self) -> &Credentials {
+        &self.credentials
     }
 
     /// Starts a thread that compacts each repository once enough loose objects pile

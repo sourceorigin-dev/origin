@@ -6,7 +6,7 @@ origin-shared = 3
 origin-src = 10
 
 [invariant]
-origin-src = 6
+origin-src = 7
 
 [wall-clock]
 origin-src = 2
