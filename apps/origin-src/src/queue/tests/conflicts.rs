@@ -15,7 +15,9 @@ fn conflicts_block_until_a_revision_merges() {
         panic!("{blocked:?}")
     };
     assert_eq!(pending.subject, RecordId::Revision(two));
-    let Blocked::Conflict { statement, paths } = &pending.blocked;
+    let Blocked::Conflict { statement, paths } = &pending.blocked else {
+        panic!("{pending:?}")
+    };
     assert_eq!(paths, &[RepoPath::new("shared").unwrap()]);
     let conflict = repo.store.get(*statement).unwrap();
     assert_eq!(conflict.kind, Kind::CONFLICT);

@@ -17,7 +17,7 @@
 use std::collections::HashSet;
 
 use origin_platform::Platform;
-use origin_shared::{Principal, Record, RecordId, RevisionId, Statement, StatementId, TreeId};
+use origin_shared::{Principal, Record, RecordId, Statement, StatementId, TreeId};
 
 use super::Annotations;
 use crate::store::{Store, StoreError};
@@ -140,25 +140,27 @@ impl<P: Platform> Annotations<'_, P> {
         self.index.remember_digests(self.store, &digests.concat())
     }
 
-    /// The statements promoting results to `revision`, as `issuer` would
-    /// issue them, without writing them, sorted by kind: for each
-    /// [promotion group](Statement::promotion_group), the latest statement
-    /// about another record with the same input digest as the revision,
-    /// unless its issuer superseded it. Groups whose kind and issuer the
-    /// revision already has a result of, directly or promoted, are skipped:
-    /// a result that ran there wins.
+    /// Returns the statements that would promote results to `subject`, as
+    /// `issuer` would issue them, without writing them, sorted by kind. For
+    /// each [promotion group](Statement::promotion_group), it picks the latest
+    /// statement about another record whose input digest equals the subject's,
+    /// unless its issuer superseded it. It skips a group if the subject already
+    /// has a result of that kind from that issuer, direct or promoted: a result
+    /// that ran on the subject wins. A statement has no snapshot, so nothing is
+    /// promoted to one.
     ///
     /// # Errors
     ///
-    /// Fails if a record or tree cannot be read, or computed digests cannot
-    /// be remembered.
+    /// Fails if a record or tree cannot be read, or the computed digests cannot
+    /// be saved to the index.
     pub fn promotions(
         &mut self,
-        revision: RevisionId,
+        subject: RecordId,
         issuer: &Principal,
     ) -> Result<Vec<Statement>, StoreError> {
-        let subject = RecordId::Revision(revision);
-        let snapshot = self.store.get(revision)?.snapshot;
+        let Some(snapshot) = self.store.snapshot_of(subject)? else {
+            return Ok(Vec::new());
+        };
         self.compute_digests()?;
 
         // The results the revision has that hold, by kind and original
@@ -203,19 +205,19 @@ impl<P: Platform> Annotations<'_, P> {
         Ok(promotions)
     }
 
-    /// Issues the [`promotions`](Self::promotions) to `revision` as
-    /// `issuer`, returning them.
+    /// Issues the [`promotions`](Self::promotions) to `subject` as `issuer` and
+    /// returns them.
     ///
     /// # Errors
     ///
-    /// Fails like [`Annotations::promotions`], or if the statements cannot
-    /// be written.
+    /// Fails like [`Annotations::promotions`], or if the statements cannot be
+    /// written.
     pub fn promote(
         &mut self,
-        revision: RevisionId,
+        subject: RecordId,
         issuer: &Principal,
     ) -> Result<Vec<(StatementId, Statement)>, StoreError> {
-        let promotions = self.promotions(revision, issuer)?;
+        let promotions = self.promotions(subject, issuer)?;
         let encoded: Vec<_> = promotions.iter().map(Statement::encode).collect();
         self.store.write_all(&encoded)?;
         Ok(encoded

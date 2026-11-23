@@ -2,12 +2,13 @@
 
 mod changes;
 mod conflicts;
+mod evidence;
 
 use origin_platform::Native;
-use origin_shared::BlobId;
 use origin_shared::{
-    Base, ChangeId, EncodedObject, Kind, NodeKey, PrincipalName, Record, RecordId, RepoPath,
-    Revision, RevisionId, Source, TargetName, TreeId,
+    Base, BlobId, ChangeId, Digest, EncodedObject, Inputs, Kind, NodeKey, PrincipalName, Record,
+    RecordId, RepoPath, Revision, RevisionId, Source, Statement, StatementId, TargetName, TreeId,
+    Verdict,
 };
 
 use super::*;
@@ -154,4 +155,33 @@ fn landed(landing: &Landing) -> RevisionId {
         } => *revision,
         other => panic!("expected a landed revision, got {other:?}"),
     }
+}
+
+/// Returns a passing `ci.test` result about `subject` from `issuer`, whose
+/// inputs are `src`.
+fn ci_test(subject: RevisionId, issuer: &str) -> Statement {
+    Statement {
+        subject: RecordId::Revision(subject),
+        kind: Kind::new("ci.test").unwrap(),
+        verdict: Some(Verdict::Pass),
+        issuer: issuer.parse().unwrap(),
+        inputs: Some(Inputs {
+            paths: vec![RepoPath::new("src").unwrap()],
+            definition: Digest::of(b"cargo test"),
+            toolchain: Digest::of(b"rustc"),
+            external: false,
+        }),
+        payload: None,
+        supersedes: None,
+        promoted_from: None,
+    }
+}
+
+/// Returns a repository whose `main` requires a passing `ci.test` from
+/// `user:ci`.
+fn requiring_ci() -> Repo {
+    Repo::new(
+        "[targets.main]\nauthority = \"node:queue\"\n\
+         require = [{ kind = \"ci.test\", verdict = \"pass\", issuer = \"user:ci\" }]\n",
+    )
 }
