@@ -22,7 +22,11 @@ fn targets_land_on_each_other() {
     let on_overhaul = Base::Acceptance(repo.tip(&overhaul).acceptance);
     repo.revision(2, &[], on_overhaul, &[("shared", "v2"), ("new", "n")]);
     queue
-        .land_change(ChangeId::from_bytes([2; 16]), &overhaul)
+        .land_change(
+            &mut repo.annotations(),
+            ChangeId::from_bytes([2; 16]),
+            &overhaul,
+        )
         .unwrap();
     repo.change_on_main(3, &[("other", "o")]);
     repo.land(3);
@@ -30,10 +34,14 @@ fn targets_land_on_each_other() {
     // Catching up merges `main`'s change since the fork; finishing
     // lands the overhaul on `main`.
     assert!(matches!(
-        queue.land_target(&main, &overhaul).unwrap(),
+        queue
+            .land_target(&mut repo.annotations(), &main, &overhaul)
+            .unwrap(),
         Landing::Landed { .. }
     ));
-    let landing = queue.land_target(&overhaul, &main).unwrap();
+    let landing = queue
+        .land_target(&mut repo.annotations(), &overhaul, &main)
+        .unwrap();
     assert!(matches!(
         landing,
         Landing::Landed {
@@ -45,11 +53,13 @@ fn targets_land_on_each_other() {
     assert_eq!(repo.state(&main), expected);
     assert_eq!(repo.state(&overhaul), expected);
     assert_eq!(
-        queue.land_target(&overhaul, &main).unwrap(),
+        queue
+            .land_target(&mut repo.annotations(), &overhaul, &main)
+            .unwrap(),
         Landing::Unchanged(Proposal::Target(overhaul.clone()))
     );
     assert!(matches!(
-        queue.land_target(&main, &main),
+        queue.land_target(&mut repo.annotations(), &main, &main),
         Err(LandError::SameTarget(_))
     ));
 }
@@ -67,7 +77,7 @@ fn sibling_targets_merge_from_where_they_forked() {
     let on = |target| Base::Acceptance(repo.tip(target).acceptance);
     repo.revision(2, &[], on(&a), &[("keep", "k")]);
     queue
-        .land_change(ChangeId::from_bytes([2; 16]), &a)
+        .land_change(&mut repo.annotations(), ChangeId::from_bytes([2; 16]), &a)
         .unwrap();
     repo.revision(
         3,
@@ -76,10 +86,10 @@ fn sibling_targets_merge_from_where_they_forked() {
         &[("keep", "k"), ("delete", "d"), ("other", "o")],
     );
     queue
-        .land_change(ChangeId::from_bytes([3; 16]), &b)
+        .land_change(&mut repo.annotations(), ChangeId::from_bytes([3; 16]), &b)
         .unwrap();
     assert!(matches!(
-        queue.land_target(&a, &b).unwrap(),
+        queue.land_target(&mut repo.annotations(), &a, &b).unwrap(),
         Landing::Landed { .. }
     ));
     assert_eq!(repo.state(&b), repo.files(&[("keep", "k"), ("other", "o")]));
@@ -108,7 +118,11 @@ fn a_merge_that_changes_nothing_still_records_the_tip() {
         let on = Base::Acceptance(repo.tip(target).acceptance);
         pass(RecordId::Revision(repo.revision(change, &[], on, files)));
         queue
-            .land_change(ChangeId::from_bytes([change; 16]), target)
+            .land_change(
+                &mut repo.annotations(),
+                ChangeId::from_bytes([change; 16]),
+                target,
+            )
             .unwrap();
     };
     queue.create_target(&a, &TargetName::MAIN).unwrap();
@@ -118,24 +132,24 @@ fn a_merge_that_changes_nothing_still_records_the_tip() {
     land(2, &b, &[("f", "f")]);
     let state = repo.state(&b);
     assert!(matches!(
-        queue.land_target(&a, &b).unwrap(),
+        queue.land_target(&mut repo.annotations(), &a, &b).unwrap(),
         Landing::Landed { .. }
     ));
     assert_eq!(repo.state(&b), state);
     assert_eq!(
-        queue.land_target(&a, &b).unwrap(),
+        queue.land_target(&mut repo.annotations(), &a, &b).unwrap(),
         Landing::Unchanged(Proposal::Target(a.clone()))
     );
 
     // So once `a` deletes the file, landing it on `b` deletes it there.
     land(3, &a, &[]);
-    let landing = queue.land_target(&a, &b).unwrap();
+    let landing = queue.land_target(&mut repo.annotations(), &a, &b).unwrap();
     let Landing::Pending(pending) = landing else {
         panic!("a deletion waits for its evidence: {landing:?}")
     };
     pass(pending.subject);
     assert!(matches!(
-        queue.land_target(&a, &b).unwrap(),
+        queue.land_target(&mut repo.annotations(), &a, &b).unwrap(),
         Landing::Landed { .. }
     ));
     assert_eq!(repo.state(&b), repo.files(&[]));
@@ -147,7 +161,9 @@ fn a_merge_that_changes_nothing_still_records_the_tip() {
     for _ in 0..2 {
         for (from, onto) in [(&c, &TargetName::MAIN), (&TargetName::MAIN, &c)] {
             assert_eq!(
-                queue.land_target(from, onto).unwrap(),
+                queue
+                    .land_target(&mut repo.annotations(), from, onto)
+                    .unwrap(),
                 Landing::Unchanged(Proposal::Target(from.clone()))
             );
         }
@@ -163,7 +179,11 @@ fn targets_merge_from_their_newest_shared_acceptance() {
         let on = Base::Acceptance(repo.tip(target).acceptance);
         repo.revision(change, &[], on, files);
         queue
-            .land_change(ChangeId::from_bytes([change; 16]), target)
+            .land_change(
+                &mut repo.annotations(),
+                ChangeId::from_bytes([change; 16]),
+                target,
+            )
             .unwrap();
     };
     // `c` and `d` fork from an empty `main`, `a` and `b` from the next
@@ -184,16 +204,16 @@ fn targets_merge_from_their_newest_shared_acceptance() {
     land(30, &c, &[("c", "c")]);
     land(31, &d, &[("d", "d")]);
     assert!(matches!(
-        queue.land_target(&c, &a).unwrap(),
+        queue.land_target(&mut repo.annotations(), &c, &a).unwrap(),
         Landing::Landed { .. }
     ));
     assert!(matches!(
-        queue.land_target(&d, &b).unwrap(),
+        queue.land_target(&mut repo.annotations(), &d, &b).unwrap(),
         Landing::Landed { .. }
     ));
 
     assert!(matches!(
-        queue.land_target(&a, &b).unwrap(),
+        queue.land_target(&mut repo.annotations(), &a, &b).unwrap(),
         Landing::Landed { .. }
     ));
     assert_eq!(
@@ -212,7 +232,11 @@ fn criss_crossed_targets_merge_what_their_bases_agree_on() {
         let on = Base::Acceptance(repo.tip(target).acceptance);
         repo.revision(change, &[], on, files);
         queue
-            .land_change(ChangeId::from_bytes([change; 16]), target)
+            .land_change(
+                &mut repo.annotations(),
+                ChangeId::from_bytes([change; 16]),
+                target,
+            )
             .unwrap();
     };
     queue.create_target(&a, &TargetName::MAIN).unwrap();
@@ -241,7 +265,8 @@ fn criss_crossed_targets_merge_what_their_bases_agree_on() {
     land(3, &a, &[("a", "1"), ("b", "0"), ("shared", "a")]);
     land(4, &b, &[("a", "0"), ("b", "1"), ("shared", "b")]);
 
-    let Landing::Pending(pending) = queue.land_target(&a, &b).unwrap() else {
+    let Landing::Pending(pending) = queue.land_target(&mut repo.annotations(), &a, &b).unwrap()
+    else {
         panic!("the bases disagree on `shared`, so it can't be merged blindly");
     };
     assert!(
@@ -251,7 +276,7 @@ fn criss_crossed_targets_merge_what_their_bases_agree_on() {
     // Once `a` takes `b`'s side, the disjoint edits merge.
     land(5, &a, &[("a", "1"), ("b", "0"), ("shared", "b")]);
     assert!(matches!(
-        queue.land_target(&a, &b).unwrap(),
+        queue.land_target(&mut repo.annotations(), &a, &b).unwrap(),
         Landing::Landed { .. }
     ));
     assert_eq!(
@@ -268,7 +293,11 @@ fn bases_that_disagree_on_a_kind_conflict_on_any_change_under_it() {
         let on = Base::Acceptance(repo.tip(target).acceptance);
         repo.revision(change, &[], on, files);
         queue
-            .land_change(ChangeId::from_bytes([change; 16]), target)
+            .land_change(
+                &mut repo.annotations(),
+                ChangeId::from_bytes([change; 16]),
+                target,
+            )
             .unwrap();
     };
     let [a, b] = ["a", "b"].map(|name| TargetName::new(name).unwrap());
@@ -299,7 +328,8 @@ fn bases_that_disagree_on_a_kind_conflict_on_any_change_under_it() {
 
     // What `p` was is unknown, so the deletion can't be told from an
     // addition: it conflicts, rather than bring `p/delete` back.
-    let Landing::Pending(pending) = queue.land_target(&a, &b).unwrap() else {
+    let Landing::Pending(pending) = queue.land_target(&mut repo.annotations(), &a, &b).unwrap()
+    else {
         panic!("the bases disagree on `p`, so it can't be merged blindly");
     };
     assert!(

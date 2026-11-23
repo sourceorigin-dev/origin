@@ -106,7 +106,11 @@ impl Repo {
     }
 
     fn land_on(&self, change: ChangeId, onto: &TargetName) {
-        let landings = self.queue().land_change(change, onto).unwrap();
+        let mut annotations = Annotations::open(&self.store).unwrap();
+        let landings = self
+            .queue()
+            .land_change(&mut annotations, change, onto)
+            .unwrap();
         assert!(
             matches!(landings[..], [Landing::Landed { .. }]),
             "{landings:?}"
@@ -196,9 +200,10 @@ fn land_target_after_long_histories(bencher: Bencher<'_, '_>) {
             repo.land_on(change, &feature);
         })
         .bench_local_values(|()| {
+            let mut annotations = Annotations::open(&repo.store).unwrap();
             let landing = repo
                 .queue()
-                .land_target(&feature, &TargetName::MAIN)
+                .land_target(&mut annotations, &feature, &TargetName::MAIN)
                 .unwrap();
             assert!(matches!(landing, Landing::Landed { .. }), "{landing:?}");
         });
