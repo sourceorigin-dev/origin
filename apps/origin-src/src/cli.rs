@@ -128,6 +128,9 @@ enum WorkspaceCommand {
         #[arg(default_value = "@")]
         rev: String,
     },
+    /// Drop the payloads that are past the retention set in `policy.toml`,
+    /// pack small objects, and remove what crashed writes left behind.
+    Gc,
     /// Land a change on a target, along with the changes below it that the
     /// target doesn't have yet. The queue rebases them onto the target's tip
     /// and checks for the evidence `policy.toml` requires. If the evidence is
@@ -403,6 +406,7 @@ impl WorkspaceCommand {
             }
             Self::Statements { rev } => workspace.statements(&rev)?,
             Self::Promote { rev } => workspace.promote(&rev)?,
+            Self::Gc => workspace.gc()?,
             Self::Land(args) => match (args.from, args.onto) {
                 _ if args.status => workspace.land_status()?,
                 (Some(from), Some(onto)) => workspace.land_target(&from, &onto)?,

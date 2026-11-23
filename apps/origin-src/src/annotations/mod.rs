@@ -1,16 +1,17 @@
-//! Statements: issuing them, reading them, and promoting them by input
-//! digest.
+//! Statements: issuing them, reading them, promoting them by input digest,
+//! and dropping their payloads once their retention ends.
 //!
-//! Core interprets only the reserved kinds: [`Kind::ABANDON`],
-//! [`Kind::CONFLICT`] and [`Kind::DIVERGENT`], and only from the issuers
-//! [`Store::authorizes`] names. Every other kind belongs to whoever issues
-//! it. Supersession counts only within one issuer: a statement claiming to
-//! supersede another issuer's is issued like any other, and the one it
-//! names still stands. [`Annotations::supersede`] supersedes an issuer's
-//! current statement atomically, so two statements issued through it at
-//! once in one store never supersede the same one.
+//! Core acts only on the reserved kinds, [`Kind::ABANDON`],
+//! [`Kind::CONFLICT`] and [`Kind::DIVERGENT`], and only when they come from
+//! the issuers [`Store::authorizes`] allows. Any other kind means whatever
+//! its issuer means by it. Supersession only counts within one issuer: if a
+//! statement names another issuer's statement as the one it supersedes,
+//! that statement still stands. [`Annotations::supersede`] supersedes an
+//! issuer's current statement atomically, so two calls at once on one store
+//! never supersede the same statement.
 
 mod promotion;
+mod retention;
 
 use std::collections::HashSet;
 
@@ -23,6 +24,7 @@ use crate::index::Index;
 use crate::store::{Store, StoreError};
 
 pub use promotion::{Claim, InvalidPromotion};
+pub use retention::Dropped;
 
 /// The statements of a store, through its index.
 #[derive(Debug)]

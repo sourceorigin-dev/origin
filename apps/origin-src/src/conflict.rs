@@ -179,7 +179,7 @@ impl Conflicts {
 
     /// Reads the conflicts listed in a `core.conflict` statement's payload. A
     /// payload missing from the store is an error, not an empty list, because
-    /// the repository always keeps it.
+    /// retention keeps the payload of every reserved kind.
     ///
     /// # Errors
     ///
