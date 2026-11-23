@@ -11,8 +11,8 @@ use crate::landing::{Landing, Proposal};
 use crate::policy::{KindPattern, Requirement};
 use crate::text::Period;
 use crate::{
-    Acceptance, AcceptanceId, Head, ObjectId, PrincipalName, RecordId, Revision, RevisionId,
-    Statement, StatementId, TargetName,
+    Acceptance, AcceptanceId, Head, ObjectId, PrincipalName, RecordId, RepoPath, Revision,
+    RevisionId, Statement, StatementId, TargetName, TreeId,
 };
 
 /// The name of a repository on a server: ASCII letters, digits, `.`, `_`
@@ -95,11 +95,51 @@ pub struct RepoSummary {
     pub name: RepoName,
 }
 
-/// A request for records, or any other objects, by id.
+/// The response header set when a fetch stopped short of what it asked for,
+/// to stay within [`Pack::LIMIT`](crate::pack::Pack::LIMIT). See
+/// [`Part`](crate::pack::Part).
+pub const MORE: &str = "origin-more";
+
+/// A request for records by id: revisions, statements and acceptances. Each
+/// record comes with its blob, if the repository has it: a revision's
+/// description or a statement's payload. Fetch snapshots with
+/// [`FetchSnapshot`] instead.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct FetchRecords {
-    /// The ids of the objects, which are returned in this order.
+    /// The ids of the records, which are returned in this order, each followed
+    /// by its blob. A response with the [`MORE`] header stops short. Ask again
+    /// for the records after the last one it holds.
     pub ids: Vec<ObjectId>,
+}
+
+/// A request for the trees and blobs of a snapshot that the caller lacks,
+/// walked from its root. This is the only way blobs and trees leave a
+/// repository, so the server can check what each caller may read by path.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct FetchSnapshot {
+    /// The snapshot.
+    pub snapshot: TreeId,
+    /// Snapshots the caller holds in full. Anything one of them holds at the
+    /// same path is skipped, so only what changed is sent. Snapshots the
+    /// repository doesn't have are ignored.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub have: Vec<TreeId>,
+    /// Limits the fetch to these files and directories, everything under them,
+    /// and the trees on the way to them. Defaults to everything.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<RepoPath>,
+    /// How many objects to skip, because earlier parts brought them. A response
+    /// that stops short has the [`MORE`] header.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub skip: u64,
+}
+
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde passes a reference"
+)]
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 /// The result of storing a batch of records.
