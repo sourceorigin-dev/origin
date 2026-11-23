@@ -6,7 +6,7 @@ use origin_shared::landing::{Landing, Proposal};
 use origin_shared::pack::Pack;
 use origin_shared::{
     AttachmentId, Base, ChangeId, EncodedObject, EntryKind, EntryName, NodeKey, ObjectKind, Record,
-    Revision, Statement, TargetName, Tree, TreeEntry, TreeId,
+    Revision, Statement, Tree, TreeEntry, TreeId,
 };
 
 use super::*;
@@ -144,7 +144,10 @@ fn caller(principal: &str) -> Caller {
 
 fn forbidden(result: Result<impl std::fmt::Debug, ServiceError>) -> Forbidden {
     match result {
-        Err(ServiceError::Forbidden(forbidden)) => forbidden,
+        Err(
+            ServiceError::Forbidden(forbidden)
+            | ServiceError::Land(crate::queue::LandError::Forbidden(forbidden)),
+        ) => forbidden,
         other => panic!("expected a refusal, got {other:?}"),
     }
 }
@@ -281,6 +284,64 @@ fn pushes_cannot_place_unreadable_objects_where_they_read() {
     let (_, records) = Fixture::revision(3, "user:eve", base, Vec::new(), tree);
     objects.extend(records);
     fixture.put(&eve, objects).unwrap();
+}
+
+#[test]
+fn landings_never_change_what_the_submitter_cannot_write() {
+    let fixture = Fixture::new();
+    let (ada, eve) = (caller("user:ada"), caller("user:eve"));
+    let first = fixture.tip(&TargetName::MAIN);
+    let old_state = fixture.state(&TargetName::MAIN);
+    let repo = &fixture.repo;
+    repo.change_on_main(2, &[("protected/file", "v2")]);
+    repo.land(2);
+
+    let mut files = vec![
+        ("README.md", "hello"),
+        ("src/lib.rs", "fn a() {}"),
+        ("secrets/key", "hunter2"),
+        ("protected/file", "keep"),
+    ];
+    files.push(("src/new.rs", "fn b() {}"));
+    let (old_base, _) = (repo.revision(3, &[], first, &files), old_state);
+    let landed = fixture
+        .land(&eve, Proposal::Change(ChangeId::from_bytes([3; 16])))
+        .unwrap();
+    assert!(
+        matches!(landed[..], [Landing::Landed { .. }]),
+        "{old_base} {landed:?}"
+    );
+    let v2 = EncodedObject::blob(b"v2").id();
+    assert_eq!(fixture.at_main("protected/file").unwrap().id, v2);
+
+    files.retain(|(path, _)| *path != "protected/file");
+    repo.revision(4, &[], fixture.tip(&TargetName::MAIN), &files);
+    let change = Proposal::Change(ChangeId::from_bytes([4; 16]));
+    assert_eq!(
+        forbidden(fixture.land(&eve, change.clone())),
+        Forbidden::Write(path("protected/file"))
+    );
+    assert!(fixture.at_main("protected/file").is_some());
+
+    let side = TargetName::new("side").unwrap();
+    repo.queue()
+        .create_target(&side, &TargetName::MAIN)
+        .unwrap();
+    repo.queue()
+        .land_change(
+            &mut repo.annotations(),
+            ChangeId::from_bytes([4; 16]),
+            &side,
+        )
+        .unwrap();
+    let from_side = Proposal::Target(side);
+    assert_eq!(
+        forbidden(fixture.land(&eve, from_side.clone())),
+        Forbidden::Write(path("protected/file"))
+    );
+    let landed = fixture.land(&ada, from_side).unwrap();
+    assert!(matches!(landed[..], [Landing::Landed { .. }]), "{landed:?}");
+    assert!(fixture.at_main("protected/file").is_none());
 }
 
 #[test]

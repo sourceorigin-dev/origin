@@ -82,7 +82,7 @@ pub(super) fn promote(store: &Store, revision: RevisionId) -> Vec<(String, Optio
     let promoter = principal("node:queue");
     Annotations::open(store)
         .unwrap()
-        .promote(RecordId::Revision(revision), &promoter)
+        .promote(RecordId::Revision(revision), &promoter, |_| Ok(true))
         .unwrap()
         .into_iter()
         .map(|(_, statement)| {

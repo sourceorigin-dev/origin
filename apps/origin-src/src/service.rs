@@ -992,16 +992,30 @@ impl OriginService {
 
     /// Lands what `request` proposes, with this node as the authority: a change,
     /// with the changes below it that the target doesn't have yet, or another
-    /// target's tip. By default, a change lands on the target its stack is on.
+    /// target's tip. By default, a change lands on the target its stack is on. The
+    /// caller must be signed in, must be allowed to land on the target, and must
+    /// write every path the landing changes on it.
     ///
     /// # Errors
     ///
     /// Fails if the change or a target doesn't exist, if a target's tip is proposed
-    /// without a target to land on, if this node isn't the target's authority, if
-    /// the change can't land as it is (see [`LandError`]), or if the records cannot
-    /// be read or written.
-    pub fn land(&self, _caller: &Caller, request: &LandRequest) -> Result<Landings, ServiceError> {
-        let queue = Queue::new(&self.store, &self.node.key, self.node.name.clone());
+    /// without a target to land on, if the caller may not land there, if this node
+    /// isn't the target's authority, if the change can't land as it is (see
+    /// [`LandError`]), or if the records cannot be read or written.
+    pub fn land(&self, caller: &Caller, request: &LandRequest) -> Result<Landings, ServiceError> {
+        if *caller == Caller::Anonymous {
+            return Err(Forbidden::Anonymous.into());
+        }
+        let rights = self.rights(caller)?;
+        let may_land = |onto: &TargetName| {
+            if rights.may_land(onto) {
+                Ok(())
+            } else {
+                Err(ServiceError::from(Forbidden::Land(onto.clone())))
+            }
+        };
+        let queue = Queue::new(&self.store, &self.node.key, self.node.name.clone())
+            .submitted_by(rights.paths.clone());
         let landed = self.annotations(|annotations| {
             let landed = match &request.proposal {
                 Proposal::Change(change) => {
@@ -1009,11 +1023,13 @@ impl OriginService {
                         Some(onto) => onto.clone(),
                         None => self.target_of(annotations.index(), *change)?,
                     };
+                    may_land(&onto)?;
                     let landings = queue.land_change(annotations, *change, &onto)?;
                     Landings { onto, landings }
                 }
                 Proposal::Target(source) => {
                     let onto = request.onto.clone().ok_or(ServiceError::NoTarget)?;
+                    may_land(&onto)?;
                     let landing = queue.land_target(annotations, source, &onto)?;
                     Landings {
                         onto,
@@ -1064,18 +1080,25 @@ impl OriginService {
         Ok(seen)
     }
 
-    /// Creates a target at the tip of another, with this node as its authority.
+    /// Creates a target at the tip of another, with this node as its authority. The
+    /// caller must be signed in, and allowed to land on the new target.
     ///
     /// # Errors
     ///
-    /// Fails if the name is taken, if the other target doesn't exist, if the policy
-    /// wouldn't make this node the new target's authority, or if the records cannot
-    /// be written.
+    /// Fails if the caller may not land on the target, if the name is taken, if the
+    /// other target doesn't exist, if the policy wouldn't make this node the new
+    /// target's authority, or if the records cannot be written.
     pub fn create_target(
         &self,
-        _caller: &Caller,
+        caller: &Caller,
         request: &NewTarget,
     ) -> Result<Head, ServiceError> {
+        if *caller == Caller::Anonymous {
+            return Err(Forbidden::Anonymous.into());
+        }
+        if !self.rights(caller)?.may_land(&request.name) {
+            return Err(Forbidden::Land(request.name.clone()).into());
+        }
         let queue = Queue::new(&self.store, &self.node.key, self.node.name.clone());
         let head = queue.create_target(&request.name, &request.from)?;
         self.wakeup.notify();
@@ -1486,6 +1509,7 @@ impl ServiceError {
                 | LandError::Abandoned(_)
                 | LandError::Unresolved { .. }
                 | LandError::InvalidPolicy(_) => ErrorCode::Conflict,
+                LandError::Forbidden(_) => ErrorCode::Forbidden,
                 LandError::Store(error) => Self::store_code(error),
                 LandError::Policy(_) | LandError::Annotate(_) => ErrorCode::Internal,
             },
