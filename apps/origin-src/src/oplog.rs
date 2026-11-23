@@ -15,6 +15,7 @@
 //! ```text
 //! .origin/oplog/
 //!   lock                       held exclusively while appending
+//!   writers/<n>                held by each writer while it writes
 //!   <first sequence number>    segments of entries, 16 hex digits each
 //! ```
 //!
@@ -25,7 +26,22 @@
 //!
 //! **Writing.** A write appends its entries ([`Store::commit_logged`]) just
 //! before it commits, and they are synced together with its files
-//! ([`DurableWrite::sync_with`]), so logging costs no extra sync.
+//! ([`DurableWrite::sync_with`]), so logging costs no extra sync. Before
+//! appending its first entry, the writer creates and locks `writers/<n>`,
+//! where `n` is that entry's sequence number; every entry names its writer.
+//! Once the write is published, the writer removes the file.
+//!
+//! **Reading.** Readers stop before the first entry whose writer still holds
+//! its lock ([`OpLog::settled`]). Every entry before it is durable, and its
+//! write is as published as it will ever be. Otherwise a power loss could drop
+//! an entry a reader had seen, and the next entry would reuse its sequence
+//! number. A writer that crashed leaves its lock file unlocked: readers then
+//! sync the segments holding its entries, remove the file, and take the
+//! entries' effects as whatever was published, so a crashed writer holds
+//! nothing back. A crash can leave a write unpublished or partly published:
+//! some or none of a batch's records, an acceptance the target's head never
+//! moved to (the next landing on the target publishes it), or a waiting
+//! landing that wasn't kept.
 //!
 //! **Partial appends.** A crash during an append leaves part of a frame at the
 //! end of the last segment. It never was an entry: readers skip it, and the
@@ -85,6 +101,47 @@ impl Actor {
     }
 }
 
+/// Appends the op log entries of one write. While it holds its lock file,
+/// readers stop before its entries, as the module docs describe. Dropping
+/// it ends the write.
+#[derive(Debug, Default)]
+pub(crate) struct LogWriter(Option<Held>);
+
+/// The lock file a writer holds once it has appended an entry.
+#[derive(Debug)]
+struct Held {
+    path: PathBuf,
+    /// The sequence number of the writer's first entry, which names the lock
+    /// file.
+    first: u64,
+    _lock: LockedFile,
+    /// The segments it appended to, which its write syncs.
+    segments: Vec<PathBuf>,
+    /// Whether the write committed and synced those segments.
+    synced: bool,
+}
+
+impl Drop for Held {
+    /// Removes the lock file once the entries are synced. Otherwise leaves it,
+    /// so readers sync them as they do for a writer that crashed.
+    fn drop(&mut self) {
+        if self.synced {
+            // Best effort: readers remove a file left behind.
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// The state of a writer, read from its lock file.
+enum WriterState {
+    /// Its write is in progress: the file is locked.
+    Writing,
+    /// It is done: the file is gone.
+    Done,
+    /// It crashed: the file is left, unlocked.
+    Crashed,
+}
+
 /// Entries read from the op log, oldest first.
 #[derive(Debug, Default)]
 pub struct Read {
@@ -100,6 +157,8 @@ pub struct Entry {
     /// The operation it belongs to: the sequence number of the operation's
     /// first entry.
     pub op: u64,
+    /// Its writer: the sequence number of the writer's first entry.
+    pub writer: u64,
     /// The root of the workspace it came from, if any.
     pub workspace: Option<PathBuf>,
     /// The command that appended it, such as `land 3fa2`.
@@ -137,12 +196,13 @@ impl Entry {
     const WAITING: u8 = 2;
     const ADVANCED: u8 = 4;
 
-    /// Encodes the entry's frame: its sequence number, operation, workspace
-    /// and command, then a tag and the effect's fields.
+    /// Encodes the entry's frame: its sequence number, operation, writer,
+    /// workspace and command, then a tag and the effect's fields.
     fn encode(&self) -> Vec<u8> {
         Frames::frame(|out| {
             out.u64(self.seq);
             out.u64(self.op);
+            out.u64(self.writer);
             match &self.workspace {
                 None => out.u8(0),
                 Some(root) => {
@@ -159,6 +219,7 @@ impl Entry {
         let mut reader = Reader::new(payload);
         let seq = reader.u64()?;
         let op = reader.u64()?;
+        let writer = reader.u64()?;
         let workspace =
             reader.option(|reader| Ok(PathBuf::from(OsStr::from_bytes(reader.prefixed()?))))?;
         let command = reader.prefixed_str()?.to_owned();
@@ -167,6 +228,7 @@ impl Entry {
         Ok(Self {
             seq,
             op,
+            writer,
             workspace,
             command,
             effect,
@@ -261,6 +323,9 @@ impl<'a, P: Platform> OpLog<'a, P> {
     /// The lock held while appending.
     const APPENDING: &str = "lock";
 
+    /// The directory of the writers' lock files.
+    const WRITERS: &str = "writers";
+
     /// The op log of `store`.
     pub fn new(store: &'a Store<P>) -> Self {
         Self { store }
@@ -274,12 +339,12 @@ impl<'a, P: Platform> OpLog<'a, P> {
         self.dir().join(format!("{first:016x}"))
     }
 
-    /// Creates the log's directory and first segment, durably, so the first
+    /// Creates the log's directories and first segment, durably, so the first
     /// entry costs no more than later ones. Repositories made before the op
     /// log existed get them with their first entry.
     pub(crate) fn init(&self) -> Result<(), StoreError> {
-        let dir = self.dir();
-        fs::create_dir_all(&dir).map_err(|source| StoreError::io(&dir, source))?;
+        let writers = self.dir().join(Self::WRITERS);
+        fs::create_dir_all(&writers).map_err(|source| StoreError::io(&writers, source))?;
         self.start_segment(1, &[])?;
         Ok(())
     }
@@ -409,6 +474,91 @@ impl<'a, P: Platform> OpLog<'a, P> {
         Ok(read)
     }
 
+    /// Returns the sequence number up to which every entry is settled: its
+    /// writer is done, or crashed and its entries were synced. A settled entry
+    /// is durable, and its write is as published as it will ever be. Readers
+    /// never read past it.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the log or a writer's lock file cannot be read, or a crashed
+    /// writer's entries cannot be synced.
+    pub fn settled(&self) -> Result<u64, StoreError> {
+        // Read first: a writer's lock file exists, locked, before its
+        // first entry does.
+        let last = self.last_seq()?;
+        let dir = self.dir().join(Self::WRITERS);
+        let names = match fs::read_dir(&dir) {
+            Ok(names) => names,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(last),
+            Err(source) => return Err(StoreError::io(&dir, source)),
+        };
+        let mut settled = last;
+        for name in names {
+            let name = name
+                .map_err(|source| StoreError::io(&dir, source))?
+                .file_name();
+            let Some(first) = name.to_str().and_then(|name| name.parse::<u64>().ok()) else {
+                continue;
+            };
+            if first > last {
+                continue;
+            }
+            match self.writer_state(first)? {
+                WriterState::Writing => settled = settled.min(first - 1),
+                WriterState::Done => {}
+                WriterState::Crashed => self.sync_crashed(first)?,
+            }
+        }
+        Ok(settled)
+    }
+
+    /// Reads the state of the writer whose first entry is `first`.
+    fn writer_state(&self, first: u64) -> Result<WriterState, StoreError> {
+        let path = self.writer_path(first);
+        let file = match File::open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(WriterState::Done),
+            Err(source) => return Err(StoreError::io(&path, source)),
+        };
+        let free = self
+            .store
+            .platform
+            .try_lock(&file, LockMode::Exclusive)
+            .map_err(|source| StoreError::io(&path, source))?;
+        Ok(if free {
+            WriterState::Crashed
+        } else {
+            WriterState::Writing
+        })
+    }
+
+    /// Syncs the segments that may hold entries of the crashed writer whose
+    /// first entry is `first`, then removes its lock file.
+    fn sync_crashed(&self, first: u64) -> Result<(), StoreError> {
+        let segments = self.segments()?;
+        let holding = segments
+            .partition_point(|&start| start <= first)
+            .saturating_sub(1);
+        for &start in &segments[holding..] {
+            let path = self.segment(start);
+            File::open(&path)
+                .and_then(|file| self.store.platform.sync_file(&file))
+                .map_err(|source| StoreError::io(&path, source))?;
+        }
+        let path = self.writer_path(first);
+        match fs::remove_file(&path) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => {
+                Err(StoreError::io(&path, error))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn writer_path(&self, first: u64) -> PathBuf {
+        self.dir().join(Self::WRITERS).join(first.to_string())
+    }
+
     /// Returns every entry the log keeps, newest first, reading one segment at
     /// a time.
     ///
@@ -435,9 +585,9 @@ impl<'a, P: Platform> OpLog<'a, P> {
             }))
     }
 
-    /// Appends an entry for `effect` as the store's actor, without syncing it.
-    /// Returns its sequence number and the path of its segment.
-    fn append(&self, effect: &Effect) -> Result<(u64, PathBuf), StoreError> {
+    /// Appends an entry for `effect` as the store's actor, on behalf of
+    /// `writer`, without syncing it. Returns its sequence number.
+    fn append(&self, writer: &mut LogWriter, effect: &Effect) -> Result<u64, StoreError> {
         let _lock = self.lock(Self::APPENDING, LockMode::Exclusive)?;
         let segments = self.segments()?;
         let (seq, open) = match segments.last() {
@@ -448,10 +598,15 @@ impl<'a, P: Platform> OpLog<'a, P> {
             Some(segment) => segment,
             None => self.start_segment(seq, &segments)?,
         };
+        let held = match &mut writer.0 {
+            Some(held) => held,
+            None => writer.0.insert(self.hold(seq)?),
+        };
         let actor = &self.store.actor;
         let entry = Entry {
             seq,
             op: actor.op.get().copied().unwrap_or(seq),
+            writer: held.first,
             workspace: actor.workspace.clone(),
             command: actor.command.clone(),
             effect: effect.clone(),
@@ -459,8 +614,41 @@ impl<'a, P: Platform> OpLog<'a, P> {
         Self::FRAMES
             .append(&self.store.platform, &segment.file, &entry.encode())
             .map_err(|source| StoreError::io(&segment.path, source))?;
+        if !held.segments.contains(&segment.path) {
+            held.segments.push(segment.path);
+        }
         actor.op.get_or_init(|| seq);
-        Ok((seq, segment.path))
+        Ok(seq)
+    }
+
+    /// Appends an entry for `effect`, returning it with its writer. The write
+    /// stays in progress until the writer is dropped, which then counts as a
+    /// crash.
+    #[cfg(test)]
+    pub(crate) fn append_in_progress(
+        &self,
+        effect: &Effect,
+    ) -> Result<(u64, LogWriter), StoreError> {
+        let mut writer = LogWriter::default();
+        let seq = self.append(&mut writer, effect)?;
+        Ok((seq, writer))
+    }
+
+    /// Creates and locks the lock file of a writer whose first entry, `first`,
+    /// is about to be appended. The file may already exist, left unlocked by a
+    /// writer that crashed before appending.
+    fn hold(&self, first: u64) -> Result<Held, StoreError> {
+        let path = self.writer_path(first);
+        let dir = self.dir().join(Self::WRITERS);
+        fs::create_dir_all(&dir).map_err(|source| StoreError::io(&dir, source))?;
+        let lock = LockedFile::open(&self.store.platform, &path, LockMode::Exclusive)?;
+        Ok(Held {
+            path,
+            first,
+            _lock: lock,
+            segments: Vec::new(),
+            synced: false,
+        })
     }
 
     /// Opens the last segment, which starts at `first`, for appending. Returns
@@ -538,7 +726,8 @@ impl<P: Platform> Store<P> {
     }
 
     /// Commits `write` and logs `effects` as entries synced with it, at no
-    /// extra sync. Returns the last entry's sequence number.
+    /// extra sync. Returns the last entry's sequence number. Readers stop
+    /// before the entries until the write is published.
     ///
     /// # Errors
     ///
@@ -548,19 +737,20 @@ impl<P: Platform> Store<P> {
         write: DurableWrite<'_, P>,
         effects: &[Effect],
     ) -> Result<u64, StoreError> {
+        let mut writer = LogWriter::default();
         let mut seq = 0;
-        let mut segments = Vec::new();
         for effect in effects {
-            let (appended, segment) = self.oplog().append(effect)?;
-            seq = appended;
-            if !segments.contains(&segment) {
-                segments.push(segment);
+            seq = self.oplog().append(&mut writer, effect)?;
+        }
+        if let Some(held) = &writer.0 {
+            for segment in &held.segments {
+                write.sync_with(segment);
             }
         }
-        for segment in &segments {
-            write.sync_with(segment);
-        }
         write.commit()?;
+        if let Some(held) = &mut writer.0 {
+            held.synced = true;
+        }
         Ok(seq)
     }
 }
@@ -623,6 +813,7 @@ mod tests {
             let entry = Entry {
                 seq,
                 op: 1,
+                writer: 1,
                 workspace: (seq % 2 == 0).then(|| PathBuf::from("/work/ws")),
                 command: "land 3fa2".to_owned(),
                 effect,
@@ -682,6 +873,7 @@ mod tests {
         let frame = Entry {
             seq: 2,
             op: 2,
+            writer: 2,
             workspace: None,
             command: String::new(),
             effect: wrote(2),
@@ -691,6 +883,35 @@ mod tests {
         assert_eq!(oplog.last_seq().unwrap(), 1, "readers skip it");
         assert_eq!(log(&store, &wrote(3)), 2, "the next append cuts it off");
         assert_eq!(oplog.after(0).unwrap().entries.len(), 2);
+    }
+
+    #[test]
+    fn readers_wait_for_writers_and_sync_past_crashed_ones() {
+        let (_dir, store) = store();
+        let oplog = store.oplog();
+        log(&store, &wrote(1));
+        // A write in progress: its entry is appended, not yet committed.
+        let (seq, writing) = oplog.append_in_progress(&wrote(2)).unwrap();
+        log(&store, &wrote(3));
+        assert_eq!(oplog.last_seq().unwrap(), 3);
+        assert_eq!(oplog.settled().unwrap(), seq - 1, "readers wait for it");
+
+        // It crashes: its lock is free, its file left.
+        drop(writing);
+        let left = oplog.writer_path(seq);
+        assert!(left.exists());
+        assert_eq!(oplog.settled().unwrap(), 3, "nothing waits for it");
+        assert!(
+            !left.exists(),
+            "its entries are synced, and its file removed"
+        );
+        assert_eq!(
+            fs::read_dir(oplog.dir().join(OpLog::<Native>::WRITERS))
+                .unwrap()
+                .count(),
+            0,
+            "done writers leave nothing behind"
+        );
     }
 
     #[test]
