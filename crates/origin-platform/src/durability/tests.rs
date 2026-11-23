@@ -188,6 +188,42 @@ fn a_failed_batch_sync_publishes_nothing() {
 }
 
 #[test]
+fn layers_are_published_in_order() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path();
+    for dir in ["a", "b", "c"] {
+        fs::create_dir(root.join(dir)).unwrap();
+    }
+    let recorder = Recorder::default();
+    let write = DurableWrite::new(&recorder);
+    write
+        .stage_in(1, root.join("b/2"), |file| file.write_all(b"two"))
+        .unwrap();
+    write.stage(root.join("a/1"), b"one").unwrap();
+    write.commit().unwrap();
+    assert_eq!(
+        recorder.take(),
+        [
+            Call::Batch(2),
+            Call::Dir(root.to_owned()),
+            Call::Dir(root.join("a")),
+            Call::Dir(root.to_owned()),
+            Call::Dir(root.join("b")),
+        ],
+        "the batch is synced once, then each layer's directories"
+    );
+
+    let write = DurableWrite::new(&recorder);
+    write.stage(root.join("a/blocked"), b"one").unwrap();
+    write
+        .stage_in(1, root.join("c/after"), |file| file.write_all(b"two"))
+        .unwrap();
+    fs::create_dir_all(root.join("a/blocked/full")).unwrap();
+    assert_eq!(write.commit().unwrap_err().op, Op::Publish);
+    assert_eq!(names(&root.join("c")), Vec::<String>::new());
+}
+
+#[test]
 fn files_written_in_place_are_synced_with_the_batch() {
     let root = tempfile::tempdir().unwrap();
     let log = root.path().join("log");

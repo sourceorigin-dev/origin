@@ -25,7 +25,7 @@ use crate::index::Index;
 use crate::oplog::{Actor, Why};
 use crate::remote::{Remote, RemoteUrl};
 use crate::store::Store;
-use crate::sync::{Advanced, Cursor, Fetch, Sync};
+use crate::sync::{Advanced, Cursor, Fetch, Pushed, Sync};
 
 impl Workspace {
     /// The file in the repository's `.origin` that names its remote.
@@ -115,7 +115,7 @@ impl Workspace {
         let meta = root.join(Self::META_DIR);
         let store = Store::new(meta, Native::default()).with_actor(actor.in_workspace(&root));
         store.init()?;
-        let sync = Sync::new(&store, &remote, config.node().clone());
+        let sync = Sync::new(&store, &remote, config.node().clone(), config.user());
         let cursor = sync.moved(None)?.cursor;
         sync.fetch_chains(slice::from_ref(target))?;
         let tip = store
@@ -234,9 +234,14 @@ impl Workspace {
         Ok(remote)
     }
 
-    /// Returns a sync with `remote`, as this node.
+    /// Returns a sync with `remote`, as this node, for its user.
     pub(super) fn sync<'s>(&'s self, remote: &'s Remote) -> Sync<'s> {
-        Sync::new(&self.store, remote, self.config.node().clone())
+        Sync::new(
+            &self.store,
+            remote,
+            self.config.node().clone(),
+            self.config.user(),
+        )
     }
 
     /// Returns the repository's remote, or fails if it has none, for the commands
@@ -346,12 +351,7 @@ impl Workspace {
                 .collect::<Result<_, _>>()?
         };
         let pushed = self.sync(self.require_remote()?).push(&changes)?;
-        for statement in &pushed.unsent {
-            println!(
-                "Statement {} stays here: it needs a statement the remote doesn't have",
-                statement.short()
-            );
-        }
+        Self::print_unsent(&pushed);
         if pushed.objects == 0 {
             println!("Everything up to date.");
         } else {
@@ -361,6 +361,18 @@ impl Workspace {
             );
         }
         Ok(())
+    }
+
+    /// Prints which of the user's statements `pushed` didn't send, keeping them
+    /// here.
+    pub(super) fn print_unsent(pushed: &Pushed) {
+        for statement in &pushed.unsent {
+            println!(
+                "Statement {} stays here: it, or one replacing it, needs a statement the remote \
+                 doesn't have",
+                statement.short()
+            );
+        }
     }
 
     /// Fetches the snapshots of `records`, revisions and acceptances, that the

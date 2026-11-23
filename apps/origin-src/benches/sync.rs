@@ -15,7 +15,7 @@ use origin_shared::api::LandRequest;
 use origin_shared::landing::{Landing, Proposal};
 use origin_shared::pack::Pack;
 use origin_shared::{
-    Base, ChangeId, EncodedObject, Kind, NodeKey, Record, RecordId, Revision, Statement,
+    Base, ChangeId, EncodedObject, Kind, NodeKey, Principal, Record, RecordId, Revision, Statement,
     TargetName, TreeId, Verdict,
 };
 use origin_src::auth::{Credentials, StaticTokens};
@@ -100,7 +100,7 @@ static SETUP: LazyLock<Setup> = LazyLock::new(|| {
     let store = Store::new(client.path().join(".origin"), Native::default());
     store.init().unwrap();
     let remote = Remote::open(&url, node.clone(), Some("bench".to_owned())).unwrap();
-    let sync = Sync::new(&store, &remote, "laptop".parse().unwrap());
+    let sync = Sync::new(&store, &remote, "laptop".parse().unwrap(), bench_user());
     sync.fetch_chains(&[TargetName::MAIN]).unwrap();
     sync.need(tip.into(), &[]).unwrap();
     store.write_all(&records).unwrap();
@@ -185,6 +185,11 @@ impl Setup {
     }
 }
 
+/// The user the benchmarks push as.
+fn bench_user() -> Principal {
+    "user:bench".parse().unwrap()
+}
+
 /// Fetches every file of the snapshot into an empty repository, as a clone
 /// does.
 #[divan::bench(sample_count = 10)]
@@ -205,7 +210,7 @@ fn clone_snapshot(bencher: Bencher<'_, '_>) {
             (dir, store)
         })
         .bench_local_refs(|(_, store)| {
-            let sync = Sync::new(store, &remote, "laptop".parse().unwrap());
+            let sync = Sync::new(store, &remote, "laptop".parse().unwrap(), bench_user());
             assert!(sync.need(setup.tip.into(), &[]).unwrap());
         });
 }
@@ -215,7 +220,12 @@ fn clone_snapshot(bencher: Bencher<'_, '_>) {
 fn fetch_100_edited(bencher: Bencher<'_, '_>) {
     let setup = &*SETUP;
     let remote = setup.remote();
-    let sync = Sync::new(&setup.client, &remote, "laptop".parse().unwrap());
+    let sync = Sync::new(
+        &setup.client,
+        &remote,
+        "laptop".parse().unwrap(),
+        bench_user(),
+    );
     let next = AtomicUsize::new(0);
     bencher
         .with_inputs(|| setup.theirs[next.fetch_add(1, Ordering::Relaxed) % SAMPLES as usize])
@@ -230,7 +240,12 @@ fn fetch_100_edited(bencher: Bencher<'_, '_>) {
 fn push_100_edited(bencher: Bencher<'_, '_>) {
     let setup = &*SETUP;
     let remote = setup.remote();
-    let sync = Sync::new(&setup.client, &remote, "laptop".parse().unwrap());
+    let sync = Sync::new(
+        &setup.client,
+        &remote,
+        "laptop".parse().unwrap(),
+        bench_user(),
+    );
     let next = AtomicUsize::new(0);
     bencher
         .with_inputs(|| {
@@ -285,14 +300,14 @@ static HISTORY_SETUP: LazyLock<History> = LazyLock::new(|| {
             deps: Vec::new(),
             snapshot: state,
             description: description.id().into(),
-            author: "user:bench".parse().unwrap(),
+            author: bench_user(),
         }
         .encode();
         let statement = Statement {
             subject: RecordId::Revision(revision.id().into()),
             kind: Kind::new("ci.test").unwrap(),
             verdict: Some(Verdict::Pass),
-            issuer: "user:bench".parse().unwrap(),
+            issuer: bench_user(),
             inputs: None,
             payload: None,
             supersedes: None,
@@ -310,7 +325,7 @@ static HISTORY_SETUP: LazyLock<History> = LazyLock::new(|| {
     let store = Store::new(client.path().join(".origin"), Native::default());
     store.init().unwrap();
     let remote = Remote::open(&url, node, Some("bench".to_owned())).unwrap();
-    let sync = Sync::new(&store, &remote, "laptop".parse().unwrap());
+    let sync = Sync::new(&store, &remote, "laptop".parse().unwrap(), bench_user());
     let fetch = sync.fetch(&[TargetName::MAIN], &changes, None).unwrap();
     assert_eq!(fetch.fetched.revisions, HISTORY as usize);
     let cursor = fetch.cursor;
@@ -329,7 +344,12 @@ static HISTORY_SETUP: LazyLock<History> = LazyLock::new(|| {
 #[divan::bench(sample_count = 20)]
 fn fetch_unchanged(bencher: Bencher<'_, '_>) {
     let history = &*HISTORY_SETUP;
-    let sync = Sync::new(&history.client, &history.remote, "laptop".parse().unwrap());
+    let sync = Sync::new(
+        &history.client,
+        &history.remote,
+        "laptop".parse().unwrap(),
+        bench_user(),
+    );
     bencher.bench_local(|| {
         let fetch = sync.fetch(&[], &[], Some(&history.cursor)).unwrap();
         assert_eq!(fetch.fetched, Fetched::default());
@@ -341,7 +361,12 @@ fn fetch_unchanged(bencher: Bencher<'_, '_>) {
 #[divan::bench(sample_count = 10)]
 fn fetch_unchanged_without_cursor(bencher: Bencher<'_, '_>) {
     let history = &*HISTORY_SETUP;
-    let sync = Sync::new(&history.client, &history.remote, "laptop".parse().unwrap());
+    let sync = Sync::new(
+        &history.client,
+        &history.remote,
+        "laptop".parse().unwrap(),
+        bench_user(),
+    );
     bencher.bench_local(|| {
         let fetch = sync.fetch(&[], &[], None).unwrap();
         assert_eq!(fetch.fetched, Fetched::default());

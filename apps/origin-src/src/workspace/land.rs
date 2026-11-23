@@ -55,7 +55,7 @@ impl Workspace {
         let Landings { onto, landings } = match self.remote_queue(&onto)? {
             Some(remote) => {
                 let sync = self.sync(remote);
-                sync.push(&[change])?;
+                Self::print_unsent(&sync.push(&[change])?);
                 let landed = remote.land(&request)?;
                 sync.fetch_chains(slice::from_ref(&landed.onto))?;
                 let mut changes = vec![change];

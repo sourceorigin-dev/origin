@@ -617,6 +617,20 @@ Writing:
 - A statement's subject must be visible to its issuer, and so must a
   promotion's original.
 
+Records put:
+- A statement, or a promotion, must be of a kind the caller may annotate,
+  except for reserved kinds, whose authors the policy checks for every caller
+  (`Policy::authorizes`).
+- A caller sees the targets and acceptances, every revision that changes a
+  path they read or changes nothing, and the statements about what they see.
+- A record that carries an attachment the repository already has, as a
+  description or a payload, must bring that attachment in its batch, so no
+  one reads an attachment by naming its id. A promotion is exempt, since it
+  carries its original's payload.
+- The records of a batch are read before the store's, so a batch may hold
+  revisions and statements about them. The caller sees the records their
+  batch adds, but a record the store already had only if they saw it before.
+
 Tokens:
 - Static tokens in the server configuration keep working.
 - `origin token issue --scope ... --ttl ...` issues short-lived tokens with
@@ -733,8 +747,8 @@ clone fetches a single snapshot, its target's tip.
 
 ### Pushing
 
-A push shares revisions, with their snapshots, and statements. It never lands
-anything. Before uploading anything, it compares each change's heads with the
+A push shares revisions, with their snapshots, and the user's statements. It
+never lands anything. Before uploading anything, it compares each change's heads with the
 remote's, and refuses a stale change: one that has a revision on the remote
 that this node lacks. The remote checks the heads again as it publishes the
 revisions, so a push racing another is refused too. Revisions only go to a
@@ -742,7 +756,8 @@ remote that has the acceptance they are based on. Each object is sent after
 the objects it needs: snapshots and attachments, then revisions, each with
 its reserved statements, then the other statements. A statement that needs a
 record the remote neither has nor receives stays here, and the push reports
-it.
+it. So do the statements it supersedes, which the remote would otherwise take
+without their replacement, and the statements that need those.
 
 Transfers are bounded both ways: a push is split into requests of at most
 `Pack::LIMIT` bytes, and a fetch's answers stop at that size, with the rest
@@ -751,6 +766,38 @@ requests before it left. A revision goes in the same request as its reserved
 statements, such as its conflicts and its abandonment, and the other
 statements about one record also share a request. So the remote never lands a
 revision whose abandonment, or a result whose replacement, is still to come.
+
+`put_records` writes the objects of a pack: snapshots, attachments, revisions
+and statements.
+- Each object must be well formed, and everything it needs must be in the
+  repository or the pack, of the right kind: a tree's entries (trees or
+  blobs, as each entry says), a revision's snapshot (a tree), description
+  (an attachment), base and dependencies, and a statement's subject and the
+  statements it supersedes or promotes. So the repository never holds a
+  record it cannot use.
+- A statement's payload may be missing, but if the repository has it, it must
+  be an attachment; a `core.conflict`'s payload, its list of conflicts, must
+  be present.
+- Records are looked up in the pack before the repository, so a pack may hold
+  a whole stack.
+- Acceptances are refused: only a target's authority writes them, by landing.
+  A statement of a reserved kind must come from whom `Policy::authorizes`
+  names, whoever puts it. A caller other than the owner may only put records
+  that are theirs, about what they see, and that change only what they may
+  write (see Permissions and credentials).
+- Blobs and trees are made durable before the records that refer to them, and
+  each tree after the trees it holds, so the repository never has a tree
+  without its contents, which a later pack may rely on. Statements are made
+  durable before the revisions they are about. Promotions come last: each is
+  checked against its original by `Store::claim`, once the original and both
+  subjects are stored.
+- It issues `core.divergent` for each change the new revisions made diverge.
+- It fails if the caller is anonymous, if an object is malformed or is an
+  acceptance, if it needs an object that neither the pack nor the repository
+  has or that is of another kind, if the caller may not put a record or
+  doesn't see what a statement is about, if the issuer of a reserved kind may
+  not issue it, if a promotion doesn't match its original (the other records
+  stay stored), or if the objects cannot be written.
 
 ## Workspaces and platform code
 
@@ -834,6 +881,26 @@ so `unsafe` stays forbidden everywhere. Windows is not supported.
 `FileSystem` lets writers refuse network file systems such as NFS, SMB, 9p
 and AFP. It can't detect FUSE file systems or synced folders such as Dropbox
 or iCloud, and accepts them.
+
+`DurableWrite` writes files durably as a group. `stage` writes each file under
+a temporary name in its destination's directory, and `is_temporary`
+recognizes these names. `commit` makes all the files durable with
+`Durability::sync_batch`, renames them into place from several threads, and
+syncs their directories. Readers see either the previous file or the complete
+new one, and once `commit` returns, a crash loses none of them.
+- Dropping the write before committing removes its temporary files. A crash
+  leaves them behind, so code that lists a directory written this way must
+  skip them, and remove the stale ones.
+- `sync_with` adds a file written in place, such as an append-only log, to the
+  batch sync. The file is then durable by the time the batch is published, at
+  no extra sync.
+- Files staged with `stage_in` are published in layers. `commit` renames each
+  layer's files and syncs their directories before it renames any file of
+  the next layer. A crash or a failed rename therefore never publishes a file
+  without the files of earlier layers, such as an object without the objects
+  it refers to. Each layer costs its directories' syncs, but the batch is
+  still synced once.
+- Files can be staged from several threads at once.
 
 ## On disk
 

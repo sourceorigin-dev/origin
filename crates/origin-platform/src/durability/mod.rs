@@ -49,27 +49,16 @@ pub trait Durability {
     fn sync_batch<'f>(&self, files: impl IntoIterator<Item = &'f Path>) -> Result<(), Error>;
 }
 
-/// Files written durably as a group, at the cost of one batch sync and one
+/// Files written durably as a group, at the cost of one batch sync plus one
 /// sync per directory involved.
 ///
-/// [`DurableWrite::stage`] writes each file under a temporary name in its
-/// destination's directory, which [`DurableWrite::is_temporary`] recognizes.
-/// [`DurableWrite::commit`] then makes them all durable with
-/// [`Durability::sync_batch`], renames them into place from several threads
-/// and syncs their directories. Readers see either the previous file or the
-/// complete new one, and once `commit` returns a crash loses none of them.
-/// Dropping the write before committing removes its temporary files; a crash
-/// leaves them behind, so code that lists a directory written this way skips
-/// them, and removes the stale ones.
-///
-/// Staging beside the destination keeps each rename within one directory,
-/// so writes to different directories never contend on a shared one.
-///
-/// [`DurableWrite::sync_with`] adds a file written in place, such as an
-/// append-only log, to the batch sync, so it becomes durable no later than
-/// the batch is published, at no extra sync.
-///
-/// Files can be staged from several threads at once.
+/// [`DurableWrite::stage`] writes each file under a temporary name next to its
+/// destination ([`DurableWrite::is_temporary`] recognizes them), and
+/// [`DurableWrite::commit`] makes all the files durable with
+/// [`Durability::sync_batch`], renames them into place, and syncs their
+/// directories. Readers see the previous file or the complete new one, and a
+/// crash loses none once `commit` returns. Dropping the write before
+/// committing removes its temporary files; `docs/design.md` has the rest.
 #[derive(Debug)]
 pub struct DurableWrite<'a, P> {
     platform: &'a P,
@@ -79,13 +68,21 @@ pub struct DurableWrite<'a, P> {
 /// The files staged so far.
 #[derive(Debug, Default)]
 struct Staged {
-    /// Each temporary file and the path it's published to.
-    files: Vec<(PathBuf, PathBuf)>,
-    /// The directories whose entries must be durable: the published files'
-    /// parents, and those added with [`DurableWrite::sync_dir_with`].
-    dirs: BTreeSet<PathBuf>,
+    /// The files of each layer, in the order the layers are published.
+    layers: Vec<Layer>,
     /// Files written in place, synced with the batch but never renamed.
     in_place: Vec<PathBuf>,
+}
+
+/// The files of one layer of a [`DurableWrite`].
+#[derive(Debug, Default)]
+struct Layer {
+    /// Each temporary file and the path it's published to.
+    files: Vec<(PathBuf, PathBuf)>,
+    /// The directories whose entries must be durable before the next layer is
+    /// published: the parents of the published files and, for the first layer,
+    /// the directories added with [`DurableWrite::sync_dir_with`].
+    dirs: BTreeSet<PathBuf>,
 }
 
 /// Distinguishes the temporary files of one process.
@@ -149,6 +146,21 @@ impl<'a, P: Durability> DurableWrite<'a, P> {
         path: impl Into<PathBuf>,
         write: impl FnOnce(&mut StagedFile) -> Result<(), E>,
     ) -> Result<(), E> {
+        self.stage_in(0, path, write)
+    }
+
+    /// Stages `path` like [`DurableWrite::stage_with`], in `layer`. The file is
+    /// published once every file of the earlier layers is durable.
+    ///
+    /// # Errors
+    ///
+    /// Fails like [`DurableWrite::stage_with`].
+    pub fn stage_in<E: From<Error>>(
+        &self,
+        layer: usize,
+        path: impl Into<PathBuf>,
+        write: impl FnOnce(&mut StagedFile) -> Result<(), E>,
+    ) -> Result<(), E> {
         let path = path.into();
         let relied_on = self.create_parents(&path)?;
         let temp = Self::parent(&path).join(format!(
@@ -163,18 +175,19 @@ impl<'a, P: Durability> DurableWrite<'a, P> {
             return Err(error);
         }
         let mut staged = self.staged.lock();
-        staged.dirs.insert(Self::parent(&path).to_owned());
-        staged.dirs.extend(relied_on);
-        staged.files.push((temp, path));
+        let layer = staged.layer(layer);
+        layer.dirs.insert(Self::parent(&path).to_owned());
+        layer.dirs.extend(relied_on);
+        layer.files.push((temp, path));
         Ok(())
     }
 
-    /// Makes the entries of `dir` durable with the batch, as for a file
-    /// staged in it: for a file another write published, which this one
-    /// relies on, and may not have synced yet.
+    /// Makes the entries of `dir` durable with the batch's first layer, as if a
+    /// file were staged in it. Use it for a file that another write published,
+    /// that this write relies on, and that may not have been synced yet.
     pub fn sync_dir_with(&self, dir: impl Into<PathBuf>) {
         let mut staged = self.staged.lock();
-        staged.dirs.insert(dir.into());
+        staged.layer(0).dirs.insert(dir.into());
     }
 
     /// Makes `path`, a file already written in place, durable with the
@@ -240,26 +253,32 @@ impl<'a, P: Durability> DurableWrite<'a, P> {
     }
 
     /// Syncs every staged file and every file added with
-    /// [`DurableWrite::sync_with`], renames the staged files into place, then
-    /// syncs each directory involved once.
+    /// [`DurableWrite::sync_with`]. Then, one layer at a time, renames the
+    /// layer's files into place and syncs each directory involved once.
     ///
     /// # Errors
     ///
-    /// Fails if the files cannot be synced, in which case none is published,
-    /// or if a file cannot be renamed or a directory cannot be synced. Files
-    /// renamed before such a failure are visible but may not be durable.
+    /// Fails if the files cannot be synced, and then publishes none of them.
+    /// Fails if a file cannot be renamed or a directory cannot be synced, and
+    /// then publishes none of the later layers. Files of the failed layer that
+    /// were renamed before the failure are visible but may not be durable.
     pub fn commit(mut self) -> Result<(), Error> {
         let staged = self.staged.get_mut();
-        let temps = staged.files.iter().map(|(temp, _)| temp.as_path());
+        let temps = staged
+            .layers
+            .iter()
+            .flat_map(|layer| &layer.files)
+            .map(|(temp, _)| temp.as_path());
         self.platform
             .sync_batch(temps.chain(staged.in_place.iter().map(PathBuf::as_path)))?;
-        Self::rename_all(&staged.files)?;
-        // Every file is published, so dropping the write removes none.
-        staged.files.clear();
-        for dir in &staged.dirs {
-            self.platform
-                .sync_dir(dir)
-                .map_err(|source| Error::new(Op::Sync, dir, source))?;
+        for layer in &mut staged.layers {
+            Self::rename_all(&layer.files)?;
+            layer.files.clear();
+            for dir in &layer.dirs {
+                self.platform
+                    .sync_dir(dir)
+                    .map_err(|source| Error::new(Op::Sync, dir, source))?;
+            }
         }
         Ok(())
     }
@@ -299,11 +318,22 @@ impl<P> Drop for DurableWrite<'_, P> {
     /// Removes the temporary files that were not published.
     fn drop(&mut self) {
         let staged = self.staged.get_mut();
-        for (temp, _) in &staged.files {
+        for (temp, _) in staged.layers.iter().flat_map(|layer| &layer.files) {
             // Best effort: a leftover is garbage that readers skip. After a
             // failed rename, some of these are already published.
             let _ = fs::remove_file(temp);
         }
+    }
+}
+
+impl Staged {
+    /// Returns the layer numbered `layer`, creating it and any missing layers
+    /// before it.
+    fn layer(&mut self, layer: usize) -> &mut Layer {
+        if self.layers.len() <= layer {
+            self.layers.resize_with(layer + 1, Layer::default);
+        }
+        &mut self.layers[layer]
     }
 }
 

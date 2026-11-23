@@ -45,7 +45,12 @@ impl Client {
     }
 
     fn sync(&self) -> Sync<'_> {
-        Sync::new(&self.store, &self.remote, "laptop".parse().unwrap())
+        Sync::new(
+            &self.store,
+            &self.remote,
+            "laptop".parse().unwrap(),
+            "user:ada".parse().unwrap(),
+        )
     }
 
     /// Writes a revision of `change` with `files` on `base`, with every object
@@ -424,6 +429,51 @@ fn pushes_statements_after_those_they_need() {
     let pushed = client.sync().push(&[change]).unwrap();
     assert_eq!(pushed.statements, 0);
     assert_eq!(pushed.unsent, [StatementId::from(newer.encode().id())]);
+
+    client
+        .sync()
+        .push(&[ChangeId::from_bytes([2; 16])])
+        .unwrap();
+    let pushed = client.sync().push(&[change]).unwrap();
+    assert_eq!((pushed.statements, &pushed.unsent[..]), (1, &[][..]));
+    assert!(server.store.contains(newer.encode().id()).unwrap());
+}
+
+#[test]
+fn a_push_never_sends_a_result_without_its_replacement() {
+    let server = Repo::new(MAIN_RULES);
+    let client = Client::new(&server);
+    client.sync().fetch_chains(&[TargetName::MAIN]).unwrap();
+    let base = main_tip(&client.store);
+    let revision = client.revision(1, &[], base, &[("a", "1")]);
+    let pass = ci_test(revision, "user:ada");
+    let other = client.revision(2, &[], base, &[("b", "1")]);
+    let original = Statement {
+        verdict: Some(Verdict::Fail),
+        ..ci_test(other, "user:ada")
+    };
+    let fail = Statement {
+        subject: RecordId::Revision(revision),
+        supersedes: Some(pass.encode().id().into()),
+        promoted_from: Some(original.encode().id().into()),
+        ..original.clone()
+    };
+    client
+        .store
+        .write_all(&[pass.encode(), original.encode(), fail.encode()])
+        .unwrap();
+
+    let change = ChangeId::from_bytes([1; 16]);
+    let pushed = client.sync().push(&[change]).unwrap();
+    assert_eq!(pushed.statements, 0, "{pushed:?}");
+    let mut unsent = pushed.unsent;
+    unsent.sort_unstable();
+    let mut held: Vec<StatementId> = [&fail, &pass]
+        .map(|statement| statement.encode().id().into())
+        .into();
+    held.sort_unstable();
+    assert_eq!(unsent, held);
+    assert!(!server.store.contains(pass.encode().id()).unwrap());
 }
 
 #[test]
