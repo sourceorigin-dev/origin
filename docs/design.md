@@ -791,14 +791,17 @@ long the history. Only without a cursor, or once it expired, does it compare
 every change this node knows.
 
 Snapshots are fetched when something reads them, such as a checkout, so a
-clone fetches a single snapshot, its target's tip.
+clone fetches a single snapshot, its target's tip. The remote withholds the
+content of the paths the user may not read: their tree entries stay, and
+nothing here reads them (`Store::with_withheld`).
 
 ### Pushing
 
 A push shares revisions, with their snapshots, and the user's statements. It
 never lands anything. Before uploading anything, it compares each change's heads with the
-remote's, and refuses a stale change: one that has a revision on the remote
-that this node lacks. The remote checks the heads again as it publishes the
+remote's, and refuses a change that is stale (it has a revision on the remote
+that this node lacks) or that has a revision changing a path the user may not
+write. The remote checks the heads again as it publishes the
 revisions, so a push racing another is refused too. Revisions only go to a
 remote that has the acceptance they are based on. Each object is sent after
 the objects it needs: snapshots and attachments, then revisions, each with
@@ -897,6 +900,21 @@ the repository's store:
   from it (on Btrfs, XFS or APFS), or copied otherwise. The rest are written
   from the store.
 
+Each clone and fetch saves the user's rights on the remote in the repository's
+`.origin/access/`, in a file of their own, keyed by who the remote says they
+are and their token's scope. So users, or tokens of one user, whose
+workspaces share the repository never check their work against each other's
+rights, and a new token with the same scope keeps what the old one knew.
+Until a user syncs, they get the rights of whoever cloned the repository.
+- The paths a user may not read are withheld: their content never reaches the
+  repository, they are never in the working copy, and snapshots keep them as
+  they were.
+- A push that changes a path the user may not write fails before sending
+  anything. It checks the user's own rights, which it asks the remote for if
+  they never synced.
+- When the remote lets the user read more, a fetch restores the files they
+  can now read.
+
 Checkouts are crash-safe:
 - Before any working-copy move that changes files, Origin durably writes a
   `moving` marker. It records the trees the move goes from and to, and the
@@ -907,6 +925,43 @@ Checkouts are crash-safe:
   move is refused and undone.
 - After a crash, the next command finishes the move or takes it back. It only
   touches files that still match one side, so unrecorded edits survive.
+
+A repository can have several working copies, called workspaces, that share
+its store and op log:
+- The main working copy's `.origin` holds the store. The others' `.origin`
+  holds only `workspace`, `state`, `moving`, `lock`, and a `repository` file
+  that names the main one's `.origin`.
+- Commands in different workspaces run at the same time. In one workspace,
+  each command waits for the previous one to finish, except `watch`, which
+  never touches the working copy, and `workspace rm`, which opens the
+  workspace it removes.
+- The working copy is always on a revision of the current change. Every
+  command that reads the working copy snapshots its files first. The files it
+  finds are the draft. Commands that only read the working copy show the
+  draft without recording it. Commands that build on the working copy record
+  the draft first: if the files changed, they become a new revision of the
+  change.
+- Records are written before anything refers to them: the snapshot's
+  objects, then the revision, then the `workspace` file that names it. The
+  statements a new revision needs, such as its unresolved conflicts, are
+  written before the revision, so it is never found without them.
+- A command that moves the working copy to another revision, such as a merge,
+  checks out the files before it writes the revision. If a file was edited
+  since the snapshot, the checkout fails and puts back the files it changed.
+  The working copy and its change stay where they were, so the command can
+  run again.
+- Another workspace can move the change on without this working copy: the
+  change can land, or the landing queue can rebase it. The working copy is
+  then behind its change. Only `origin pull` moves it to where the change
+  went, merging the edits made since. Until then, edits stay unrecorded so
+  the change doesn't fork, commands that only read the working copy say where
+  the change went, and commands that build on it fail.
+- Every move of the working copy is logged in the op log, in an entry made
+  durable together with the `workspace` file that names the new revision. A
+  move that changes files first writes `moving`, which names the files it
+  starts from, the files it goes to, and their revision. If a crash cuts the
+  move short, the next command to open the workspace finishes it, or takes it
+  back if the revision wasn't written (`Workspace::finish_move`).
 
 Code that differs between platforms lives behind traits in
 `crates/origin-platform`:

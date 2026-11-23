@@ -9,6 +9,7 @@
 //!   state                      the stat cache of the last snapshot
 //!   moving                     the move in progress, if a checkout is
 //!   lock                       held by the command working in the working copy
+//!   remote, access             the remote, and what it lets the user do
 //! ```
 //!
 //! A repository can have several working copies, called workspaces, that share
@@ -292,7 +293,7 @@ impl Workspace {
         let revision =
             Self::read_pointer(root)?.ok_or_else(|| WorkspaceError::Incomplete(root.to_owned()))?;
         let store = Store::open_writable(store, Native::default())?;
-        let store = store.with_actor(actor.in_workspace(root));
+        let store = Self::withholding(store.with_actor(actor.in_workspace(root)), &config)?;
         let mut workspace = Self {
             lock: Some(lock),
             ..Self::at(root.to_owned(), store, config, revision)
@@ -435,7 +436,7 @@ impl Workspace {
         let revision: Revision = self.store.get(self.revision)?;
         let path = self.meta(Self::STATE);
         let loaded = StatCache::load(&path);
-        let (files, cache) = Worktree::new(&self.root, &self.store).snapshot(&loaded)?;
+        let (found, cache) = Worktree::new(&self.root, &self.store).snapshot(&loaded)?;
         let cache = match cache {
             Some(cache) => {
                 cache
@@ -445,6 +446,10 @@ impl Workspace {
             }
             None => loaded,
         };
+        let (files, trees) = self.store.keep_withheld(found, revision.snapshot)?;
+        if !trees.is_empty() {
+            self.store.write_all(&trees)?;
+        }
         let mut index = Index::open(&self.store)?;
         let behind = self.behind(&index, self.revision, &revision)?;
         let mut conflicts = self.conflicts(&mut index, self.revision, &revision)?;
@@ -858,15 +863,15 @@ impl Workspace {
 
     /// Returns the changes that turn the files of `from` into those of the snapshot
     /// of `to`, a revision or an acceptance, after fetching what the repository
-    /// lacks of it. Moves call it before they write `moving`, so a failed fetch
-    /// moves nothing.
+    /// lacks of it. Paths the remote withholds stay as they are. Moves call it
+    /// before they write `moving`, so a failed fetch moves nothing.
     fn changes(&self, from: TreeId, to: RecordId) -> Result<Vec<FileChange>, WorkspaceError> {
         self.need(&[to])?;
         let tree = self
             .store
             .snapshot_of(to)?
             .ok_or(SyncError::NoSnapshot(to))?;
-        Ok(match self.store.diff(from, tree) {
+        let changes = match self.store.diff(from, tree) {
             Err(StoreError::NotFound(missing)) => match self.remote()? {
                 Some(remote) => {
                     self.sync(remote).repair(to)?;
@@ -875,7 +880,21 @@ impl Workspace {
                 None => return Err(StoreError::NotFound(missing).into()),
             },
             changes => changes?,
-        })
+        };
+        if Self::remote_url(&self.store)?.is_some() {
+            let mut missing = Vec::new();
+            for change in &changes {
+                if let Some(new) = change.new
+                    && !self.store.contains(new.id)?
+                {
+                    missing.push(change.path.clone());
+                }
+            }
+            if !missing.is_empty() {
+                self.sync(self.require_remote()?).need_paths(to, missing)?;
+            }
+        }
+        Ok(changes)
     }
 
     /// Makes the files match a snapshot, given `changes`, how they differ from it,
