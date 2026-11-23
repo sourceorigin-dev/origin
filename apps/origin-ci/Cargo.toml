@@ -11,6 +11,7 @@ repository.workspace = true
 origin-platform.workspace = true
 origin-shared.workspace = true
 origin-src.workspace = true
+parking_lot.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 toml.workspace = true

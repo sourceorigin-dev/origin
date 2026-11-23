@@ -679,6 +679,36 @@ sweep: making it die with the worker would need code run between `fork` and
 get the terminal's Ctrl-C either: interrupting `origin ci run` leaves it to the
 next sweep, or to die when it writes to output no one reads anymore.
 
+The runner reads the checks from the `checks.toml` of a snapshot it is given:
+for `origin ci run`, which issues results as the user, the record's own
+snapshot; for a worker, the tip of the target the record lands on, so a change
+can't redefine the checks that guard the target. It fetches that snapshot and
+the record's, unless it kept one with the same root tree, and asks the remote
+to promote results with the same input digest to the record. Then, for each
+check, it:
+
+1. checks the snapshot out in a directory of its own, so no check sees what
+   another changed;
+2. runs the check's toolchain command there. Its output, the command and the
+   inputs make up what a result declares it depended on;
+3. skips the check if a result by the runner's issuer, run or promoted, that
+   declares the same already covers the record;
+4. otherwise runs the command there and issues a statement as its issuer:
+   `pass` if it exited with 0, with the end of its output as the payload,
+   superseding the issuer's previous result about the record.
+
+`checks.toml` is always one of the inputs: for `origin ci run`, as the record
+holds it, and for a worker, as the state of the target the record is on holds
+it. A check defined by a different `checks.toml` than the one its results
+declare, as when the target's tip moved past the record's base, depends on more
+than it declares. Its result is then declared `external`, so it is never
+promoted.
+
+A check without a toolchain command knows what it depends on without a
+checkout, so the runner first looks for a result that covers it, and checks the
+snapshot out only to run it. Each checkout is removed afterwards, and the
+commands run there are killed along with what they left running.
+
 ## Permissions and credentials
 
 Path rules map a path to `none`, `read` or `write` for everyone, groups and

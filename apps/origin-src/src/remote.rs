@@ -13,9 +13,9 @@ use origin_client::Client;
 use origin_shared::Head;
 use origin_shared::access::Rights;
 use origin_shared::api::{
-    BrowseQuery, ErrorCode, EventsQuery, FetchRecords, FetchSnapshot, Inventory, InventoryRequest,
-    IssuedToken, LandRequest, Landings, Listing, LogEntry, LogQuery, NewTarget, PutQuery, RepoName,
-    Stored, TargetInfo, TokenRequest,
+    Annotation, BrowseQuery, ErrorCode, EventsQuery, FetchRecords, FetchSnapshot, Inventory,
+    InventoryRequest, IssuedToken, LandRequest, Landings, Listing, LogEntry, LogQuery, NewTarget,
+    PromoteRequest, PutQuery, RepoName, StatementsQuery, Stored, TargetInfo, TokenRequest,
 };
 use origin_shared::event::Page;
 use origin_shared::landing::Pending;
@@ -85,6 +85,12 @@ calls! {
     /// it gives.
     fn push(pack: Pack, query: &PutQuery) -> Stored =
         push_records(&pack, query), push(pack, &query.expect.0);
+    /// Returns the statements about a record.
+    fn statements(query: &StatementsQuery) -> Vec<Annotation> =
+        statements(query), statements(query.subject);
+    /// Promotes results to a record, as statements the remote issues.
+    fn promote(request: &PromoteRequest) -> Vec<Annotation> =
+        promote(request), promote(request.subject);
     /// Submits a landing to the remote's queue.
     fn land(request: &LandRequest) -> Landings = land(request), land(request);
     /// Lists the landings waiting on the remote.
