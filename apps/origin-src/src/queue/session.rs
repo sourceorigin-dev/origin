@@ -6,6 +6,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
+use std::slice;
 
 use origin_platform::{LockedFile, Platform};
 use origin_shared::landing::{Blocked, Landing, Pending, Proposal};
@@ -261,9 +262,8 @@ impl<P: Platform> Session<'_, '_, P> {
         if Policy::governing(encoded.id().into(), acceptance.body())? != self.policy_head {
             return Err(PolicyError::NotPredecessor(acceptance.body().seq).into());
         }
-        records.push(encoded);
-        store.write_all(&records)?;
-        let id = store.append(&self.onto, &acceptance)?;
+        let id = encoded.id().into();
+        store.append_all(&self.onto, slice::from_ref(&acceptance), &records)?;
         self.tip = Head {
             seq: acceptance.body().seq,
             acceptance: id,

@@ -43,6 +43,23 @@ fn land<P: Platform>(store: &Store<P>, target: &TargetName, count: usize) -> Vec
 }
 
 #[test]
+fn appending_several_acceptances_creates_the_target() {
+    let (_dir, store) = store();
+    let main = TargetName::MAIN;
+    let first = acceptance(&main, None);
+    let second = acceptance(
+        &main,
+        Some(Head {
+            seq: 0,
+            acceptance: first.encode().id().into(),
+        }),
+    );
+    store.append_all(&main, &[first, second], &[]).unwrap();
+    assert_eq!(store.targets().unwrap(), [TargetName::MAIN]);
+    assert_eq!(store.head(&main).unwrap().unwrap().seq, 1);
+}
+
+#[test]
 fn appends_form_a_chain() {
     let (_dir, store) = store();
     let main = TargetName::MAIN;
@@ -191,6 +208,48 @@ fn appends_repair_what_a_crash_left() {
 }
 
 #[test]
+fn repairs_advance_the_target_to_every_acceptance_left_unpublished() {
+    let (_dir, store) = store();
+    let main = TargetName::MAIN;
+    let ids = land(&store, &main, 1);
+    let before = store.oplog().last_seq().unwrap();
+    let files = store.target_files(main.id());
+    let mut log = fs::OpenOptions::new()
+        .append(true)
+        .open(files.log())
+        .unwrap();
+    let mut head = Head {
+        seq: 0,
+        acceptance: ids[0],
+    };
+    for _ in 0..3 {
+        let next = acceptance(&main, Some(head)).encode();
+        store.write_all(slice::from_ref(&next)).unwrap();
+        head = Head {
+            seq: head.seq + 1,
+            acceptance: next.id().into(),
+        };
+        writeln!(log, "{}", head.acceptance).unwrap();
+    }
+
+    let stale = acceptance(&main, store.head(&main).unwrap());
+    assert!(store.append(&main, &stale).is_err(), "repaired first");
+    let advanced: Vec<_> = store
+        .oplog()
+        .after(before)
+        .unwrap()
+        .entries
+        .into_iter()
+        .filter_map(|entry| match entry.effect {
+            Effect::Advanced { seq, .. } => Some(seq),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(advanced, [1, 2, 3], "one event per acceptance");
+    assert_eq!(store.head(&main).unwrap(), Some(head));
+}
+
+#[test]
 fn repairs_sync_the_log_before_publishing_it() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::new(dir.path().join(".origin"), Recorder::default());
@@ -231,6 +290,25 @@ fn repairs_sync_the_log_before_publishing_it() {
 }
 
 #[test]
+fn targets_are_named_before_their_first_head() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path().join(".origin"), Recorder::default());
+    store.init().unwrap();
+    let main = TargetName::MAIN;
+    store.platform.0.lock().clear();
+
+    store.append(&main, &acceptance(&main, None)).unwrap();
+    let targets = Synced::Dir(store.targets_dir());
+    let synced = store.platform.0.into_inner();
+    let named = synced.iter().position(|synced| *synced == targets);
+    // The head, and the op log entry saying it advanced.
+    let published = synced
+        .iter()
+        .rposition(|synced| *synced == Synced::Batch(2));
+    assert!(named.unwrap() < published.unwrap(), "{synced:?}");
+}
+
+#[test]
 fn acceptances_are_durable_before_the_log_refers_to_them() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::new(dir.path().join(".origin"), Recorder::default());
@@ -252,7 +330,6 @@ fn acceptances_are_durable_before_the_log_refers_to_them() {
             Synced::Dir(dir.path().join(".origin/objects/loose")),
             Synced::Dir(dir.path().join(".origin/objects/loose").join(&hex[..2])),
             Synced::File,
-            // The head, and the op log entry saying it advanced.
             Synced::Batch(2),
             Synced::Dir(targets),
             Synced::Dir(target),
