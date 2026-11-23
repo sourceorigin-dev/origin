@@ -117,6 +117,16 @@ send each server under `[tokens]`, by its URL
 (`"http://127.0.0.1:7878" = "<token>"`), or in `$ORIGIN_TOKEN`. See
 [the design](docs/design.md) for the model.
 
+## Plugins
+
+`origin <name>` runs `origin-<name>` from `PATH` when `<name>` isn't a
+built-in command, with its arguments; its output and exit code are the
+command's. Run in a working copy, whose draft it records first, it passes
+the plugin `ORIGIN_REPOSITORY`, the directory holding the repository's store,
+`ORIGIN_REVISION`, the working copy's revision, and `ORIGIN_REMOTE`, the
+remote, if there's one. Plugins use origin's public API only: a server's
+over HTTP, or for a local path, the same service in-process.
+
 ## Permissions
 
 What each user may do lives in `policy.toml`, so changing it is a landing

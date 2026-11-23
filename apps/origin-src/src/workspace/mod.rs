@@ -52,6 +52,7 @@ use crate::conflict::Conflicts;
 use crate::index::{FindChangeError, FindError, Index};
 use crate::oplog::{Actor, Effect, Move, Why};
 use crate::output::FileDiff;
+use crate::plugin::Context;
 use crate::policy::{Policy, PolicyError};
 use crate::queue::{LandError, Queue};
 use crate::remote::{Remote, RemoteError, RemoteUrl};
@@ -413,6 +414,21 @@ impl Workspace {
         Ok(match index {
             Some(index) => service.with_index(index),
             None => service,
+        })
+    }
+
+    /// Returns what a plugin run in this working copy learns of it, after recording
+    /// the draft.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the working copy cannot be snapshotted, or the remote's URL cannot
+    /// be read.
+    pub fn plugin_context(&mut self) -> Result<Context, WorkspaceError> {
+        Ok(Context {
+            repository: self.store.root().to_owned(),
+            revision: self.refresh()?.id,
+            remote: Self::remote_url(&self.store)?,
         })
     }
 

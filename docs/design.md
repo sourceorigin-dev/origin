@@ -589,6 +589,12 @@ external = true          # reads the network: never promoted
 - A change in a toolchain's output only reaches the queue's promotions through
   the inputs. Pin toolchains in an input file, such as `rust-toolchain.toml`.
 
+The environment of a tool run in a working copy: `ORIGIN_REPOSITORY` is the
+directory holding the repository's store (its main working copy's `.origin`),
+which a remote on a local path accepts; `ORIGIN_REVISION` is the full id of the
+revision the working copy is; `ORIGIN_REMOTE` is the repository's remote, if it
+has one. Outside a working copy, none of them is set.
+
 ## Permissions and credentials
 
 Path rules map a path to `none`, `read` or `write` for everyone, groups and

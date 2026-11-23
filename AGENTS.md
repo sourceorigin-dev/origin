@@ -25,7 +25,8 @@ review bots read and write at the same time, written in Rust.
   same calls over the SDK or, for a local path, in-process. Every call
   takes a `Caller`, authenticated by `auth.rs`; `permissions.rs` filters
   what it reads and checks what it writes, by the rights `policy.rs`
-  resolves from `policy.toml`.
+  resolves from `policy.toml`. `plugin.rs` runs `origin <name>` as
+  `origin-<name>` from `PATH`, passing the repository in the environment.
 - `tools/xtask`: development tasks, run with `cargo xtask`, such as timing
   origin against git (`just bench-git`).
 
@@ -54,7 +55,9 @@ temporary directory, which holds the user's `config.toml` and node key.
 The HTTP tests drive every SDK method against a real server. One fails
 while `docs/openapi.json` is stale: `just openapi` rewrites it. The sync
 tests clone, push and land through `origin serve` and through local paths;
-`tests/common` holds the helpers every end-to-end test shares.
+`apps/origin-src/tests/common` holds the helpers every end-to-end test
+shares, plugins' included, which run `origin` from the target directory
+their own binary is built in.
 
 ## Validation
 

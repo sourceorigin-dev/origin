@@ -4,6 +4,7 @@
 
 use std::convert::Infallible;
 use std::env;
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::str::FromStr;
 
@@ -18,8 +19,9 @@ use origin_shared::{
 
 use crate::config::UserConfig;
 use crate::oplog::Actor;
+use crate::plugin::Plugin;
 use crate::server::ServerConfig;
-use crate::workspace::{Annotated, Payload, Workspace};
+use crate::workspace::{Annotated, Payload, Workspace, WorkspaceError};
 
 /// A modern, git-compatible source control system.
 #[derive(Debug, Parser)]
@@ -64,6 +66,10 @@ enum Command {
     Token(TokenCommand),
     #[command(flatten)]
     Workspace(WorkspaceCommand),
+    /// Any other command runs the plugin `origin-<command>` from `PATH`, such
+    /// as `origin-ci` for `origin ci`.
+    #[command(external_subcommand)]
+    Plugin(Vec<OsString>),
 }
 
 #[derive(Debug, Subcommand)]
@@ -544,7 +550,8 @@ impl Cli {
             Command::Init { .. }
             | Command::Clone { .. }
             | Command::Token(_)
-            | Command::Workspace(_) => {}
+            | Command::Workspace(_)
+            | Command::Plugin(_) => {}
         }
         let config = UserConfig::load()?;
         // The op log records the command line, without the program's name,
@@ -563,6 +570,15 @@ impl Cli {
                 Workspace::clone(&url, path.as_deref(), &target, config, &actor)?;
             }
             Command::Workspace(command) => command.run(config, &actor)?,
+            Command::Plugin(args) => {
+                let cwd = env::current_dir().context("cannot read the current directory")?;
+                let context = match Workspace::discover(&cwd, config, &actor) {
+                    Ok(mut workspace) => Some(workspace.plugin_context()?),
+                    Err(WorkspaceError::NotFound(_)) => None,
+                    Err(error) => return Err(error.into()),
+                };
+                match Plugin(args).exec(context.as_ref())? {}
+            }
             Command::Token(TokenCommand::Issue { scope, ttl, .. }) => {
                 let cwd = env::current_dir().context("cannot read the current directory")?;
                 Workspace::discover(&cwd, config, &actor)?.issue_token(scope, ttl)?;
