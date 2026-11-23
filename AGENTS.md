@@ -66,6 +66,11 @@ tests clone, push and land through `origin serve` and through local paths;
 shares, plugins' included, which run `origin` from the target directory
 their own binary is built in.
 
+The swarm scenario (`.agents/skills/swarm-scenario`) is a skill run from
+T3 Code: agents land overlapping work through a server and a CI worker
+while processes are killed. `bash .agents/skills/swarm-scenario/scripted.sh`
+is its dry run, with scripted edits in place of the agents.
+
 ## Validation
 
 `just check-changed` runs CI's quick checks on what a change reaches;
