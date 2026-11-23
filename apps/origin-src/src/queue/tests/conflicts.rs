@@ -23,11 +23,16 @@ fn conflicts_block_until_a_revision_merges() {
     assert_eq!(conflict.kind, Kind::CONFLICT);
     assert_eq!(conflict.subject, RecordId::Revision(two));
     assert_eq!(repo.land(2), blocked, "retrying issues the same statement");
+    assert_eq!(
+        Queue::pending(&repo.store).unwrap(),
+        std::slice::from_ref(pending)
+    );
 
     // A new revision that takes `main`'s version merges.
     let tip = Base::Acceptance(repo.tip(&TargetName::MAIN).acceptance);
     repo.revision(2, &[two], tip, &[("shared", "one"), ("more", "m")]);
     assert!(matches!(repo.land(2)[..], [Landing::Landed { .. }]));
+    assert_eq!(Queue::pending(&repo.store).unwrap(), []);
 }
 
 #[test]
