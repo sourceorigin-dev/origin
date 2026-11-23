@@ -3,6 +3,9 @@
 //! it waiting.
 
 use std::collections::HashSet;
+use std::fs;
+use std::io;
+use std::path::PathBuf;
 
 use origin_platform::{LockedFile, Platform};
 use origin_shared::{
@@ -149,6 +152,7 @@ impl<P: Platform> Session<'_, '_, P> {
             return self.block(stack.clone(), RecordId::Revision(id), &merge.conflicts);
         }
         if merge.tree == self.state {
+            self.forget(&proposal)?;
             return Ok(Landing::Unchanged(proposal));
         }
         let tip = Base::Acceptance(self.tip.acceptance);
@@ -240,6 +244,7 @@ impl<P: Platform> Session<'_, '_, P> {
                 subject: candidate.subject,
                 blocked: Blocked::Evidence(missing),
             };
+            self.keep(&pending)?;
             return Ok(Landing::Pending(pending));
         }
 
@@ -269,6 +274,7 @@ impl<P: Platform> Session<'_, '_, P> {
             self.policy = policy;
             self.policy_head = id;
         }
+        self.forget(&candidate.proposal)?;
         Ok(Landing::Landed {
             proposal: candidate.proposal,
             source: candidate.source,
@@ -322,7 +328,38 @@ impl<P: Platform> Session<'_, '_, P> {
                 paths: conflicts.paths(),
             },
         };
+        self.keep(&pending)?;
         Ok(Landing::Pending(pending))
+    }
+
+    /// Returns the path of the file that keeps a waiting landing of `proposal`.
+    fn pending_path(&self, proposal: &Proposal) -> Result<PathBuf, StoreError> {
+        let name = match proposal {
+            Proposal::Change(change) => format!("change-{change}"),
+            Proposal::Target(target) => format!("target-{}", target.id()),
+        };
+        Ok(self.queue.queue_dir(self.onto.id())?.join(name))
+    }
+
+    /// Durably writes a waiting landing to its file, replacing the last
+    /// attempt's.
+    fn keep(&self, pending: &Pending) -> Result<(), StoreError> {
+        let write = self.store().durable_write();
+        write.stage(
+            self.pending_path(&pending.proposal)?,
+            pending.encode().as_bytes(),
+        )?;
+        Ok(write.commit()?)
+    }
+
+    /// Durably deletes the file of a landing that waited, if there is one.
+    pub(super) fn forget(&self, proposal: &Proposal) -> Result<(), StoreError> {
+        let path = self.pending_path(proposal)?;
+        match fs::remove_file(&path) {
+            Ok(()) => self.store().sync_dir(path.parent().unwrap_or(&path)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(StoreError::io(&path, source)),
+        }
     }
 
     /// Reads the history of `tips`, the target's tip and another target's, for

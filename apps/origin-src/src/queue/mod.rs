@@ -5,8 +5,8 @@
 //! the target does not have yet, from the bottom up, each with its own
 //! acceptance. A change that is divergent, abandoned by its creator, or
 //! whose head has unresolved conflicts (see [`conflict`](crate::conflict))
-//! is refused. Landing stops at the first change that waits. For each
-//! revision:
+//! is refused. If a change waits, the queue keeps the whole stack waiting,
+//! so a retry lands the rest once that change can land. For each revision:
 //!
 //! 1. **Rebase.** The changes the revision made to its base are merged onto
 //!    the target's tip, file by file ([`Store::merge`]). A revision made on
@@ -38,15 +38,19 @@
 //! start from it.
 //!
 //! Each target's queue lives in `queue/<target id>/`. It holds a `lock`,
-//! taken while landing so landings on one target never race.
+//! taken while landing so landings on one target never race, and a file for
+//! each waiting landing, `change-<id>` or `target-<target id>`, so waiting
+//! landings can be listed and retried.
 
+mod pending;
 mod session;
 
 use std::fmt;
 use std::fs;
+use std::io;
 use std::path::PathBuf;
 
-use origin_platform::{LockMode, LockedFile, Native, Platform};
+use origin_platform::{DurableWrite, LockMode, LockedFile, Native, Platform};
 use origin_shared::{
     AcceptanceBody, AcceptanceId, ChangeId, EncodedObject, NodeKey, Principal, PrincipalName,
     Record, RecordId, RepoPath, RevisionId, Source, StatementId, TargetId, TargetName, Tree,
@@ -54,6 +58,7 @@ use origin_shared::{
 };
 
 use crate::annotations::{AnnotateError, Annotations};
+use crate::conflict::Conflicts;
 use crate::policy::{Policy, PolicyError, Requirement};
 use crate::store::{Store, StoreError};
 use crate::targets::Head;
@@ -91,11 +96,11 @@ pub enum Landing {
     },
     /// The target already has it, so nothing landed.
     Unchanged(Proposal),
-    /// It waits.
+    /// It waits, and the queue keeps it.
     Pending(Pending),
 }
 
-/// A landing that waits.
+/// A landing that waits, kept in the queue to be listed and retried.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pending {
     /// The target it lands on.
@@ -179,7 +184,8 @@ impl<'a, P: Platform> Queue<'a, P> {
 
     /// Lands `change` and the changes below it that `onto` does not have yet,
     /// from the bottom of the stack up, and returns the outcome of each. Stops
-    /// at the first one that waits.
+    /// at the first one that waits, which the queue keeps as a landing of
+    /// `change`, so retrying it lands the rest of the stack once that one can.
     ///
     /// # Errors
     ///
@@ -194,6 +200,7 @@ impl<'a, P: Platform> Queue<'a, P> {
         let mut session = self.session(onto)?;
         let stack = session.stack(change)?;
         if stack.is_empty() {
+            session.forget(&Proposal::Change(change))?;
             return Ok(vec![Landing::Unchanged(Proposal::Change(change))]);
         }
         let proposal = Proposal::Change(change);
@@ -245,6 +252,7 @@ impl<'a, P: Platform> Queue<'a, P> {
         let [ours, theirs] = tips;
         let either = history.descends(ours, theirs) || history.descends(theirs, ours);
         if merge.tree == session.state && either {
+            session.forget(&proposal)?;
             return Ok(Landing::Unchanged(proposal));
         }
         // Even a merge that changes nothing lands, so that the tip is in
@@ -290,6 +298,47 @@ impl<'a, P: Platform> Queue<'a, P> {
         .sign(self.key);
         let acceptance = self.store.append(name, &acceptance)?;
         Ok(Head { seq: 0, acceptance })
+    }
+
+    /// Returns every waiting landing, on every target, sorted by target.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the queues cannot be listed, or if a landing cannot be read or
+    /// is malformed.
+    pub fn pending(store: &Store<P>) -> Result<Vec<Pending>, StoreError> {
+        let root = store.queue_dir();
+        let list = |dir: &PathBuf| match fs::read_dir(dir) {
+            Ok(entries) => entries
+                .map(|entry| entry.map(|entry| entry.path()))
+                .collect::<io::Result<Vec<_>>>()
+                .map_err(|source| StoreError::io(dir, source)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(source) => Err(StoreError::io(dir, source)),
+        };
+        let mut pending = Vec::new();
+        for dir in list(&root)? {
+            for path in list(&dir)? {
+                let name = path.file_name().unwrap_or_default();
+                if name == Self::LOCK || DurableWrite::<P>::is_temporary(name) {
+                    continue;
+                }
+                // Read without the lock: a landing that just ended forgot it.
+                let text = match fs::read_to_string(&path) {
+                    Ok(text) => text,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                    Err(source) => return Err(StoreError::io(&path, source)),
+                };
+                let mut landing =
+                    Pending::decode(&text).ok_or_else(|| StoreError::Malformed(path.clone()))?;
+                if let Blocked::Conflict { statement, paths } = &mut landing.blocked {
+                    *paths = Conflicts::listed(store, &store.get(*statement)?)?.paths();
+                }
+                pending.push(landing);
+            }
+        }
+        pending.sort_by(|a, b| a.onto.cmp(&b.onto));
+        Ok(pending)
     }
 
     /// Returns the policy in `state`, which is about to come into force, if it
