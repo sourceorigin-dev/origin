@@ -227,6 +227,28 @@ impl Index {
         Ok((index, tail != Tail::Damaged))
     }
 
+    /// Adds the records among `objects`, which this process just wrote, so this
+    /// index knows them without being read again.
+    ///
+    /// # Errors
+    ///
+    /// Fails if a record doesn't decode.
+    pub(crate) fn add<'o>(
+        &mut self,
+        objects: impl IntoIterator<Item = &'o EncodedObject>,
+    ) -> Result<(), StoreError> {
+        for object in objects {
+            let entry = Entry::of(object).map_err(|source| StoreError::Decode {
+                id: object.id(),
+                source,
+            })?;
+            if let Some(entry) = entry {
+                self.insert(entry);
+            }
+        }
+        Ok(())
+    }
+
     /// Adds a record, unless it's already indexed.
     fn insert(&mut self, entry: Entry) {
         if !self.known.insert(entry.record()) {
