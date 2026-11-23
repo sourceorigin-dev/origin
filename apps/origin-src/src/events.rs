@@ -30,6 +30,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use origin_platform::{Native, Platform};
+use origin_shared::policy::{KindPattern, Requirement};
 use origin_shared::{
     AcceptanceId, ChangeId, Kind, Object, ObjectId, Principal, RecordId, RevisionId, StatementId,
     TargetName, Verdict,
@@ -37,7 +38,6 @@ use origin_shared::{
 
 use crate::index;
 use crate::oplog::{Effect, Entry};
-use crate::policy::{KindPattern, Requirement};
 use crate::queue::{Blocked, Pending, Queue};
 use crate::store::{Store, StoreError};
 

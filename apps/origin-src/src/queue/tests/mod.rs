@@ -7,6 +7,7 @@ mod policy;
 mod targets;
 
 use origin_platform::Native;
+use origin_shared::policy::Requirement;
 use origin_shared::{
     AcceptanceBody, Base, BlobId, ChangeId, Digest, EncodedObject, Inputs, Kind, NodeKey,
     PrincipalName, Record, RecordId, RepoPath, Revision, RevisionId, Source, Statement,
@@ -16,7 +17,7 @@ use origin_shared::{
 use super::*;
 use crate::annotations::Annotations;
 use crate::conflict::Conflicts;
-use crate::policy::{Policy, PolicyError, Requirement};
+use crate::policy::{Policy, PolicyError};
 use crate::store::Store;
 use crate::targets::Head;
 use crate::tree::tests::build;
