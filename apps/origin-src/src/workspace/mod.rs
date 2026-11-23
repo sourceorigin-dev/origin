@@ -53,6 +53,7 @@ mod registry;
 
 pub use annotate::{Annotated, Payload};
 
+use std::collections::HashSet;
 use std::fmt;
 use std::fs;
 use std::io;
@@ -61,11 +62,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use origin_platform::{LockedFile, Native};
-use origin_shared::api::{RevisionEntry, Revisions};
+use origin_shared::api::{LogQuery, RevisionEntry, Revisions};
 use origin_shared::{
-    AcceptanceId, Base, BlobId, ChangeId, EncodedObject, Kind, Principal, Record, RecordId,
-    RepoPath, Revision, RevisionId, Source, Statement, StatementId, TargetId, TargetName, Tree,
-    TreeId,
+    AcceptanceId, Base, BlobId, ChangeId, EncodedObject, Kind, ObjectKind, Principal, Record,
+    RecordId, RepoPath, Revision, RevisionId, Source, Statement, StatementId, TargetId, TargetName,
+    Tree, TreeId,
 };
 
 use crate::ancestry::Ancestry;
@@ -496,15 +497,21 @@ impl Workspace {
         let [head] = index.heads(revision.change)[..] else {
             return Ok(None);
         };
-        let mut newest: Revision = self.store.get(head)?;
-        if let Some(landing) = self.store.landing(head, &newest)? {
+        if let Some(landing) = self.store.landing(head, &self.store.get(head)?)? {
             let body = landing.body();
             return Ok(Some(Behind::Landed {
                 target: self.target_name(body.target)?,
                 seq: body.seq,
             }));
         }
+        Ok((head != id && self.rebase_of(head, id)?).then_some(Behind::Rebased(head)))
+    }
+
+    /// Whether `head` is `id`, or a rebase of it by the landing queue: reached
+    /// from `head` through revisions nodes made, each from the one before.
+    fn rebase_of(&self, head: RevisionId, id: RevisionId) -> Result<bool, WorkspaceError> {
         let mut at = head;
+        let mut newest: Revision = self.store.get(head)?;
         while at != id && matches!(newest.author, Principal::Node(_)) {
             let [predecessor] = newest.predecessors[..] else {
                 break;
@@ -512,7 +519,7 @@ impl Workspace {
             at = predecessor;
             newest = self.store.get(at)?;
         }
-        Ok((at == id && head != id).then_some(Behind::Rebased(head)))
+        Ok(at == id)
     }
 
     /// Describes where the working copy's change went, in words.
@@ -660,13 +667,61 @@ impl Workspace {
         self.flag_divergence(index, revision)
     }
 
-    /// Writes `layers` of objects in order, each durable before the next,
-    /// so objects may refer to those of earlier layers.
+    /// Writes `layers` of objects in order, each durable before the next, so
+    /// objects may refer to those of earlier layers. Revisions are written holding
+    /// the lock that every publication of revisions takes (see
+    /// [`Workspace::publishing`]).
     fn write(&self, layers: &[Vec<EncodedObject>]) -> Result<(), WorkspaceError> {
+        let _publishing = self.publishing(layers.iter().flatten())?;
         for layer in layers.iter().filter(|layer| !layer.is_empty()) {
             self.store.write_all(layer)?;
         }
         Ok(())
+    }
+
+    /// Takes the lock that every publication of revisions takes (see
+    /// [`Store::lock_pushes`]) if `objects` hold a revision, and returns it. Fails
+    /// if one of those revisions evolves from one the landing queue rebased since
+    /// the command looked, other than one of `objects` the store doesn't have yet.
+    /// The queue checks a change's heads under the same lock before it publishes
+    /// a rebase, so the change never diverges.
+    fn publishing<'o>(
+        &self,
+        objects: impl IntoIterator<Item = &'o EncodedObject>,
+    ) -> Result<Option<LockedFile>, WorkspaceError> {
+        let mut revisions = Vec::new();
+        for object in objects {
+            if object.kind().ok() == Some(ObjectKind::Revision) {
+                let revision: Revision =
+                    object.decode_as().map_err(|source| StoreError::Decode {
+                        id: object.id(),
+                        source,
+                    })?;
+                revisions.push((object.id().into(), revision));
+            }
+        }
+        if revisions.is_empty() {
+            return Ok(None);
+        }
+        let lock = self.store.lock_pushes()?;
+        let index = Index::open(&self.store)?;
+        let written: HashSet<RevisionId> = revisions.iter().map(|(id, _)| *id).collect();
+        for (_, revision) in &revisions {
+            for &predecessor in &revision.predecessors {
+                if written.contains(&predecessor) && !self.store.contains(predecessor.into())? {
+                    continue;
+                }
+                let before: Revision = self.store.get(predecessor)?;
+                let [head] = index.heads(before.change)[..] else {
+                    continue;
+                };
+                if head != predecessor && self.rebase_of(head, predecessor)? {
+                    let behind = self.describe_behind(revision.change, &Behind::Rebased(head))?;
+                    return Err(WorkspaceError::Behind(behind));
+                }
+            }
+        }
+        Ok(Some(lock))
     }
 
     /// Durably records that the working copy is `revision`, whose files it already
@@ -744,11 +799,11 @@ impl Workspace {
             revision.snapshot,
             Some(&working_copy.cache),
         );
-        if let Err(error) = checkout {
+        if let Err(error) = checkout.and_then(|()| self.write(unwritten)) {
             // So a crash finishes taking the files back, not the move, whose
-            // revision may exist. Best effort: the checkout's error says
-            // what went wrong, and whichever move is left behind, the next
-            // command finishes.
+            // revision may exist. Best effort: the error says what went
+            // wrong, and whichever move is left behind, the next command
+            // finishes.
             let back = moving.back(working_copy.id);
             let _ = self
                 .publish_moving(&back)
@@ -756,7 +811,6 @@ impl Workspace {
                 .and_then(|()| self.moved());
             return Err(error);
         }
-        self.write(unwritten)?;
         self.point_at(to, why)?;
         self.moved()
     }
@@ -1259,7 +1313,12 @@ impl Workspace {
             (Some(limit), Some(head)) => (head.seq + 1).saturating_sub(limit as u64),
             _ => 0,
         };
-        let log = self.service(None)?.log(&Caller::Owner, &target, since)?;
+        let query = LogQuery {
+            target: target.clone(),
+            since,
+            limit: limit.map(|limit| u64::try_from(limit).unwrap_or(u64::MAX)),
+        };
+        let log = self.service(None)?.log(&Caller::Owner, &query)?;
         if target.id() == on {
             for (id, revision) in &stack {
                 let marker = if *id == working_copy.id { '@' } else { '○' };
@@ -1619,5 +1678,85 @@ impl WorkspaceError {
             path: path.to_owned(),
             source,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::slice;
+
+    use super::*;
+
+    /// A write's later layers hold revisions too: here `e` follows `d`, which the
+    /// queue rebased as `q` before the write, so publishing `e` would make the
+    /// change diverge.
+    #[test]
+    fn every_layer_of_a_write_is_checked_for_rebased_predecessors() {
+        let root = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let config = UserConfig::new(config.path().to_owned(), "ada".parse().unwrap());
+        let workspace = Workspace::init(root.path(), config, &Actor::new("test")).unwrap();
+        let draft: Revision = workspace.store.get(workspace.revision).unwrap();
+        let revision = |predecessor: RevisionId, author: &str, description: &[u8]| {
+            Revision {
+                predecessors: vec![predecessor],
+                author: author.parse().unwrap(),
+                description: EncodedObject::blob(description).id().into(),
+                ..draft.clone()
+            }
+            .encode()
+        };
+        let d = revision(workspace.revision, "user:ada", b"d");
+        workspace.store.write_all(slice::from_ref(&d)).unwrap();
+        let q = revision(d.id().into(), "node:queue", b"d");
+        workspace.store.write_all(slice::from_ref(&q)).unwrap();
+        let e = revision(d.id().into(), "user:ada", b"e");
+        let error = workspace.write(&[vec![d], vec![e]]).unwrap_err();
+        assert!(matches!(error, WorkspaceError::Behind(_)), "{error}");
+    }
+
+    /// A move whose write is refused after its checkout changed the files takes
+    /// the files back, and leaves no move to finish.
+    #[test]
+    fn a_move_whose_write_is_refused_takes_its_files_back() {
+        let root = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let config = UserConfig::new(config.path().to_owned(), "ada".parse().unwrap());
+        let mut workspace = Workspace::init(root.path(), config, &Actor::new("test")).unwrap();
+        let working_copy = workspace.record().unwrap();
+        let blob = EncodedObject::blob(b"a\n");
+        let entry = origin_shared::TreeEntry {
+            kind: origin_shared::EntryKind::File,
+            id: blob.id(),
+        };
+        let tree: origin_shared::Tree = [(origin_shared::EntryName::new("a").unwrap(), entry)]
+            .into_iter()
+            .collect();
+        let tree = tree.encode();
+        workspace.store.write_all(&[blob, tree.clone()]).unwrap();
+        let draft = working_copy.revision.clone();
+        let revision = |predecessor: RevisionId, author: &str, snapshot: TreeId| Revision {
+            predecessors: vec![predecessor],
+            author: author.parse().unwrap(),
+            snapshot,
+            ..draft.clone()
+        };
+        let d = revision(working_copy.id, "user:ada", draft.snapshot).encode();
+        workspace.store.write_all(slice::from_ref(&d)).unwrap();
+        let q = revision(d.id().into(), "node:queue", draft.snapshot).encode();
+        workspace.store.write_all(slice::from_ref(&q)).unwrap();
+        let e = revision(d.id().into(), "user:ada", tree.id().into());
+        let error = workspace
+            .switch_to(
+                &working_copy,
+                e.encode().id().into(),
+                &e,
+                &[vec![d], vec![e.encode()]],
+                Why::Command,
+            )
+            .unwrap_err();
+        assert!(matches!(error, WorkspaceError::Behind(_)), "{error}");
+        assert!(!root.path().join("a").exists());
+        assert!(!workspace.meta(Workspace::MOVING).exists());
     }
 }

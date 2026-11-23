@@ -48,6 +48,58 @@
         }
       }
     },
+    "/api/v1/repos/{repo}/changes/inventory": {
+      "post": {
+        "summary": "Lists what the repository holds of some changes: their revisions,\nheads and statements, by id.",
+        "operationId": "inventory",
+        "parameters": [
+          {
+            "name": "repo",
+            "in": "path",
+            "description": "The repository",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InventoryRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "An inventory for each change, in the order asked: empty for a change the repository never heard of",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Inventory"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The repository does not exist",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/repos/{repo}/changes/{change}/revisions": {
       "get": {
         "summary": "Lists the revisions of a change, and its heads.",
@@ -338,6 +390,17 @@
               "format": "int64",
               "minimum": 0
             }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "The most acceptances to return. Defaults to all.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
           }
         ],
         "responses": {
@@ -369,7 +432,7 @@
     },
     "/api/v1/repos/{repo}/records": {
       "put": {
-        "summary": "Puts a batch of objects as a pack: snapshots, revisions and statements. Each\nmay only need objects that the batch or the repository has, of the right\nkinds.",
+        "summary": "Puts a batch of objects as a pack: snapshots, revisions and statements. Each\nmay only need objects that the batch or the repository has, of the right\nkinds. With `expect`, puts them only if the changes it names still have the\nheads it gives when the records are published.",
         "operationId": "put_records",
         "parameters": [
           {
@@ -377,6 +440,15 @@
             "in": "path",
             "description": "The repository",
             "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "expect",
+            "in": "query",
+            "description": "The heads of the changes as the caller saw them, comma-separated. Each is\n`<change>=<head>+<head>`, or `<change>=` for a change the repository\ndidn't have. The batch is refused if any change's heads differ now.",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -416,6 +488,16 @@
           },
           "404": {
             "description": "The repository does not exist",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A change of `expect` has other heads now",
             "content": {
               "application/json": {
                 "schema": {
@@ -1222,6 +1304,59 @@
           "toolchain": {
             "$ref": "#/components/schemas/Digest",
             "description": "The tools that ran it, such as the hash of `rustc -V`."
+          }
+        }
+      },
+      "Inventory": {
+        "type": "object",
+        "description": "What a repository holds of a change: the ids of its records, to compare\nwith another node's.",
+        "required": [
+          "change",
+          "revisions",
+          "heads",
+          "statements"
+        ],
+        "properties": {
+          "change": {
+            "$ref": "#/components/schemas/ChangeId",
+            "description": "The change."
+          },
+          "heads": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RevisionId"
+            },
+            "description": "The revisions that no other revision of the change evolves from."
+          },
+          "revisions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RevisionId"
+            },
+            "description": "The change's revisions, in the order the repository received them. Empty\nif the repository has never seen the change."
+          },
+          "statements": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StatementId"
+            },
+            "description": "The statements about the change's revisions, and about those statements,\nin no particular order."
+          }
+        }
+      },
+      "InventoryRequest": {
+        "type": "object",
+        "description": "A request for what a repository holds of some changes.",
+        "required": [
+          "changes"
+        ],
+        "properties": {
+          "changes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ChangeId"
+            },
+            "description": "The changes."
           }
         }
       },

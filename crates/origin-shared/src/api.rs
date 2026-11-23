@@ -11,8 +11,8 @@ use crate::landing::{Landing, Proposal};
 use crate::policy::{KindPattern, Requirement};
 use crate::text::Period;
 use crate::{
-    Acceptance, AcceptanceId, Head, ObjectId, PrincipalName, RecordId, RepoPath, Revision,
-    RevisionId, Statement, StatementId, TargetName, TreeId,
+    Acceptance, AcceptanceId, ChangeId, Head, ObjectId, PrincipalName, RecordId, RepoPath,
+    Revision, RevisionId, Statement, StatementId, TargetName, TreeId,
 };
 
 /// The name of a repository on a server: ASCII letters, digits, `.`, `_`
@@ -142,6 +142,85 @@ fn is_zero(value: &u64) -> bool {
     *value == 0
 }
 
+/// A request for what a repository holds of some changes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct InventoryRequest {
+    /// The changes.
+    pub changes: Vec<ChangeId>,
+}
+
+/// What a repository holds of a change: the ids of its records, to compare
+/// with another node's.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct Inventory {
+    /// The change.
+    pub change: ChangeId,
+    /// The change's revisions, in the order the repository received them. Empty
+    /// if the repository has never seen the change.
+    pub revisions: Vec<RevisionId>,
+    /// The revisions that no other revision of the change evolves from.
+    pub heads: Vec<RevisionId>,
+    /// The statements about the change's revisions, and about those statements,
+    /// in no particular order.
+    pub statements: Vec<StatementId>,
+}
+
+/// Makes storing a batch of objects conditional on the named changes having
+/// the heads the caller saw. This is a compare-and-swap: a push made from a
+/// stale view of a change is refused instead of making the change diverge.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct PutQuery {
+    /// The heads of the changes as the caller saw them, comma-separated. Each is
+    /// `<change>=<head>+<head>`, or `<change>=` for a change the repository
+    /// didn't have. The batch is refused if any change's heads differ now.
+    #[serde(default, skip_serializing_if = "List::is_empty")]
+    #[param(value_type = Option<String>)]
+    pub expect: List<Expected>,
+}
+
+/// The heads of a change as the caller saw them, written
+/// `<change>=<head>+<head>`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Expected {
+    /// The change.
+    pub change: ChangeId,
+    /// The change's heads. Empty if the repository didn't have the change.
+    pub heads: Vec<RevisionId>,
+}
+
+impl fmt::Display for Expected {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}=", self.change)?;
+        for (i, head) in self.heads.iter().enumerate() {
+            let separator = if i == 0 { "" } else { "+" };
+            write!(f, "{separator}{head}")?;
+        }
+        Ok(())
+    }
+}
+
+impl FromStr for Expected {
+    type Err = String;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        let invalid = |error: crate::ParseIdError| format!("invalid heads {input:?}: {error}");
+        let (change, heads) = input
+            .split_once('=')
+            .ok_or_else(|| format!("invalid heads {input:?}: expected <change>=<head>+<head>"))?;
+        let heads = heads
+            .split('+')
+            .filter(|head| !head.is_empty())
+            .map(str::parse)
+            .collect::<Result<_, _>>()
+            .map_err(invalid)?;
+        Ok(Self {
+            change: change.parse().map_err(invalid)?,
+            heads,
+        })
+    }
+}
+
 /// The result of storing a batch of records.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct Stored {
@@ -217,6 +296,8 @@ pub struct LogQuery {
     /// The position of the first acceptance to return. Defaults to 0, the first.
     #[serde(default)]
     pub since: u64,
+    /// The most acceptances to return. Defaults to all.
+    pub limit: Option<u64>,
 }
 
 /// One acceptance in a target's log.
@@ -372,6 +453,23 @@ mod tests {
         for invalid in ["", ".hidden", "a/b", "sp ace"] {
             assert!(RepoName::new(invalid).is_err(), "{invalid:?}");
         }
+    }
+
+    #[test]
+    fn expected_heads_round_trip() {
+        let change = ChangeId::from_bytes([1; 16]);
+        let heads = [
+            RevisionId::from_bytes([2; 32]),
+            RevisionId::from_bytes([3; 32]),
+        ];
+        for heads in [&heads[..], &heads[..1], &[]] {
+            let expected = Expected {
+                change,
+                heads: heads.to_vec(),
+            };
+            assert_eq!(expected.to_string().parse::<Expected>(), Ok(expected));
+        }
+        assert!("nonsense".parse::<Expected>().is_err());
     }
 
     #[test]

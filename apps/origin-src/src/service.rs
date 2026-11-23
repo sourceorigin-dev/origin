@@ -23,8 +23,9 @@ use std::time::Duration;
 
 use origin_platform::Native;
 use origin_shared::api::{
-    Annotation, ErrorCode, EventsQuery, FetchSnapshot, LandRequest, Landings, LogEntry, NewTarget,
-    RevisionEntry, Revisions, Stored, TargetInfo,
+    Annotation, ErrorCode, EventsQuery, Expected, FetchSnapshot, Inventory, InventoryRequest,
+    LandRequest, Landings, LogEntry, LogQuery, NewTarget, RevisionEntry, Revisions, Stored,
+    TargetInfo,
 };
 use origin_shared::event::{Filter, Page};
 use origin_shared::landing::{Pending, Proposal};
@@ -89,7 +90,8 @@ impl OriginService {
     /// The longest an event long-poll waits.
     pub const MAX_WAIT: Duration = Duration::from_mins(1);
 
-    /// The most indexes open at once, in use or kept free for calls.
+    /// The most indexes open at once, in use or kept free for calls, but for one
+    /// more that a call holding the push lock may open.
     pub const MAX_INDEXES: usize = 8;
 
     /// Creates the service of the repository in `store`, served by `node`.
@@ -160,7 +162,26 @@ impl OriginService {
         &'s self,
         call: impl FnOnce(&mut Annotations<'s>) -> Result<T, ServiceError>,
     ) -> Result<T, ServiceError> {
-        let mut taken = self.indexes.take(Self::MAX_INDEXES);
+        self.annotations_up_to(Self::MAX_INDEXES, call)
+    }
+
+    /// Runs `call` like [`OriginService::annotations`], for a call holding the push
+    /// lock ([`Store::lock_pushes`]): it may open one index past the cap instead of
+    /// waiting, since landings wait for that lock while holding indexes of their own.
+    fn annotations_pushing<'s, T>(
+        &'s self,
+        call: impl FnOnce(&mut Annotations<'s>) -> Result<T, ServiceError>,
+    ) -> Result<T, ServiceError> {
+        self.annotations_up_to(Self::MAX_INDEXES + 1, call)
+    }
+
+    /// Runs `call` through one of at most `most` open indexes.
+    fn annotations_up_to<'s, T>(
+        &'s self,
+        most: usize,
+        call: impl FnOnce(&mut Annotations<'s>) -> Result<T, ServiceError>,
+    ) -> Result<T, ServiceError> {
+        let mut taken = self.indexes.take(most);
         // A failed refresh drops the index, to read whole next time.
         let index = match taken.index.take() {
             Some(mut index) => {
@@ -270,6 +291,45 @@ impl OriginService {
         })
     }
 
+    /// Returns what the repository holds of each change: its revisions, its heads,
+    /// and the statements about them, by id. A change it has never heard of has
+    /// none.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the index cannot be read.
+    pub fn inventory(
+        &self,
+        _caller: &Caller,
+        request: &InventoryRequest,
+    ) -> Result<Vec<Inventory>, ServiceError> {
+        self.annotations(|annotations| {
+            let index = annotations.index();
+            Ok(request
+                .changes
+                .iter()
+                .map(|&change| {
+                    let revisions = index.revisions(change).to_vec();
+                    let mut subjects: Vec<_> =
+                        revisions.iter().copied().map(RecordId::Revision).collect();
+                    let mut statements = Vec::new();
+                    while let Some(subject) = subjects.pop() {
+                        for &statement in index.statements(subject) {
+                            statements.push(statement);
+                            subjects.push(RecordId::Statement(statement));
+                        }
+                    }
+                    Inventory {
+                        change,
+                        heads: index.heads(change),
+                        revisions,
+                        statements,
+                    }
+                })
+                .collect())
+        })
+    }
+
     /// Writes the objects of `pack`: snapshots, revisions and statements.
     ///
     /// Each object must be well formed, and everything it needs must be in the
@@ -291,7 +351,27 @@ impl OriginService {
     /// that neither the pack nor the repository has or that is of another kind, if
     /// a promotion doesn't match its original (the other records stay stored), or
     /// if the objects cannot be written.
-    pub fn put_records(&self, _caller: &Caller, pack: Pack) -> Result<Stored, ServiceError> {
+    pub fn put_records(&self, caller: &Caller, pack: Pack) -> Result<Stored, ServiceError> {
+        self.push(caller, pack, &[])
+    }
+
+    /// Puts `pack` like [`OriginService::put_records`], but only if each change in
+    /// `expect` still has the heads it names when the records are published. This
+    /// is a compare-and-swap that every other publication of revisions waits for,
+    /// puts and the landing queue's rebases alike. So of two pushes made from the
+    /// same view of a change, or a push and a rebase, the second is refused instead
+    /// of making the change diverge.
+    ///
+    /// # Errors
+    ///
+    /// Fails like [`OriginService::put_records`], or if a change in `expect` moved,
+    /// in which case only the snapshots are written, and no record.
+    pub fn push(
+        &self,
+        _caller: &Caller,
+        pack: Pack,
+        expect: &[Expected],
+    ) -> Result<Stored, ServiceError> {
         // Objects this finds stored stay until what refers to them is.
         let _held = self.store.hold_objects()?;
         let held: HashMap<ObjectId, Option<ObjectKind>> = pack
@@ -353,10 +433,21 @@ impl OriginService {
         self.check_kinds(&stored)?;
         dependencies.commit()?;
         let mut new = 0;
+        if !snapshots.is_empty() {
+            new += self.store.write_all(&snapshots)?;
+        }
+        // INVARIANT: held until the records are published; see `Store::lock_pushes`.
+        let _pushing = if !revisions.is_empty() || !expect.is_empty() {
+            let lock = self.store.lock_pushes()?;
+            self.check_heads(expect)?;
+            Some(lock)
+        } else {
+            None
+        };
         // Each layer durable before the next, as a workspace writes them:
         // statements before the revisions they're about, so a crash never
         // publishes a revision without its `core.conflict`.
-        for layer in [snapshots, statements, revisions] {
+        for layer in [statements, revisions] {
             if !layer.is_empty() {
                 new += self.store.write_all(&layer)?;
             }
@@ -377,7 +468,7 @@ impl OriginService {
             new += self.store.write_all(&checked)?;
         }
         if !changes.is_empty() {
-            self.annotations(|annotations| {
+            self.annotations_pushing(|annotations| {
                 for &change in &changes {
                     annotations.flag_divergence(change, self.node.principal())?;
                 }
@@ -386,6 +477,23 @@ impl OriginService {
         }
         self.wakeup.notify();
         Ok(Stored { new: new as u64 })
+    }
+
+    /// Checks that each change in `expect` has the heads it names.
+    fn check_heads(&self, expect: &[Expected]) -> Result<(), ServiceError> {
+        self.annotations_pushing(|annotations| {
+            for expected in expect {
+                let heads = annotations.index().heads(expected.change);
+                let now: HashSet<_> = heads.iter().collect();
+                if now != expected.heads.iter().collect() {
+                    return Err(ServiceError::Moved {
+                        change: expected.change,
+                        heads,
+                    });
+                }
+            }
+            Ok(())
+        })
     }
 
     /// Checks that each object of `stored`, which the repository has, is of the
@@ -471,23 +579,20 @@ impl OriginService {
         Ok(targets)
     }
 
-    /// Returns the acceptances of `target` from position `since` on, oldest first.
+    /// Returns the acceptances of the query's target from position `since` on,
+    /// oldest first, up to its `limit`.
     ///
     /// # Errors
     ///
     /// Fails if the target doesn't exist, or if its log or an acceptance cannot be
     /// read.
-    pub fn log(
-        &self,
-        _caller: &Caller,
-        target: &TargetName,
-        since: u64,
-    ) -> Result<Vec<LogEntry>, ServiceError> {
+    pub fn log(&self, _caller: &Caller, query: &LogQuery) -> Result<Vec<LogEntry>, ServiceError> {
+        let target = &query.target;
         if self.store.head(target)?.is_none() {
             return Err(ServiceError::UnknownTarget(target.clone()));
         }
         self.store
-            .log_since(target, since)?
+            .log_since(target, query.since, query.limit)?
             .into_iter()
             .map(|id| {
                 Ok(LogEntry {
@@ -669,7 +774,8 @@ impl Indexes {
 
 /// An index a call took from [`Indexes`], or a slot to open one; a call that
 /// opens an index puts it in `index` to keep it. On drop, it gives both back,
-/// even if the call panicked.
+/// even if the call panicked, but keeps no more than
+/// [`OriginService::MAX_INDEXES`] open: the one past the cap is dropped.
 struct Taken<'a> {
     indexes: &'a Indexes,
     index: Option<Index>,
@@ -679,7 +785,9 @@ impl Drop for Taken<'_> {
     fn drop(&mut self) {
         let mut state = self.indexes.state();
         state.taken -= 1;
-        state.kept.extend(self.index.take());
+        if state.kept.len() + state.taken < OriginService::MAX_INDEXES {
+            state.kept.extend(self.index.take());
+        }
         self.indexes.returned.notify_one();
     }
 }
@@ -794,6 +902,19 @@ pub enum ServiceError {
         /// The kind it must be.
         kind: ObjectKind,
     },
+    /// A push expected a change's heads to be where they no longer are.
+    #[error(
+        "change {} moved on the remote since it was fetched: run `origin fetch`, then \
+         `origin converge {}` if it diverged",
+        change.short(),
+        change.short()
+    )]
+    Moved {
+        /// The change.
+        change: ChangeId,
+        /// The change's heads now.
+        heads: Vec<origin_shared::RevisionId>,
+    },
     /// A put statement the repository doesn't accept: a promotion that doesn't
     /// match its original.
     #[error("statement {} cannot be put", .id.short())]
@@ -833,6 +954,7 @@ impl ServiceError {
                 AnnotateError::Store(error) => Self::store_code(error),
                 _ => ErrorCode::BadRequest,
             },
+            Self::Moved { .. } => ErrorCode::Conflict,
             Self::Land(error) => match error {
                 LandError::UnknownTarget(_) | LandError::UnknownChange(_) => ErrorCode::NotFound,
                 LandError::TargetExists(_)
@@ -841,6 +963,7 @@ impl ServiceError {
                 | LandError::NotAuthority { .. }
                 | LandError::WrongKey(_)
                 | LandError::Divergent { .. }
+                | LandError::Moved(_)
                 | LandError::Abandoned(_)
                 | LandError::Unresolved { .. }
                 | LandError::InvalidPolicy(_) => ErrorCode::Conflict,
@@ -864,9 +987,55 @@ impl ServiceError {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Barrier;
+    use std::thread;
+
     use origin_shared::{EncodedObject, Record, RepoPath};
 
     use super::*;
+
+    /// Landings hold indexes while they wait for the push lock, so a call holding
+    /// it gets one even when every other index is taken.
+    #[test]
+    fn a_call_holding_the_push_lock_never_waits_for_an_index() {
+        let repo = crate::queue::tests::Repo::new("[targets.main]\nauthority = \"node:queue\"\n");
+        let node = Node {
+            name: "queue".parse().unwrap(),
+            key: Arc::new(NodeKey::from_bytes(&[7; 32])),
+        };
+        let service = OriginService::new(repo.store.clone(), node);
+        let held = Barrier::new(OriginService::MAX_INDEXES + 1);
+        let released = Barrier::new(OriginService::MAX_INDEXES + 1);
+        thread::scope(|scope| {
+            for _ in 0..OriginService::MAX_INDEXES {
+                scope.spawn(|| {
+                    service.annotations(|_| {
+                        held.wait();
+                        released.wait();
+                        Ok(())
+                    })
+                });
+            }
+            held.wait();
+            service.annotations_pushing(|_| Ok(())).unwrap();
+            released.wait();
+        });
+        assert!(service.indexes.state().kept.len() <= OriginService::MAX_INDEXES);
+        thread::scope(|scope| {
+            for _ in 0..OriginService::MAX_INDEXES {
+                scope.spawn(|| {
+                    service.annotations(|_| {
+                        held.wait();
+                        released.wait();
+                        Ok(())
+                    })
+                });
+            }
+            held.wait();
+            service.annotations_pushing(|_| Ok(())).unwrap();
+            released.wait();
+        });
+    }
 
     #[test]
     fn pushes_publish_statements_before_the_revisions_they_are_about() {

@@ -14,9 +14,9 @@ use axum::response::{IntoResponse, Response};
 use origin_shared::ChangeId;
 use origin_shared::Head;
 use origin_shared::api::{
-    Annotation, ApiError, ErrorCode, EventsQuery, FetchRecords, FetchSnapshot, LandRequest,
-    Landings, LogEntry, LogQuery, MORE, NewTarget, RepoName, RepoSummary, Revisions,
-    StatementsQuery, Stored, TargetInfo,
+    Annotation, ApiError, ErrorCode, EventsQuery, FetchRecords, FetchSnapshot, Inventory,
+    InventoryRequest, LandRequest, Landings, LogEntry, LogQuery, MORE, NewTarget, PutQuery,
+    RepoName, RepoSummary, Revisions, StatementsQuery, Stored, TargetInfo,
 };
 use origin_shared::event::Page;
 use origin_shared::landing::Pending;
@@ -45,7 +45,10 @@ type Repos = State<Arc<Repositories>>;
 pub struct Api;
 
 impl Api {
-    /// The largest request body accepted, which caps a batch of records put.
+    /// The largest request body accepted, which caps a single put. Clients split
+    /// larger pushes into requests of at most
+    /// [`Pack::LIMIT`](origin_shared::pack::Pack::LIMIT), so only a single object
+    /// larger than that needs a request this large.
     const MAX_REQUEST: usize = 1 << 30;
 
     fn documented() -> OpenApiRouter<Arc<Repositories>> {
@@ -54,6 +57,7 @@ impl Api {
             .routes(routes!(fetch_records))
             .routes(routes!(fetch_snapshot))
             .routes(routes!(put_records))
+            .routes(routes!(inventory))
             .routes(routes!(statements))
             .routes(routes!(revisions))
             .routes(routes!(targets, create_target))
@@ -140,18 +144,20 @@ impl<T: Serialize> IntoResponse for Json<T> {
 }
 
 /// Runs `call` on the service of repository `repo`, on the blocking thread
-/// pool: service calls do synchronous file system work, and event long-polls
-/// wait.
-async fn call<T: Send + 'static>(
+/// pool: service calls do synchronous file system work, event long-polls wait,
+/// and encoding or decoding a pack takes CPU time, all of which would hold up
+/// the async workers. `call` fails with a [`ServiceError`], or with an
+/// [`HttpError`] if it does more than call the service.
+async fn call<T: Send + 'static, E: From<ServiceError> + Into<HttpError> + Send + 'static>(
     State(repositories): Repos,
     repo: RepoName,
     caller: Caller,
-    call: impl FnOnce(&OriginService, &Caller) -> Result<T, ServiceError> + Send + 'static,
+    call: impl FnOnce(&OriginService, &Caller) -> Result<T, E> + Send + 'static,
 ) -> Result<T, HttpError> {
     tokio::task::spawn_blocking(move || call(repositories.get(&caller, &repo)?, &caller))
         .await
         .map_err(|error| HttpError::Panicked(error.to_string()))?
-        .map_err(HttpError::Service)
+        .map_err(Into::into)
 }
 
 /// A failed request, rendered as an [`ApiError`].
@@ -162,6 +168,12 @@ enum HttpError {
     /// client's error, unless a route doesn't match its handler.
     Rejected(StatusCode, String),
     Panicked(String),
+}
+
+impl From<ServiceError> for HttpError {
+    fn from(error: ServiceError) -> Self {
+        Self::Service(error)
+    }
 }
 
 impl IntoResponse for HttpError {
@@ -220,18 +232,28 @@ async fn list_repos(State(repositories): Repos, caller: Caller) -> Json<Vec<Repo
     Json(repositories.list(&caller))
 }
 
-/// One part of a fetch, as a response: its pack, with the [`MORE`] header if
-/// the pack stopped short.
-struct PackResponse(Part);
+/// One part of a fetch, as a response: its encoded pack, with the [`MORE`]
+/// header if it stopped short. It is built inside the call, so the pack is
+/// encoded on the blocking thread pool.
+struct PackResponse {
+    pack: Vec<u8>,
+    more: bool,
+}
+
+impl From<Part> for PackResponse {
+    fn from(Part { pack, more }: Part) -> Self {
+        Self {
+            pack: pack.encode(),
+            more,
+        }
+    }
+}
 
 impl IntoResponse for PackResponse {
     fn into_response(self) -> Response {
-        let Part { pack, more } = self.0;
-        let mut response = (
-            [(header::CONTENT_TYPE, "application/octet-stream")],
-            pack.encode(),
-        )
-            .into_response();
+        let Self { pack, more } = self;
+        let mut response =
+            ([(header::CONTENT_TYPE, "application/octet-stream")], pack).into_response();
         if more {
             response
                 .headers_mut()
@@ -261,10 +283,11 @@ async fn fetch_records(
     Json(request): Json<FetchRecords>,
 ) -> Result<PackResponse, HttpError> {
     call(repos, repo, caller, move |service, caller| {
-        service.records(caller, &request.ids)
+        service
+            .records(caller, &request.ids)
+            .map(PackResponse::from)
     })
     .await
-    .map(PackResponse)
 }
 
 /// Fetches the objects of a snapshot that the caller lacks, as a pack. This is
@@ -287,36 +310,64 @@ async fn fetch_snapshot(
     Json(request): Json<FetchSnapshot>,
 ) -> Result<PackResponse, HttpError> {
     call(repos, repo, caller, move |service, caller| {
-        service.snapshot(caller, &request)
+        service.snapshot(caller, &request).map(PackResponse::from)
     })
     .await
-    .map(PackResponse)
 }
 
 /// Puts a batch of objects as a pack: snapshots, revisions and statements. Each
 /// may only need objects that the batch or the repository has, of the right
-/// kinds.
+/// kinds. With `expect`, puts them only if the changes it names still have the
+/// heads it gives when the records are published.
 #[utoipa::path(
     put,
     path = "/api/v1/repos/{repo}/records",
     operation_id = "put_records",
-    params(("repo" = String, Path, description = "The repository")),
+    params(("repo" = String, Path, description = "The repository"), PutQuery),
     request_body(content = Binary, content_type = "application/octet-stream", description = "The objects, as a pack"),
     responses(
         (status = 200, description = "The objects are durable", body = Stored),
         (status = 400, description = "The pack is invalid, holds an acceptance, or needs objects the repository doesn't have, or has as another kind", body = ApiError),
-        (status = 404, description = "The repository does not exist", body = ApiError)
+        (status = 404, description = "The repository does not exist", body = ApiError),
+        (status = 409, description = "A change of `expect` has other heads now", body = ApiError)
     )
 )]
 async fn put_records(
     repos: Repos,
     Path(repo): Path<RepoName>,
+    Query(query): Query<PutQuery>,
     caller: Caller,
     body: Bytes,
 ) -> Result<Json<Stored>, HttpError> {
-    let pack = Pack::decode(&body).map_err(HttpError::Pack)?;
     call(repos, repo, caller, move |service, caller| {
-        service.put_records(caller, pack)
+        let pack = Pack::decode(&body).map_err(HttpError::Pack)?;
+        Ok::<_, HttpError>(service.push(caller, pack, &query.expect.0)?)
+    })
+    .await
+    .map(Json)
+}
+
+/// Lists what the repository holds of some changes: their revisions,
+/// heads and statements, by id.
+#[utoipa::path(
+    post,
+    path = "/api/v1/repos/{repo}/changes/inventory",
+    operation_id = "inventory",
+    params(("repo" = String, Path, description = "The repository")),
+    request_body = InventoryRequest,
+    responses(
+        (status = 200, description = "An inventory for each change, in the order asked: empty for a change the repository never heard of", body = Vec<Inventory>),
+        (status = 404, description = "The repository does not exist", body = ApiError)
+    )
+)]
+async fn inventory(
+    repos: Repos,
+    Path(repo): Path<RepoName>,
+    caller: Caller,
+    Json(request): Json<InventoryRequest>,
+) -> Result<Json<Vec<Inventory>>, HttpError> {
+    call(repos, repo, caller, move |service, caller| {
+        service.inventory(caller, &request)
     })
     .await
     .map(Json)
@@ -438,7 +489,7 @@ async fn log(
     Query(query): Query<LogQuery>,
 ) -> Result<Json<Vec<LogEntry>>, HttpError> {
     call(repos, repo, caller, move |service, caller| {
-        service.log(caller, &query.target, query.since)
+        service.log(caller, &query)
     })
     .await
     .map(Json)

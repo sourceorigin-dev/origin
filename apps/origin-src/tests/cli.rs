@@ -2095,3 +2095,85 @@ fn watch_prints_events_from_a_cursor_or_as_they_happen() {
         "{issued}"
     );
 }
+
+/// The queue's rebase of the working copy lands while `describe` waits to
+/// publish: the change has moved on, so a revision on the old one would make
+/// it diverge.
+#[test]
+fn revisions_never_follow_one_the_queue_rebased_and_landed() {
+    let repo = Repo::new();
+    repo.write("file", "work\n");
+    repo.ok(&["describe", "Work"]);
+    let head: RevisionId = repo.revision().parse().unwrap();
+    let store = Store::new(repo.path(".origin"), Native::default());
+    let publishing = store.lock_pushes().unwrap();
+    let describe = repo
+        .command(repo.dir.path(), &["describe", "Edited"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // wall-clock: `describe` reads the change before it waits for the lock.
+    thread::sleep(Duration::from_millis(500));
+    let rebased = Revision {
+        predecessors: vec![head],
+        author: "node:queue".parse().unwrap(),
+        ..store.get(head).unwrap()
+    };
+    let encoded = rebased.encode();
+    store.write_all(slice::from_ref(&encoded)).unwrap();
+    let origin_shared::Base::Acceptance(base) = rebased.base else {
+        panic!("the working copy is based on an acceptance");
+    };
+    let before: origin_shared::Acceptance = store.get(base).unwrap();
+    let landed = origin_shared::AcceptanceBody {
+        target: before.body().target,
+        seq: before.body().seq + 1,
+        prev: Some(base),
+        state: rebased.snapshot,
+        landed: vec![origin_shared::Source::Revision(encoded.id().into())],
+        evidence: Vec::new(),
+        policy: None,
+    }
+    .sign(&origin_shared::NodeKey::from_bytes(&[42; 32]));
+    store
+        .append(&origin_shared::TargetName::MAIN, &landed)
+        .unwrap();
+    drop(publishing);
+    let described = describe.wait_with_output().unwrap();
+    let error = String::from_utf8_lossy(&described.stderr);
+    assert!(!described.status.success(), "{error}");
+    assert!(error.contains("rebased"), "{error}");
+    let status = repo.ok(&["status"]);
+    assert!(!status.contains("divergent"), "{status}");
+}
+
+#[test]
+fn revisions_never_follow_one_the_queue_rebased_meanwhile() {
+    let repo = Repo::new();
+    repo.write("file", "work\n");
+    repo.ok(&["describe", "Work"]);
+    let head: RevisionId = repo.revision().parse().unwrap();
+    let store = Store::new(repo.path(".origin"), Native::default());
+    let publishing = store.lock_pushes().unwrap();
+    let describe = repo
+        .command(repo.dir.path(), &["describe", "Edited"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    thread::sleep(Duration::from_millis(500));
+    let rebased = Revision {
+        predecessors: vec![head],
+        author: "node:queue".parse().unwrap(),
+        ..store.get(head).unwrap()
+    };
+    store.write_all(&[rebased.encode()]).unwrap();
+    drop(publishing);
+    let described = describe.wait_with_output().unwrap();
+    let error = String::from_utf8_lossy(&described.stderr);
+    assert!(!described.status.success(), "{error}");
+    assert!(error.contains("rebased"), "{error}");
+    let status = repo.ok(&["status"]);
+    assert!(!status.contains("divergent"), "{status}");
+}

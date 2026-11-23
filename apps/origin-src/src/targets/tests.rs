@@ -62,8 +62,11 @@ fn appends_form_a_chain() {
         assert_eq!(store.acceptance_at(main.id(), seq).unwrap(), Some(id));
     }
     assert_eq!(store.acceptance_at(main.id(), 3).unwrap(), None);
-    assert_eq!(store.log_since(&main, 1).unwrap(), ids[1..]);
-    assert_eq!(store.log_since(&main, 3).unwrap(), []);
+    assert_eq!(store.log_since(&main, 1, None).unwrap(), ids[1..]);
+    assert_eq!(store.log_since(&main, 0, Some(2)).unwrap(), ids[..2]);
+    assert_eq!(store.log_since(&main, 1, Some(9)).unwrap(), ids[1..]);
+    assert_eq!(store.log_since(&main, 0, Some(0)).unwrap(), []);
+    assert_eq!(store.log_since(&main, 3, None).unwrap(), []);
     let last = store.get(ids[2]).unwrap();
     assert_eq!(last.body().prev, Some(ids[1]));
     last.verify(&key().public()).unwrap();
