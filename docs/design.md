@@ -657,6 +657,28 @@ promoted. Pin the tools in a file the check reads instead, such as
 `rust-toolchain.toml` in its `inputs`: then a new toolchain changes the inputs,
 and the check runs again.
 
+Each command of a check runs in its own process group. The group is killed
+when the command ends, along with anything it left running, or when the
+checkout of a crashed run is swept. So no command outlives its run for long.
+The command's processes inherit the checkout's `runs/<n>.held`, open and
+locked, and a group is only killed while one of its processes still holds that
+lock (`Processes::group_holds`). So a group that has since reused the number is
+never killed, even while a process that left the old group (with `setsid`)
+still holds the lock.
+
+Some processes escape being killed: one that left its group, one that closed
+the files it inherited (as processes started by Python's `subprocess` do), and
+every leftover on platforms that can't tell which files a group holds, such as
+macOS. Leaking a process is safer than killing someone else's. A process that
+keeps the lock makes the next command started in the checkout fail, after
+waiting `Checkout::GRACE` for it.
+
+A command left running by a worker killed with `kill -9` runs until the next
+sweep: making it die with the worker would need code run between `fork` and
+`exec`, which takes `unsafe`. Since it runs in its own group, a command doesn't
+get the terminal's Ctrl-C either: interrupting `origin ci run` leaves it to the
+next sweep, or to die when it writes to output no one reads anymore.
+
 ## Permissions and credentials
 
 Path rules map a path to `none`, `read` or `write` for everyone, groups and
