@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use origin_platform::Native;
 use origin_shared::event::Filter;
-use origin_shared::{AcceptanceBody, NodeKey, RepoPath, Verdict};
+use origin_shared::{AcceptanceBody, Kind, NodeKey, RepoPath, Verdict};
 
 use super::*;
 use crate::events::Events;
@@ -625,6 +625,190 @@ fn each_part_of_a_push_expects_the_heads_the_parts_before_left() {
     assert_eq!(transfer.expect(&[r1.into()]), expected(vec![r0]));
     assert_eq!(transfer.expect(&[r2.into()]), expected(vec![r1]));
     assert_eq!(transfer.expect(&[]), []);
+}
+
+#[test]
+fn revisions_go_with_their_reserved_statements() {
+    let [first, second] = [1, 2].map(|n| RevisionId::from(ObjectId::from_bytes([n; 32])));
+    let revision = |change| Revision {
+        change: ChangeId::from_bytes([change; 16]),
+        predecessors: Vec::new(),
+        base: Base::Revision(first),
+        deps: Vec::new(),
+        snapshot: TreeId::from(ObjectId::from_bytes([3; 32])),
+        description: ObjectId::from_bytes([4; 32]).into(),
+        author: "user:ada".parse().unwrap(),
+    };
+    let conflict = Statement {
+        kind: Kind::CONFLICT,
+        ..ci_test(first, "user:ada")
+    };
+    let result = ci_test(first, "user:ada");
+    let abandon = Statement {
+        kind: Kind::ABANDON,
+        ..ci_test(second, "user:ada")
+    };
+    let listing = Statement {
+        supersedes: Some(conflict.encode().id().into()),
+        ..Statement {
+            kind: Kind::CONFLICT,
+            ..ci_test(second, "user:ada")
+        }
+    };
+    let statements: Vec<_> = [conflict, result, abandon, listing]
+        .into_iter()
+        .map(|statement| (statement.encode().id().into(), statement))
+        .collect();
+    let [conflict, result, abandon, listing] =
+        [0, 1, 2, 3].map(|at| ObjectId::from(statements[at].0));
+    let mut transfer = Transfer::default();
+    let others = transfer.add_revisions(&[(first, revision(1)), (second, revision(2))], statements);
+    assert_eq!(
+        others
+            .iter()
+            .map(|&(id, _)| id.into())
+            .collect::<Vec<ObjectId>>(),
+        [result]
+    );
+    assert_eq!(
+        transfer.ids,
+        [first.into(), second.into(), conflict, abandon, listing]
+    );
+    assert_eq!(
+        transfer.joined,
+        HashSet::from([second.into(), conflict, abandon, listing])
+    );
+    let alone = |statement: Statement| (statement.encode().id().into(), statement);
+    let statements = vec![
+        alone(Statement {
+            kind: Kind::ABANDON,
+            ..ci_test(first, "user:ada")
+        }),
+        alone(Statement {
+            kind: Kind::DIVERGENT,
+            ..ci_test(second, "user:ada")
+        }),
+    ];
+    let [abandon, divergent] = [0, 1].map(|at| ObjectId::from(statements[at].0));
+    let mut transfer = Transfer::default();
+    transfer.add_revisions(&[(first, revision(1)), (second, revision(2))], statements);
+    assert_eq!(
+        transfer.ids,
+        [first.into(), abandon, second.into(), divergent]
+    );
+    assert_eq!(transfer.joined, HashSet::from([abandon, divergent]));
+}
+
+#[test]
+fn statements_about_one_record_go_in_one_request() {
+    let [first, second] = [1, 2].map(|n| RevisionId::from(ObjectId::from_bytes([n; 32])));
+    let pass = ci_test(first, "user:ada");
+    let pass_id = StatementId::from(pass.encode().id());
+    let fail = Statement {
+        verdict: Some(Verdict::Fail),
+        supersedes: Some(pass_id),
+        ..pass.clone()
+    };
+    let other = ci_test(second, "user:ada");
+    let flaky = Statement {
+        subject: RecordId::Statement(pass_id),
+        kind: "flaky".parse().unwrap(),
+        ..other.clone()
+    };
+    let statements: Vec<_> = [pass, other, fail, flaky]
+        .into_iter()
+        .map(|statement| (statement.encode().id().into(), statement))
+        .collect();
+    let mut transfer = Transfer::default();
+    transfer.add_statements(&statements);
+    let [pass, other, fail, flaky] = [0, 1, 2, 3].map(|at| ObjectId::from(statements[at].0));
+    assert_eq!(transfer.ids, [pass, fail, flaky, other]);
+    assert_eq!(transfer.joined, HashSet::from([fail, flaky]));
+}
+
+#[test]
+fn a_push_in_parts_never_lands_an_abandoned_revision() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    for fill in [false, true] {
+        let server = Repo::new(MAIN_RULES);
+        let client = Client::new(&server);
+        client.sync().fetch_chains(&[TargetName::MAIN]).unwrap();
+        let revision = if fill {
+            let mut revision = Revision {
+                change: ChangeId::from_bytes([1; 16]),
+                predecessors: Vec::new(),
+                base: main_tip(&client.store),
+                deps: Vec::new(),
+                snapshot: build(&client.store, &[("a", "gone")]),
+                description: EncodedObject::blob(b"").id().into(),
+                author: "user:ada".parse().unwrap(),
+            };
+            client
+                .store
+                .write_all(&[EncodedObject::blob(b"gone")])
+                .unwrap();
+            let wire = |objects: Vec<EncodedObject>| Pack { objects }.encode().len();
+            let content = client
+                .store
+                .added(revision.snapshot, &[], &[])
+                .unwrap()
+                .iter()
+                .map(|placed| client.store.read(placed.entry.id).unwrap())
+                .collect();
+            let room = Pack::LIMIT
+                - wire(content)
+                - wire(vec![revision.encode(), EncodedObject::blob(b"")]);
+            let description = EncodedObject::blob(&vec![b'x'; room]);
+            revision.description = description.id().into();
+            let revision = revision.encode();
+            client
+                .store
+                .write_all(&[description, revision.clone()])
+                .unwrap();
+            revision.id().into()
+        } else {
+            client.revision(1, &[], main_tip(&client.store), &[("a", "gone")])
+        };
+        let abandonment = Statement {
+            kind: Kind::ABANDON,
+            verdict: None,
+            ..ci_test(revision, "user:ada")
+        }
+        .encode();
+        client
+            .store
+            .write_all(std::slice::from_ref(&abandonment))
+            .unwrap();
+        let hex = abandonment.id().to_hex();
+        let shard = server.store.root().join("objects/loose").join(&hex[..2]);
+        std::fs::create_dir_all(&shard).unwrap();
+        let root = std::fs::metadata(&shard).unwrap().uid() == 0;
+        std::fs::set_permissions(&shard, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let limit = if fill { Pack::LIMIT } else { 1 };
+        let pushed = client
+            .sync()
+            .with_pack_limit(limit)
+            .push(&[ChangeId::from_bytes([1; 16])]);
+        std::fs::set_permissions(&shard, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if !root {
+            assert!(pushed.is_err(), "{pushed:?}");
+            assert!(!server.store.contains(revision.into()).unwrap());
+        }
+        let change = ChangeId::from_bytes([1; 16]);
+        client
+            .sync()
+            .with_pack_limit(limit)
+            .push(&[change])
+            .unwrap();
+        let landed =
+            server
+                .queue()
+                .land_change(&mut server.annotations(), change, &TargetName::MAIN);
+        assert!(
+            matches!(landed, Err(crate::queue::LandError::Abandoned(_))),
+            "{landed:?}"
+        );
+    }
 }
 
 #[test]

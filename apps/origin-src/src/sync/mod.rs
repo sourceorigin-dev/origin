@@ -10,8 +10,8 @@
 //! - Both ways, a transfer stops at [`Pack::LIMIT`] bytes (see [`Part`]).
 
 use std::collections::hash_map::Entry;
-use std::collections::{BTreeSet, HashMap, HashSet};
-use std::mem;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::{iter, mem};
 
 use origin_platform::Native;
 use origin_shared::api::{
@@ -146,27 +146,149 @@ struct Chain {
     acceptances: Vec<(AcceptanceId, Acceptance)>,
 }
 
+/// A union-find over items by position: joins items into groups, each
+/// named by its first item.
+struct Groups(Vec<usize>);
+
+impl Groups {
+    /// `len` items, each in its own group.
+    fn new(len: usize) -> Self {
+        Self((0..len).collect())
+    }
+
+    /// Returns the first item of the group holding item `at`.
+    fn root(&mut self, mut at: usize) -> usize {
+        while self.0[at] != at {
+            self.0[at] = self.0[self.0[at]];
+            at = self.0[at];
+        }
+        at
+    }
+
+    /// Joins the groups of `a` and `b`.
+    fn join(&mut self, a: usize, b: usize) {
+        let (a, b) = (self.root(a), self.root(b));
+        self.0[a.max(b)] = a.min(b);
+    }
+}
+
 impl Transfer {
-    /// Adds `revisions`, in order, and returns `statements`.
+    /// Adds `revisions`, each in one request with the reserved statements of
+    /// `statements` about it (such as its conflicts or its abandonment) and the
+    /// statements those need, so the remote never has a revision without them.
+    /// Those statements go after the last revision they need, in one request
+    /// with every revision from the first one they are about. Returns the other
+    /// statements.
     fn add_revisions(
         &mut self,
         revisions: &[(RevisionId, Revision)],
         statements: Vec<(StatementId, Statement)>,
     ) -> Vec<(StatementId, Statement)> {
-        for (id, revision) in revisions {
+        let sent: HashMap<RecordId, usize> = revisions
+            .iter()
+            .enumerate()
+            .map(|(at, &(id, _))| (RecordId::Revision(id), at))
+            .collect();
+        let position = Self::positions(&statements);
+        let mut with: Vec<bool> = statements
+            .iter()
+            .map(|(_, statement)| {
+                statement.kind.is_reserved() && sent.contains_key(&statement.subject)
+            })
+            .collect();
+        let mut groups = Groups::new(statements.len());
+        for at in (0..statements.len()).rev() {
+            if !with[at] {
+                continue;
+            }
+            for (needed, _) in Dependencies::of_statement(&statements[at].1).records {
+                if let Some(&other) = position.get(&needed) {
+                    with[other] = true;
+                    groups.join(at, other);
+                }
+            }
+        }
+        let mut spans: HashMap<usize, (usize, usize)> = HashMap::new();
+        for (at, (_, statement)) in statements.iter().enumerate() {
+            if let Some(&revision) = sent.get(&statement.subject)
+                && with[at]
+            {
+                let span = spans.entry(groups.root(at)).or_insert((usize::MAX, 0));
+                if statement.kind.is_reserved() {
+                    span.0 = span.0.min(revision);
+                }
+                span.1 = span.1.max(revision);
+            }
+        }
+        let mut joined = vec![false; revisions.len()];
+        let mut after = vec![Vec::new(); revisions.len()];
+        for &(first, last) in spans.values() {
+            joined[first + 1..=last].fill(true);
+        }
+        for at in (0..statements.len()).filter(|&at| with[at]) {
+            after[spans[&groups.root(at)].1].push(statements[at].0);
+        }
+        for (((id, revision), joined), after) in revisions.iter().zip(joined).zip(after) {
+            if joined {
+                self.joined.insert((*id).into());
+            }
             self.ids.push((*id).into());
             self.revisions.insert(
                 (*id).into(),
                 (revision.change, revision.predecessors.clone()),
             );
+            for statement in after {
+                self.joined.insert(statement.into());
+                self.ids.push(statement.into());
+            }
         }
         statements
+            .into_iter()
+            .zip(with)
+            .filter_map(|(statement, with)| (!with).then_some(statement))
+            .collect()
     }
 
-    /// Adds `statements`, in order.
+    /// Adds `statements`, each after those of them it needs. The statements
+    /// about one record, with those they need or that need them, go in one
+    /// request. So a landing waiting on the record never takes a result whose
+    /// replacement, or the change's abandonment, is still to come.
     fn add_statements(&mut self, statements: &[(StatementId, Statement)]) {
-        self.ids
-            .extend(statements.iter().map(|&(id, _)| ObjectId::from(id)));
+        let position = Self::positions(statements);
+        let mut groups = Groups::new(statements.len());
+        let mut about: HashMap<RecordId, usize> = HashMap::new();
+        for (at, (_, statement)) in statements.iter().enumerate() {
+            let same_subject = *about.entry(statement.subject).or_insert(at);
+            let needed = Dependencies::of_statement(statement)
+                .records
+                .into_iter()
+                .filter_map(|(id, _)| position.get(&id).copied());
+            for other in iter::once(same_subject).chain(needed) {
+                groups.join(at, other);
+            }
+        }
+        let mut members: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        for at in 0..statements.len() {
+            members.entry(groups.root(at)).or_default().push(at);
+        }
+        for members in members.into_values() {
+            for (nth, at) in members.into_iter().enumerate() {
+                let id = statements[at].0.into();
+                if nth > 0 {
+                    self.joined.insert(id);
+                }
+                self.ids.push(id);
+            }
+        }
+    }
+
+    /// Returns the position of each of `statements` in the list.
+    fn positions(statements: &[(StatementId, Statement)]) -> HashMap<ObjectId, usize> {
+        statements
+            .iter()
+            .enumerate()
+            .map(|(at, &(id, _))| (id.into(), at))
+            .collect()
     }
 
     /// Returns the heads that the changes of `revisions`, sent in one request,
