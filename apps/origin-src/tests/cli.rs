@@ -2,10 +2,10 @@
 //! `origin` binary.
 
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::slice;
 use std::sync::mpsc;
 use std::thread;
@@ -48,6 +48,26 @@ impl Repo {
     /// Runs `origin` in `cwd` as the configured user.
     fn run(&self, cwd: &Path, args: &[&str]) -> Output {
         self.command(cwd, args).output().unwrap()
+    }
+
+    /// Starts a long-running command, such as `watch`. Returns the process and a
+    /// receiver of its output lines as they arrive.
+    fn spawn(&self, args: &[&str]) -> (Child, mpsc::Receiver<String>) {
+        let mut child = self
+            .command(self.dir.path(), args)
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdout = BufReader::new(child.stdout.take().unwrap());
+        let (send, receive) = mpsc::channel();
+        thread::spawn(move || {
+            for line in stdout.lines() {
+                if send.send(line.unwrap()).is_err() {
+                    break;
+                }
+            }
+        });
+        (child, receive)
     }
 
     /// Returns the full id of the working copy's revision.
@@ -2044,4 +2064,34 @@ fn a_move_that_cannot_be_finished_leaves_the_files() {
     assert_eq!(repo.read("a"), "a\n");
     assert!(!repo.path(".origin/moving").exists());
     repo.ok(&["log"]);
+}
+
+#[test]
+fn watch_prints_events_from_a_cursor_or_as_they_happen() {
+    let repo = Repo::new();
+    let line =
+        |receive: &mpsc::Receiver<String>| receive.recv_timeout(Duration::from_secs(20)).unwrap();
+    // From the start: the targets `init` created.
+    let (mut all, receive) = repo.spawn(&["watch", "--since", "0"]);
+    let policy = line(&receive);
+    assert!(
+        policy.contains(" target.advanced target=policy seq=0 "),
+        "{policy}"
+    );
+    all.kill().unwrap();
+
+    let (mut checks, receive) = repo.spawn(&["watch", "--kind", "ci.*"]);
+    // Let it read where the log ends before anything happens.
+    thread::sleep(Duration::from_millis(500));
+    repo.ok(&["describe", "Work"]);
+    repo.ok(&["annotate", "@", "ci.test", "--pass"]);
+    let issued = line(&receive);
+    checks.kill().unwrap();
+    let fields: Vec<_> = issued.split(' ').collect();
+    assert!(fields[0].parse::<u64>().is_ok(), "a cursor first: {issued}");
+    assert_eq!(fields[1], "statement.issued");
+    assert!(
+        issued.contains(" kind=ci.test verdict=pass issuer=user:ada"),
+        "{issued}"
+    );
 }
