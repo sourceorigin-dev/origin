@@ -10,6 +10,7 @@ use origin_shared::{
     RevisionId, Source, StatementId, TargetName, TreeId,
 };
 
+use crate::ancestry::Ancestry;
 use crate::annotations::{AnnotateError, Annotations, Claim};
 use crate::conflict::Conflicts;
 use crate::policy::{Policy, PolicyError, Requirement};
@@ -200,7 +201,13 @@ impl<P: Platform> Session<'_, '_, P> {
             None
         };
         let mut records: Vec<EncodedObject> = candidate.revision.into_iter().collect();
-        let requirements = self.policy.requirements(&self.onto).to_vec();
+        // A landing that changes nothing, which only records another
+        // target's tip, needs no evidence.
+        let requirements = if candidate.state == self.state {
+            Vec::new()
+        } else {
+            self.policy.requirements(&self.onto).to_vec()
+        };
         let mut evidence = Vec::new();
         let mut missing = Vec::new();
         if !requirements.is_empty() {
@@ -316,5 +323,30 @@ impl<P: Platform> Session<'_, '_, P> {
             },
         };
         Ok(Landing::Pending(pending))
+    }
+
+    /// Reads the history of `tips`, the target's tip and another target's, for
+    /// [merging](Ancestry::merge_base) the other target from the newest
+    /// acceptance both histories share. An acceptance's parents are the
+    /// acceptance before it and the acceptances of other targets it landed. A
+    /// target's first acceptance lands the one it was created from, so targets
+    /// created from the same acceptance share history.
+    ///
+    /// Both histories are read whole, each acceptance once, because the nearest
+    /// shared acceptance can be an old one: a target may have forked early and
+    /// landed recently.
+    pub(super) fn history(
+        &self,
+        tips: &[AcceptanceId],
+    ) -> Result<Ancestry<AcceptanceId>, StoreError> {
+        Ancestry::walk(tips, |id| {
+            let acceptance = self.store().get(id)?;
+            let body = acceptance.body();
+            let landed = body.landed.iter().filter_map(|source| match *source {
+                Source::Target(landed) => Some(landed),
+                Source::Revision(_) => None,
+            });
+            Ok::<_, StoreError>((landed.chain(body.prev).collect(), body.state))
+        })
     }
 }
