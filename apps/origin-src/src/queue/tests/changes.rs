@@ -3,6 +3,8 @@
 use std::sync::Mutex;
 use std::thread;
 
+use origin_shared::Statement;
+
 use super::*;
 
 #[test]
@@ -67,7 +69,7 @@ fn stacks_land_from_the_bottom() {
 }
 
 #[test]
-fn refuses_divergent_changes() {
+fn refuses_divergent_and_abandoned_changes() {
     let repo = Repo::new("[targets.main]\nauthority = \"node:queue\"\n");
     let first = repo.change_on_main(1, &[("a", "a")]);
     let base = Base::Acceptance(repo.tip(&TargetName::MAIN).acceptance);
@@ -79,6 +81,24 @@ fn refuses_divergent_changes() {
         .land_change(ChangeId::from_bytes([1; 16]), &main)
         .unwrap_err();
     assert!(matches!(error, LandError::Divergent { .. }), "{error}");
+
+    let given_up = repo.change_on_main(2, &[("b", "b")]);
+    let abandon = Statement {
+        subject: RecordId::Revision(given_up),
+        kind: Kind::ABANDON,
+        verdict: None,
+        issuer: "user:ada".parse().unwrap(),
+        inputs: None,
+        payload: None,
+        supersedes: None,
+        promoted_from: None,
+    };
+    repo.store.write_all(&[abandon.encode()]).unwrap();
+    let error = repo
+        .queue()
+        .land_change(ChangeId::from_bytes([2; 16]), &main)
+        .unwrap_err();
+    assert!(matches!(error, LandError::Abandoned(_)), "{error}");
 }
 
 #[test]
@@ -124,4 +144,24 @@ fn concurrent_landings_serialize() {
         assert_eq!(repo.store.get(pair[1]).unwrap().body().prev, Some(pair[0]));
     }
     assert_eq!(repo.main_files().len(), changes.len(), "every file landed");
+}
+
+#[test]
+fn only_the_creator_of_a_change_abandons_it() {
+    let repo = Repo::new("[targets.main]\nauthority = \"node:queue\"\n");
+    let revision = repo.change_on_main(1, &[("file", "work")]);
+    let abandon = |issuer: &str| Statement {
+        subject: RecordId::Revision(revision),
+        kind: Kind::ABANDON,
+        verdict: None,
+        issuer: issuer.parse().unwrap(),
+        inputs: None,
+        payload: None,
+        supersedes: None,
+        promoted_from: None,
+    };
+    repo.store
+        .write_all(&[abandon("user:eve").encode()])
+        .unwrap();
+    assert!(matches!(repo.land(1)[..], [Landing::Landed { .. }]));
 }

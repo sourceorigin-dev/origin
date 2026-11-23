@@ -23,7 +23,8 @@
 //! A revision made from one with unresolved paths (by a snapshot,
 //! `describe`, a new change on top, or a merge) gets its own
 //! `core.conflict` listing the paths still unresolved. It is published
-//! before the revision, so the revision is never seen without it.
+//! before the revision, so the revision is never seen without it. The
+//! landing queue refuses a revision that still has unresolved paths.
 //!
 //! The landing queue also issues a `core.conflict`, as a node, when a
 //! revision does not rebase onto its target. That statement only blocks

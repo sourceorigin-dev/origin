@@ -73,6 +73,20 @@ impl<P: Platform> Session<'_, '_, P> {
             if self.has_landed(head, &revision)? {
                 break;
             }
+            let claims = self.annotations.claims(RecordId::Revision(head))?;
+            for claim in &claims {
+                let statement = claim.statement();
+                if statement.kind == Kind::ABANDON && self.store().authorizes(statement)? {
+                    return Err(LandError::Abandoned(change));
+                }
+            }
+            let conflicts = Conflicts::of(self.store(), &claims, &revision)?;
+            if !conflicts.is_empty() {
+                return Err(LandError::Unresolved {
+                    change,
+                    paths: conflicts.paths(),
+                });
+            }
             if let Base::Revision(below) = revision.base {
                 next = Some(self.store().get(below)?.change);
             }
