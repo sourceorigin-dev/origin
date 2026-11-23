@@ -5,7 +5,8 @@ use std::collections::hash_map::Entry;
 
 use origin_platform::Platform;
 use origin_shared::{
-    Digest, EncodedObject, EntryKind, EntryName, Inputs, Record, RepoPath, Tree, TreeEntry, TreeId,
+    Digest, EncodedObject, EntryKind, EntryName, Inputs, ObjectId, Record, RepoPath, Tree,
+    TreeEntry, TreeId,
 };
 
 use crate::conflict::{Conflicted, Conflicts};
@@ -108,6 +109,8 @@ enum OnConflict<'l> {
     /// Both versions between conflict markers naming the sides with these
     /// labels, see [`Conflicts::mark`].
     Mark([&'l str; 2]),
+    /// [`Store::UNKNOWN`], a version neither side can have.
+    Unknown,
 }
 
 impl<P: Platform> Store<P> {
@@ -148,6 +151,32 @@ impl<P: Platform> Store<P> {
         labels: [&str; 2],
     ) -> Result<Merge, StoreError> {
         self.merge_with(base, ours, theirs, OnConflict::Mark(labels))
+    }
+
+    /// The entry a merge of merge bases has where they conflict: an id no
+    /// object has, so it equals neither side of a merge from it. A merge
+    /// never reads under it either: the bases may have had a directory
+    /// there, so any change at or under its path conflicts.
+    const UNKNOWN: TreeEntry = TreeEntry {
+        kind: EntryKind::File,
+        id: ObjectId::from_bytes([0; ObjectId::LEN]),
+    };
+
+    /// Merges like [`Store::merge`], but where both sides changed a path,
+    /// the merged tree has [`Store::UNKNOWN`]: how merge bases are merged
+    /// into one, so a merge from it conflicts there unless both sides
+    /// agree.
+    ///
+    /// # Errors
+    ///
+    /// Fails if a tree that differs cannot be read.
+    pub fn merge_bases(
+        &self,
+        base: Option<TreeId>,
+        ours: TreeId,
+        theirs: TreeId,
+    ) -> Result<Merge, StoreError> {
+        self.merge_with(base, ours, theirs, OnConflict::Unknown)
     }
 
     fn merge_with(
@@ -224,11 +253,14 @@ impl<P: Platform> Store<P> {
                 ours
             } else if base == ours {
                 theirs
-            } else if ours.is_none_or(|ours| ours.kind.is_tree())
+            } else if base != Some(Self::UNKNOWN)
+                && ours.is_none_or(|ours| ours.kind.is_tree())
                 && theirs.is_none_or(|theirs| theirs.kind.is_tree())
             {
                 // Both sides changed a directory, or one changed it and the
-                // other removed it: merge it file by file.
+                // other removed it: merge it file by file, unless what it was
+                // is unknown, which would take what one side removed for
+                // what the other added.
                 let subtree = |entry: Option<TreeEntry>| entry.and_then(TreeEntry::subtree);
                 self.merge_dir(
                     &dir.join(name),
@@ -246,6 +278,7 @@ impl<P: Platform> Store<P> {
                 let written = match on_conflict {
                     OnConflict::KeepOurs => ours,
                     OnConflict::Mark(labels) => self.mark(ours, theirs, labels, merge)?,
+                    OnConflict::Unknown => Some(Self::UNKNOWN),
                 };
                 // Paths come in order, each once.
                 merge.conflicts.push(Conflicted {
@@ -369,7 +402,7 @@ pub(crate) mod tests {
     use std::collections::BTreeMap;
 
     use origin_platform::Native;
-    use origin_shared::{EncodedObject, EntryKind, ObjectId, Record};
+    use origin_shared::{EncodedObject, EntryKind, Record};
 
     use super::*;
 
