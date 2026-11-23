@@ -3,12 +3,12 @@
 //!
 //! Core acts only on the reserved kinds, [`Kind::ABANDON`],
 //! [`Kind::CONFLICT`] and [`Kind::DIVERGENT`], and only when they come from
-//! the issuers [`Store::authorizes`] allows. Any other kind means whatever
-//! its issuer means by it. Supersession only counts within one issuer: if a
-//! statement names another issuer's statement as the one it supersedes,
-//! that statement still stands. [`Annotations::supersede`] supersedes an
-//! issuer's current statement atomically, so two calls at once on one store
-//! never supersede the same statement.
+//! the issuers [`RevisionView::authorizes`] allows. Any other kind means
+//! whatever its issuer means by it. Supersession only counts within one
+//! issuer: if a statement names another issuer's statement as the one it
+//! supersedes, that statement still stands. [`Annotations::supersede`]
+//! supersedes an issuer's current statement atomically, so two calls at
+//! once on one store never supersede the same statement.
 
 mod promotion;
 mod retention;
@@ -18,7 +18,8 @@ use std::collections::HashSet;
 use origin_platform::{Native, Platform};
 use origin_shared::api::Annotation;
 use origin_shared::{
-    ChangeId, EncodedObject, Kind, Principal, Record, RecordId, RevisionId, Statement, StatementId,
+    ChangeId, EncodedObject, Kind, Principal, Record, RecordId, Revision, RevisionId, Statement,
+    StatementId,
 };
 
 use crate::index::Index;
@@ -285,25 +286,26 @@ impl<'a, P: Platform> Annotations<'a, P> {
     }
 }
 
-impl<P: Platform> Store<P> {
-    /// Whether `statement`'s issuer may issue a statement of its kind, if
-    /// that kind is reserved:
-    ///
-    /// - `core.abandon`, about a revision, only the change's creator: the
-    ///   author of its first revision, so no one who took it over, or
-    ///   rebased it, gives it up for them;
-    /// - `core.conflict`, a node, as a landing queue that could not rebase
-    ///   the record, or the author of the revision it's about, listing
-    ///   the conflicts its files still have;
-    /// - `core.divergent`, a node.
-    ///
-    /// Reserved kinds are never promoted. Other kinds are anyone's, as far
-    /// as core is concerned.
+/// Reads the revisions that decide who may issue a reserved kind. A store
+/// implements it.
+pub trait RevisionView {
+    /// Returns the revision `id`.
     ///
     /// # Errors
     ///
-    /// Fails if a revision cannot be read.
-    pub fn authorizes(&self, statement: &Statement) -> Result<bool, StoreError> {
+    /// Fails if it cannot be found or read.
+    fn revision(&self, id: RevisionId) -> Result<Revision, StoreError>;
+
+    /// Whether `statement`'s issuer may issue a statement of its kind: anyone may
+    /// issue a kind that is not reserved. `core.abandon` takes the change's creator
+    /// or an `admin` ([`Policy::authorizes`](crate::policy::Policy::authorizes)
+    /// checks that), `core.conflict` a node or the revision's author, `core.divergent`
+    /// a node. A promoted statement of a reserved kind is never allowed.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the revision it is about cannot be read.
+    fn authorizes(&self, statement: &Statement) -> Result<bool, StoreError> {
         let issuer = &statement.issuer;
         if !statement.kind.is_reserved() {
             return Ok(true);
@@ -319,15 +321,19 @@ impl<P: Platform> Store<P> {
         Ok(if *kind == Kind::ABANDON {
             self.created(subject, issuer)?
         } else if *kind == Kind::CONFLICT {
-            is_node || self.get(subject)?.author == *issuer
+            is_node || self.revision(subject)?.author == *issuer
         } else {
             *kind == Kind::DIVERGENT && is_node
         })
     }
 
-    /// Whether `author` created the change of `revision`: made each
-    /// revision it evolves from that evolves from none. Records being
-    /// immutable, there is always one, and no one adds another later.
+    /// Whether `author` created the change of `revision`, that is, wrote every
+    /// revision it evolves from that has no predecessors. Returns `false` if
+    /// this view lacks part of that history.
+    ///
+    /// # Errors
+    ///
+    /// Fails if a revision cannot be read.
     fn created(&self, revision: RevisionId, author: &Principal) -> Result<bool, StoreError> {
         let mut seen = HashSet::new();
         let mut next = vec![revision];
@@ -335,13 +341,23 @@ impl<P: Platform> Store<P> {
             if !seen.insert(id) {
                 continue;
             }
-            let revision = self.get(id)?;
+            let revision = match self.revision(id) {
+                Ok(revision) => revision,
+                Err(StoreError::NotFound(_)) => return Ok(false),
+                Err(error) => return Err(error),
+            };
             if revision.predecessors.is_empty() && revision.author != *author {
                 return Ok(false);
             }
             next.extend(revision.predecessors);
         }
         Ok(true)
+    }
+}
+
+impl<P: Platform> RevisionView for Store<P> {
+    fn revision(&self, id: RevisionId) -> Result<Revision, StoreError> {
+        self.get(id)
     }
 }
 

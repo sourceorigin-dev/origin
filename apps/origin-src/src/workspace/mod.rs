@@ -1123,16 +1123,16 @@ impl Workspace {
         Ok(())
     }
 
-    /// `origin abandon [<change>] --reason <reason>`: records that the
-    /// change was given up, and why, with a `core.abandon` statement on its
-    /// head. Abandoning the current change starts a new one where it
-    /// started, and restores those files.
+    /// `origin abandon [<change>] --reason <reason>`: records that the change was
+    /// given up, and why, with a `core.abandon` statement on its head. Abandoning
+    /// the current change starts a new change where it started, and restores those
+    /// files.
     ///
     /// # Errors
     ///
-    /// Fails if the change cannot be found or diverged, the user didn't
-    /// create it, so readers would ignore the statement, or the records
-    /// cannot be written. Then no abandonment is written and nothing is
+    /// Fails if the change cannot be found or has diverged, the user neither
+    /// created it nor is an `admin` (readers would ignore the statement), or the
+    /// records cannot be written. Then no abandonment is written and nothing is
     /// checked out.
     pub fn abandon(&mut self, change: Option<&str>, reason: &str) -> Result<(), WorkspaceError> {
         let mut working_copy = self.refresh()?;
@@ -1153,7 +1153,8 @@ impl Workspace {
             supersedes: None,
             promoted_from: None,
         };
-        if !self.store.authorizes(&statement)? {
+        // As readers count it.
+        if !Policy::load(&self.store)?.authorizes(&self.store, &statement)? {
             return Err(AnnotateError::Reserved {
                 kind: statement.kind,
                 issuer: statement.issuer,
@@ -1480,17 +1481,25 @@ impl Workspace {
         Ok(flags)
     }
 
-    /// Who abandoned a revision, and why: only those who may, as
-    /// [`Store::authorizes`] says.
+    /// Returns who abandoned a revision, and why. Counts only those who may, as
+    /// [`Policy::authorizes`] says, the way the landing queue counts them.
     fn abandonments(
         &self,
         index: &Index,
         revision: RevisionId,
     ) -> Result<Vec<(Principal, String)>, WorkspaceError> {
         let mut abandonments = Vec::new();
+        let mut policy = None;
         for &id in index.statements(RecordId::Revision(revision)) {
             let statement = self.store.get(id)?;
-            if statement.kind == Kind::ABANDON && self.store.authorizes(&statement)? {
+            if statement.kind != Kind::ABANDON {
+                continue;
+            }
+            let policy = match &policy {
+                Some(policy) => policy,
+                None => policy.insert(Policy::load(&self.store)?),
+            };
+            if policy.authorizes(&self.store, &statement)? {
                 let reason = match statement.payload {
                     Some(payload) => self.text(payload)?,
                     None => String::new(),

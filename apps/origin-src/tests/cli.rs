@@ -517,7 +517,7 @@ fn init_with_a_malformed_key_leaves_no_repository() {
 }
 
 #[test]
-fn only_the_creator_of_a_change_abandons_it() {
+fn only_the_creator_of_a_change_or_admins_abandon_it() {
     let repo = Repo::new();
     repo.write("file", "ada's\n");
     repo.ok(&["describe", "Ada's change"]);
@@ -540,6 +540,18 @@ fn only_the_creator_of_a_change_abandons_it() {
     assert_eq!(repo.ok(&["statements"]), statements);
     fs::write(&config, "user = \"ada\"\n").unwrap();
     assert!(!repo.ok(&["show", &change]).contains("bandoned"));
+
+    repo.ok(&["new", "--on", "policy"]);
+    let policy = repo
+        .read("policy.toml")
+        .replace("\n# [grants]\n", "\n[grants]\n\"user:eve\" = [\"admin\"]\n");
+    repo.write("policy.toml", &policy);
+    repo.ok(&["land"]);
+    fs::write(&config, "user = \"eve\"\n").unwrap();
+    repo.ok(&["abandon", &change, "--reason", "Not mine"]);
+    fs::write(&config, "user = \"ada\"\n").unwrap();
+    let show = repo.ok(&["show", &change]);
+    assert!(show.contains("Abandoned by user:eve: Not mine\n"), "{show}");
 }
 
 #[test]
