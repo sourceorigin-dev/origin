@@ -53,6 +53,9 @@ enum WorkspaceCommand {
         /// What the new change is for.
         #[arg(default_value = "")]
         description: String,
+        /// Start the new change on the tip of this target instead.
+        #[arg(long)]
+        on: Option<TargetName>,
     },
     /// Describe what the current change is for.
     Describe {
@@ -124,6 +127,45 @@ enum WorkspaceCommand {
         /// The revision: `@`, a change for its head, or a revision.
         #[arg(default_value = "@")]
         rev: String,
+    },
+    /// Land a change on a target, along with the changes below it that the
+    /// target doesn't have yet. The queue rebases them onto the target's tip
+    /// and checks for the evidence `policy.toml` requires. If the evidence is
+    /// there, it appends a signed acceptance. A landing that conflicts or lacks
+    /// evidence waits in the queue.
+    Land(LandArgs),
+    /// Manage targets.
+    #[command(subcommand)]
+    Target(TargetCommand),
+    /// List the targets with their tips, authorities and requirements.
+    Targets,
+}
+
+#[derive(Debug, Args)]
+struct LandArgs {
+    /// The change to land: the working copy's by default.
+    #[arg(conflicts_with_all = ["from", "status"])]
+    change: Option<String>,
+    /// The target to land on: by default, the one the change is on.
+    #[arg(long)]
+    onto: Option<TargetName>,
+    /// Land the tip of this target instead of a change.
+    #[arg(long, requires = "onto")]
+    from: Option<TargetName>,
+    /// List the landings that are waiting, and why each waits.
+    #[arg(long, conflicts_with_all = ["onto", "from"])]
+    status: bool,
+}
+
+#[derive(Debug, Subcommand)]
+enum TargetCommand {
+    /// Create a target at the tip of another.
+    New {
+        /// Its name, such as `release/v3`.
+        name: TargetName,
+        /// The target whose tip the new target starts at.
+        #[arg(long)]
+        from: TargetName,
     },
 }
 
@@ -337,7 +379,10 @@ impl WorkspaceCommand {
             Self::Status => workspace.status()?,
             Self::Diff => workspace.diff()?,
             Self::Show { change } => workspace.show(change.as_deref())?,
-            Self::New { description } => workspace.new_change(&description)?,
+            Self::New { description, on } => match on {
+                Some(target) => workspace.new_on(&target, &description)?,
+                None => workspace.new_change(&description)?,
+            },
             Self::Describe { description } => workspace.describe(&description)?,
             Self::Resolve { paths } => workspace.resolve(&paths)?,
             Self::Edit { change } => workspace.edit(&change)?,
@@ -358,6 +403,15 @@ impl WorkspaceCommand {
             }
             Self::Statements { rev } => workspace.statements(&rev)?,
             Self::Promote { rev } => workspace.promote(&rev)?,
+            Self::Land(args) => match (args.from, args.onto) {
+                _ if args.status => workspace.land_status()?,
+                (Some(from), Some(onto)) => workspace.land_target(&from, &onto)?,
+                (_, onto) => workspace.land(args.change.as_deref(), onto)?,
+            },
+            Self::Target(TargetCommand::New { name, from }) => {
+                workspace.target_new(&name, &from)?;
+            }
+            Self::Targets => workspace.targets()?,
         }
         Ok(())
     }

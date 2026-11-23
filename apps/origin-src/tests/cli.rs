@@ -273,12 +273,15 @@ fn divergence_shows_until_converged() {
     assert!(status.contains("Conflicts: file hold"), "{status}");
     assert!(repo.ok(&["evolog"]).contains("    converges "));
 
-    // Describing it keeps the conflict, an edit resolves it, whatever the
-    // file then holds.
+    // It doesn't land until the file changes: describing it keeps the
+    // conflict, an edit resolves it, whatever the file then holds.
     repo.ok(&["describe", "Shared work, converged"]);
-    assert!(repo.ok(&["status"]).contains("Conflicts: file hold"));
+    let refused = repo.fails(&["land"]);
+    assert!(refused.contains("unresolved conflicts"), "{refused}");
+    assert!(refused.contains("edit file"), "{refused}");
     repo.write("file", "Heading\n=======\nboth\n");
     assert!(!repo.ok(&["status"]).contains("Conflicts"));
+    assert!(repo.ok(&["land"]).starts_with("Landed change"));
     assert!(
         repo.fails(&["converge", &change])
             .contains("is not divergent")
@@ -305,14 +308,14 @@ fn binary_conflicts_resolve_only_when_accepted() {
 
     // An edit elsewhere leaves it unresolved, even without markers.
     repo.write("unrelated", "docs\n");
-    assert!(repo.ok(&["status"]).contains("Conflicts: image, text hold"));
+    assert!(repo.fails(&["land"]).contains("unresolved conflicts"));
     let resolved = repo.ok(&["resolve", "image", "unrelated"]);
     assert!(resolved.starts_with("Resolved image\n"), "{resolved}");
     assert!(resolved.contains("Conflicts: text hold"), "{resolved}");
     let status = repo.ok(&["status"]);
     assert!(status.contains("\nConflicts: text hold"), "{status}");
     repo.ok(&["resolve", "text"]);
-    assert!(!repo.ok(&["status"]).contains("Conflicts"));
+    assert!(repo.ok(&["land"]).starts_with("Landed change"));
 }
 
 #[test]
@@ -365,7 +368,8 @@ fn a_revision_is_published_only_after_its_conflicts() {
 
     // So the revision, which would hide the conflict, wasn't written.
     assert!(!store.contains(described.id()).unwrap());
-    assert!(repo.ok(&["status"]).contains("Conflicts: file hold"));
+    let refused = repo.fails(&["land"]);
+    assert!(refused.contains("unresolved conflicts"), "{refused}");
 }
 
 #[test]
@@ -917,6 +921,220 @@ fn statements_are_promoted_where_their_inputs_are_unchanged() {
             .contains("is a reserved kind")
     );
     assert!(repo.fails(&["annotate", "@", "ci.lint"]).contains("--pass"));
+}
+
+#[test]
+fn landing_moves_the_working_copy_onto_the_target() {
+    let repo = Repo::new();
+    repo.write("a", "a\n");
+    repo.ok(&["describe", "Add a"]);
+    let first = repo.change();
+    repo.ok(&["new", "Add b"]);
+    let second = repo.change();
+    repo.write("b", "b\n");
+    repo.ok(&["new"]);
+    let empty = repo.change();
+
+    // The stack lands from the bottom; the empty working copy has nothing
+    // to land, and moves onto the new tip.
+    let land = repo.ok(&["land"]);
+    let lines: Vec<_> = land.lines().collect();
+    assert!(
+        lines[0].starts_with(&format!("Landed change {first}, revision ")),
+        "{land}"
+    );
+    assert!(lines[0].ends_with(", on main #1"), "{land}");
+    assert!(
+        lines[1].starts_with(&format!("Landed change {second}, ")),
+        "{land}"
+    );
+    assert_eq!(
+        lines[2],
+        format!("Landing change {empty} would change nothing on `main`")
+    );
+    assert!(
+        repo.ok(&["status"])
+            .contains("On top of: main #2\nNo changes.\n")
+    );
+
+    // Landing the working copy's change starts a new one on the tip.
+    repo.write("c", "c\n");
+    let land = repo.ok(&["land"]);
+    assert!(land.contains(" on main #3\nWorking copy: "), "{land}");
+    assert_ne!(repo.change(), empty);
+    assert!(
+        repo.ok(&["status"])
+            .ends_with("On top of: main #3\nNo changes.\n")
+    );
+    assert_eq!(repo.read("c"), "c\n");
+
+    let targets = repo.ok(&["targets"]);
+    assert!(targets.starts_with("main #3 "), "{targets}");
+    assert!(targets.contains("(node:ada)\npolicy #0 "), "{targets}");
+}
+
+#[test]
+fn a_change_the_target_already_has_moves_onto_its_tip() {
+    let repo = Repo::new();
+    repo.write("f", "f\n");
+    let ours = repo.change();
+    repo.ok(&["new", "--on", "main", "The same file"]);
+    repo.write("f", "f\n");
+    repo.ok(&["land"]);
+    repo.ok(&["edit", &ours]);
+    let land = repo.ok(&["land"]);
+    assert!(land.contains(" would change nothing on `main`\n"), "{land}");
+
+    // Deleting the file is then a change to what `main` has.
+    fs::remove_file(repo.path("f")).unwrap();
+    let land = repo.ok(&["land"]);
+    assert!(land.starts_with("Landed change "), "{land}");
+    assert!(!repo.path("f").exists());
+}
+
+#[test]
+fn targets_fork_and_land_on_each_other() {
+    let repo = Repo::new();
+    repo.ok(&["target", "new", "overhaul", "--from", "main"]);
+    assert!(
+        repo.fails(&["target", "new", "overhaul", "--from", "main"])
+            .contains("already named `overhaul`")
+    );
+    repo.ok(&["new", "--on", "overhaul", "Rework"]);
+    repo.write("rework", "new\n");
+    let land = repo.ok(&["land"]);
+    assert!(
+        land.contains(" on overhaul #1\n"),
+        "lands where it's made: {land}"
+    );
+
+    let land = repo.ok(&["land", "--from", "overhaul", "--onto", "main"]);
+    assert_eq!(land, "Landed `overhaul` on main #1\n");
+    assert!(repo.ok(&["log", "main"]).starts_with("◆ main #1 "));
+    assert!(repo.ok(&["log", "main"]).contains("\n    overhaul #1\n"));
+}
+
+/// Lands a policy that makes `main` require a passing `ci.test` result from
+/// the `runners` group, which includes `ada`.
+fn require_tests(repo: &Repo) {
+    repo.ok(&["new", "--on", "policy", "Require tests"]);
+    let policy = repo
+        .read("policy.toml")
+        .replace("# [groups]", "[groups]")
+        .replace(
+            "# runners = [\"node:ci-1\"]",
+            "runners = [\"node:ci-1\", \"user:ada\"]",
+        )
+        .replace("# require", "require");
+    repo.write("policy.toml", &policy);
+    assert!(repo.ok(&["land"]).contains(" on policy #1\n"));
+}
+
+#[test]
+fn results_there_count_over_promoted_ones() {
+    let repo = Repo::new();
+    require_tests(&repo);
+    repo.ok(&["new", "--on", "main", "Library"]);
+    repo.write("src/lib.rs", "fn a() {}\n");
+    repo.ok(&["annotate", "@", "ci.test", "--pass", "--inputs", "src"]);
+    assert!(repo.ok(&["land"]).contains(" on main #1\n"));
+    // Each change below keeps `src`, so the pass is promoted to it.
+    let promoted = |description: &str| {
+        repo.ok(&["new", "--on", "main", description]);
+        repo.write(&format!("{description}.md"), "docs\n");
+        assert!(repo.ok(&["promote"]).contains("Promoted ci.test pass"));
+    };
+    let waits = || {
+        let landing = repo.ok(&["land"]);
+        assert!(landing.starts_with("The landing of change "), "{landing}");
+    };
+    // A pass there, then taken back, takes the promoted one with it.
+    promoted("withdrawn");
+    repo.ok(&["annotate", "@", "ci.test", "--pass", "--inputs", "src"]);
+    repo.ok(&["annotate", "@", "ci.test", "--withdraw"]);
+    waits();
+    // A failure there wins over the promoted pass.
+    promoted("failed");
+    repo.ok(&["annotate", "@", "ci.test", "--fail", "--inputs", "src"]);
+    waits();
+}
+
+#[test]
+fn landings_wait_for_the_evidence_policy_requires() {
+    let repo = Repo::new();
+    require_tests(&repo);
+    assert!(
+        repo.ok(&["targets"])
+            .contains("    requires ci.test pass from group:runners\n")
+    );
+
+    repo.ok(&["new", "--on", "main", "Feature"]);
+    let change = repo.change();
+    repo.write("src/lib.rs", "fn a() {}\n");
+    let waiting = repo.ok(&["land"]);
+    assert!(
+        waiting.starts_with(&format!(
+            "The landing of change {change} on `main` waits for ci.test pass from group:runners\n"
+        )),
+        "{waiting}"
+    );
+    assert_eq!(repo.ok(&["land", "--status"]), waiting);
+    // A result withdrawn is no evidence.
+    repo.ok(&["annotate", "@", "ci.test", "--pass", "--inputs", "src"]);
+    repo.ok(&["annotate", "@", "ci.test", "--withdraw"]);
+    assert_eq!(repo.ok(&["land"]), waiting);
+    repo.ok(&["annotate", "@", "ci.test", "--pass", "--inputs", "src"]);
+    assert!(repo.ok(&["land"]).contains(" on main #1\n"));
+    assert_eq!(repo.ok(&["land", "--status"]), "No landing waits.\n");
+
+    // Only the authority lands: here, after a policy edit hands `main` to
+    // another node.
+    repo.ok(&["new", "--on", "policy"]);
+    let policy = repo.read("policy.toml").replace(
+        "[targets.main]\nauthority = \"node:ada\"",
+        "[targets.main]\nauthority = \"node:hosted\"",
+    );
+    // Another node's key: any valid one will do.
+    let key = policy
+        .lines()
+        .find_map(|line| line.strip_prefix("\"ada\" = "))
+        .unwrap();
+    repo.write(
+        "policy.toml",
+        &policy.replace("[nodes]\n", &format!("[nodes]\nhosted = {key}\n")),
+    );
+    repo.ok(&["land"]);
+    repo.ok(&["new", "--on", "main"]);
+    repo.write("x", "x\n");
+    assert!(
+        repo.fails(&["land"])
+            .contains("node:hosted is the authority of `main`")
+    );
+}
+
+#[test]
+fn conflicting_landings_are_flagged_and_wait() {
+    let repo = Repo::new();
+    repo.ok(&["describe", "One"]);
+    repo.write("shared", "one\n");
+    let one = repo.change();
+    repo.ok(&["new", "--on", "main", "Two"]);
+    repo.write("shared", "two\n");
+    let two = repo.change();
+    repo.ok(&["land", &one]);
+
+    let conflict = repo.ok(&["land"]);
+    assert!(
+        conflict.starts_with(&format!(
+            "The landing of change {two} on `main` conflicts in shared\n"
+        )),
+        "{conflict}"
+    );
+    assert!(
+        repo.ok(&["statements"])
+            .contains(" core.conflict by node:ada\n")
+    );
+    assert_eq!(repo.ok(&["land", "--status"]), conflict);
 }
 
 #[test]
