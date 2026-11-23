@@ -141,13 +141,16 @@ impl<'a, P: Platform> Annotations<'a, P> {
         Ok((id, statement))
     }
 
-    /// Writes a statement after its payload, which is durable before
-    /// anything refers to it.
+    /// Writes `payload`, then `statement`, and returns the statement's id. The
+    /// payload is durable before anything refers to it. It holds objects while
+    /// writing, so garbage collection cannot delete the payload before the
+    /// statement refers to it.
     fn write(
         &self,
         statement: &Statement,
         payload: Option<EncodedObject>,
     ) -> Result<StatementId, StoreError> {
+        let _held = self.store.hold_objects()?;
         if let Some(payload) = payload {
             self.store.write_all(&[payload])?;
         }
