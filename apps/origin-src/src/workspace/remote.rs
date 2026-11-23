@@ -16,7 +16,7 @@ use std::sync::OnceLock;
 
 use origin_platform::Native;
 use origin_shared::{
-    Base, ChangeId, EncodedObject, Record, Revision, RevisionId, TargetName, Tree, TreeId,
+    Base, ChangeId, EncodedObject, Record, RecordId, Revision, RevisionId, TargetName, Tree,
 };
 
 use super::{Workspace, WorkspaceError};
@@ -122,7 +122,7 @@ impl Workspace {
             .head(target)?
             .ok_or_else(|| WorkspaceError::UnknownTarget(target.clone()))?;
         let state = store.get(tip.acceptance)?.body().state;
-        sync.need(state, &[])?;
+        sync.need(RecordId::Acceptance(tip.acceptance), &[])?;
 
         let empty_tree = Tree::default().encode();
         let empty_description = EncodedObject::attachment(b"");
@@ -145,7 +145,8 @@ impl Workspace {
         )?;
         workspace.save_cursor(&cursor)?;
         workspace.remote = OnceLock::from(Some(remote));
-        let changes = workspace.changes(empty_tree.id().into(), state)?;
+        let changes =
+            workspace.changes(empty_tree.id().into(), RecordId::Acceptance(tip.acceptance))?;
         workspace.checkout(&changes, None)?;
         workspace.publish_pointer(None, id, Why::Command)?;
         println!(
@@ -362,25 +363,31 @@ impl Workspace {
         Ok(())
     }
 
-    /// Fetches the snapshots of `trees` that the repository lacks, if it has a
-    /// remote, since a clone only holds the snapshots it read. Skips what the
-    /// working copy's revision and its base already hold. Without a remote, it does
-    /// nothing, and reading a missing snapshot fails later.
-    pub(super) fn need(&self, trees: &[TreeId]) -> Result<(), WorkspaceError> {
-        if self.store.held_whole(trees.iter().copied())?.len() == trees.len() {
+    /// Fetches the snapshots of `records`, revisions and acceptances, that the
+    /// repository lacks, if it has a remote, since a clone only holds the snapshots
+    /// it read. Skips what the working copy's revision and its base already hold.
+    /// Without a remote, it does nothing, and reading a missing snapshot fails
+    /// later.
+    pub(super) fn need(&self, records: &[RecordId]) -> Result<(), WorkspaceError> {
+        let mut lacking = Vec::new();
+        for &record in records {
+            if let Some(snapshot) = self.store.snapshot_of(record)?
+                && !self.store.holds(snapshot)?
+            {
+                lacking.push(record);
+            }
+        }
+        if lacking.is_empty() {
             return Ok(());
         }
         let Some(remote) = self.remote()? else {
             return Ok(());
         };
         let current = self.store.get(self.revision)?;
-        let base = match current.base {
-            Base::Acceptance(id) => self.store.get(id)?.body().state,
-            Base::Revision(id) => self.store.get(id)?.snapshot,
-        };
+        let base = self.store.base_snapshot(current.base)?;
         let sync = self.sync(remote);
-        for &tree in trees {
-            sync.need(tree, &[current.snapshot, base])?;
+        for record in lacking {
+            sync.need(record, &[current.snapshot, base])?;
         }
         Ok(())
     }

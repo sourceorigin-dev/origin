@@ -527,7 +527,7 @@ impl<'a> Sync<'a> {
                     why,
                 };
                 if chain.target == TargetName::POLICY {
-                    self.need(body.state, &[])?;
+                    self.fetch_snapshot(RecordId::Acceptance(*id), body.state, &[])?;
                 }
                 let governing = Policy::governing(*id, body)
                     .map_err(|error| unverified(Unverified::Policy(error)))?;
@@ -542,7 +542,7 @@ impl<'a> Sync<'a> {
                             self.on_policy_chain(governing)?
                                 .ok_or_else(|| unverified(Unverified::OffChain(governing)))?
                         };
-                        self.need(state, &[])?;
+                        self.fetch_snapshot(RecordId::Acceptance(governing), state, &[])?;
                         let policy = Policy::of_snapshot(self.store, state)?
                             .ok_or(unverified(Unverified::NoPolicy))?;
                         vacant.insert(policy)
@@ -856,42 +856,62 @@ impl<'a> Sync<'a> {
         Ok(objects)
     }
 
-    /// Fetches the trees and blobs of `snapshot`, unless the store already
-    /// holds it whole. Skips what the snapshots `have` (which the store holds
-    /// whole) hold at the same path. Returns whether it fetched.
+    /// Fetches the trees and blobs of the snapshot of `record` (a revision or
+    /// an acceptance this node has), unless the store already holds it whole.
+    /// Skips what the snapshots `have` (which the store holds whole) hold at the
+    /// same path. Returns whether it fetched.
     ///
     /// # Errors
     ///
-    /// Fails if the remote doesn't have the snapshot, or the remote or the
-    /// store fails.
-    pub fn need(&self, snapshot: TreeId, have: &[TreeId]) -> Result<bool, SyncError> {
+    /// Fails if the record has no snapshot, the remote doesn't have it, or the
+    /// remote or the store fails.
+    pub fn need(&self, record: RecordId, have: &[TreeId]) -> Result<bool, SyncError> {
+        let snapshot = self
+            .store
+            .snapshot_of(record)?
+            .ok_or(SyncError::NoSnapshot(record))?;
+        self.fetch_snapshot(record, snapshot, have)
+    }
+
+    /// Fetches the whole snapshot of `record` again, whatever the store holds.
+    /// Used when reading a snapshot whose root the store has finds objects
+    /// missing.
+    ///
+    /// # Errors
+    ///
+    /// Fails like [`Sync::need`].
+    pub fn repair(&self, record: RecordId) -> Result<(), SyncError> {
+        let snapshot = self
+            .store
+            .snapshot_of(record)?
+            .ok_or(SyncError::NoSnapshot(record))?;
+        let request = FetchSnapshot {
+            of: record,
+            have: Vec::new(),
+            paths: Vec::new(),
+            skip: 0,
+        };
+        self.fetch_parts(request, Some(snapshot))
+    }
+
+    /// Does what [`Sync::need`] does, given the snapshot of `record`.
+    fn fetch_snapshot(
+        &self,
+        record: RecordId,
+        snapshot: TreeId,
+        have: &[TreeId],
+    ) -> Result<bool, SyncError> {
         if self.store.holds(snapshot)? {
             return Ok(false);
         }
         let request = FetchSnapshot {
-            snapshot,
+            of: record,
             have: self.store.held_whole(have.iter().copied())?,
             paths: Vec::new(),
             skip: 0,
         };
         self.fetch_parts(request, Some(snapshot))?;
         Ok(true)
-    }
-
-    /// Fetches all of `snapshot` again, whatever the store holds. Used when
-    /// reading a snapshot whose root the store has finds objects missing.
-    ///
-    /// # Errors
-    ///
-    /// Fails like [`Sync::need`].
-    pub fn repair(&self, snapshot: TreeId) -> Result<(), SyncError> {
-        let request = FetchSnapshot {
-            snapshot,
-            have: Vec::new(),
-            paths: Vec::new(),
-            skip: 0,
-        };
-        self.fetch_parts(request, Some(snapshot))
     }
 
     /// Fetches what `request` asks for, part after part, in one batch. With
@@ -963,10 +983,7 @@ impl<'a> Sync<'a> {
         let mut content = Vec::new();
         let mut seen = HashSet::new();
         for (id, revision) in &revisions {
-            let mut have = vec![match revision.base {
-                Base::Acceptance(base) => self.store.get(base)?.body().state,
-                Base::Revision(base) => self.store.get(base)?.snapshot,
-            }];
+            let mut have = vec![self.store.base_snapshot(revision.base)?];
             for &predecessor in &revision.predecessors {
                 if shared.contains(&predecessor.into()) {
                     have.push(self.store.get(predecessor)?.snapshot);
@@ -1300,6 +1317,9 @@ pub enum SyncError {
     /// The remote has no such target.
     #[error("the remote has no target `{0}`")]
     UnknownTarget(TargetName),
+    /// A snapshot was needed of a record that has none.
+    #[error("{0} has no snapshot")]
+    NoSnapshot(RecordId),
     /// The change has no revision to push.
     #[error("change {} has no revisions", .0.short())]
     UnknownChange(ChangeId),

@@ -118,8 +118,11 @@ pub struct FetchRecords {
 /// repository, so the server can check what each caller may read by path.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct FetchSnapshot {
-    /// The snapshot.
-    pub snapshot: TreeId,
+    /// The record whose snapshot to fetch: a revision or an acceptance. Only a
+    /// record's whole snapshot can be walked, not a tree inside it, because the
+    /// tree's paths would be checked as if they were other paths.
+    #[schema(value_type = String)]
+    pub of: RecordId,
     /// Snapshots the caller holds in full. Anything one of them holds at the
     /// same path is skipped, so only what changed is sent. Snapshots the
     /// repository doesn't have are ignored.

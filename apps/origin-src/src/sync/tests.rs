@@ -133,8 +133,9 @@ fn fetches_verified_chains_and_what_they_landed_but_not_snapshots() {
         !client.store.contains(state.into()).unwrap(),
         "snapshots are lazy"
     );
-    assert!(client.sync().need(state, &[]).unwrap());
-    assert!(!client.sync().need(state, &[]).unwrap(), "once");
+    let tip = RecordId::Acceptance(server.tip(&TargetName::MAIN).acceptance);
+    assert!(client.sync().need(tip, &[]).unwrap());
+    assert!(!client.sync().need(tip, &[]).unwrap(), "once");
     assert_eq!(client.store.diff(state, state).unwrap(), []);
     assert_eq!(client.sync().fetch_chains(&[]).unwrap(), []);
 }
@@ -464,16 +465,17 @@ fn transfers_go_in_parts_in_dependency_order() {
             statements: 1
         }
     );
-    let snapshot = other.store.get(first).unwrap().snapshot;
+    let record = RecordId::Revision(first);
     let request = FetchSnapshot {
-        snapshot,
+        of: record,
         have: Vec::new(),
         paths: Vec::new(),
         skip: 0,
     };
     let part = other.remote.snapshot(&request).unwrap();
     assert!(part.more && part.pack.objects.len() < 10, "{part:?}");
-    assert!(other.sync().need(snapshot, &[]).unwrap());
+    assert!(other.sync().need(record, &[]).unwrap());
+    let snapshot = other.store.snapshot_of(record).unwrap().unwrap();
     let empty = build(&other.store, &[]);
     assert_eq!(other.store.diff(empty, snapshot).unwrap().len(), 20);
 }
@@ -504,7 +506,8 @@ fn interrupted_snapshot_fetches_are_fetched_again() {
         .sync()
         .fetch_changes(&[ChangeId::from_bytes([1; 16])])
         .unwrap();
-    let snapshot = client.store.get(revision).unwrap().snapshot;
+    let record = RecordId::Revision(revision);
+    let snapshot = client.store.snapshot_of(record).unwrap().unwrap();
     let empty = build(&client.store, &[]);
 
     let batch = client.store.batch();
@@ -515,7 +518,7 @@ fn interrupted_snapshot_fetches_are_fetched_again() {
     batch.commit().unwrap();
     drop(fetching);
     assert!(!client.store.holds(snapshot).unwrap());
-    assert!(client.sync().need(snapshot, &[]).unwrap(), "fetched again");
+    assert!(client.sync().need(record, &[]).unwrap(), "fetched again");
     assert!(client.store.holds(snapshot).unwrap());
     assert_eq!(client.store.diff(empty, snapshot).unwrap().len(), 1);
     let src = Snapshots::new(&client.store)
@@ -524,7 +527,7 @@ fn interrupted_snapshot_fetches_are_fetched_again() {
         .unwrap();
     client.store.remove(&[src.id]).unwrap();
     assert!(client.store.diff(empty, snapshot).is_err());
-    client.sync().repair(snapshot).unwrap();
+    client.sync().repair(record).unwrap();
     assert_eq!(client.store.diff(empty, snapshot).unwrap().len(), 1);
 }
 

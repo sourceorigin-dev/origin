@@ -793,8 +793,10 @@ impl Workspace {
         self.may_move()?;
         let changes = if revision.snapshot == working_copy.files {
             Vec::new()
+        } else if unwritten.is_empty() {
+            self.changes(working_copy.files, RecordId::Revision(to))?
         } else {
-            self.changes(working_copy.files, revision.snapshot)?
+            self.store.diff(working_copy.files, revision.snapshot)?
         };
         // The files stay as they are: there's nothing to finish.
         if changes.is_empty() {
@@ -854,16 +856,21 @@ impl Workspace {
         Ok(Worktree::new(&self.root, &self.store).restore(&changes)?)
     }
 
-    /// Returns the changes that turn the files of `from` into those of `to`, after
-    /// fetching what the repository lacks of `to`. Moves call it before they write
-    /// `moving`, so a failed fetch moves nothing.
-    fn changes(&self, from: TreeId, to: TreeId) -> Result<Vec<FileChange>, WorkspaceError> {
+    /// Returns the changes that turn the files of `from` into those of the snapshot
+    /// of `to`, a revision or an acceptance, after fetching what the repository
+    /// lacks of it. Moves call it before they write `moving`, so a failed fetch
+    /// moves nothing.
+    fn changes(&self, from: TreeId, to: RecordId) -> Result<Vec<FileChange>, WorkspaceError> {
         self.need(&[to])?;
-        Ok(match self.store.diff(from, to) {
+        let tree = self
+            .store
+            .snapshot_of(to)?
+            .ok_or(SyncError::NoSnapshot(to))?;
+        Ok(match self.store.diff(from, tree) {
             Err(StoreError::NotFound(missing)) => match self.remote()? {
                 Some(remote) => {
                     self.sync(remote).repair(to)?;
-                    self.store.diff(from, to)?
+                    self.store.diff(from, tree)?
                 }
                 None => return Err(StoreError::NotFound(missing).into()),
             },
@@ -942,7 +949,11 @@ impl Workspace {
     /// cannot be read.
     pub fn diff(&mut self) -> Result<(), WorkspaceError> {
         let working_copy = self.snapshot()?;
-        self.print_diff(working_copy.revision.base, working_copy.files)
+        self.print_diff(
+            working_copy.id,
+            working_copy.revision.base,
+            working_copy.files,
+        )
     }
 
     /// `origin show [<change>]`: prints a change's head, or each of them if
@@ -993,15 +1004,21 @@ impl Workspace {
                 println!("    {line}");
             }
             println!();
-            self.print_diff(revision.base, files)?;
+            self.print_diff(id, revision.base, files)?;
         }
         Ok(())
     }
 
-    /// Prints the changes `snapshot` makes to `base`, line by line.
-    fn print_diff(&self, base: Base, snapshot: TreeId) -> Result<(), WorkspaceError> {
+    /// Prints the changes `snapshot`, of the revision `id`, makes to `base`, line
+    /// by line.
+    fn print_diff(
+        &self,
+        id: RevisionId,
+        base: Base,
+        snapshot: TreeId,
+    ) -> Result<(), WorkspaceError> {
         let base = self.base_tree(base)?;
-        self.need(&[snapshot])?;
+        self.need(&[RecordId::Revision(id)])?;
         for change in self.store.diff(base, snapshot)? {
             print!("{}", FileDiff::new(&self.store, &change)?);
         }
@@ -1219,11 +1236,8 @@ impl Workspace {
             heads[heads.len() - 1]
         };
         let kept_revision: Revision = self.store.get(kept)?;
-        let snapshots = heads
-            .iter()
-            .map(|&head| Ok(self.store.get(head)?.snapshot))
-            .collect::<Result<Vec<_>, WorkspaceError>>()?;
-        self.need(&snapshots)?;
+        let records: Vec<_> = heads.iter().copied().map(RecordId::Revision).collect();
+        self.need(&records)?;
         let base = self.merge_base(&heads)?;
         let mut snapshot = kept_revision.snapshot;
         let mut merged = Conflicts::default();
@@ -1306,8 +1320,7 @@ impl Workspace {
             Ok::<_, StoreError>((revision.predecessors, revision.snapshot))
         })?;
         ancestry.merge_base(&self.store, heads, |id| {
-            let revision: Revision = self.store.get(id)?;
-            self.need(&[revision.snapshot])
+            self.need(&[RecordId::Revision(id)])
         })
     }
 
@@ -1533,12 +1546,8 @@ impl Workspace {
     /// Returns the snapshot a revision was made on top of, fetching it if the
     /// repository lacks it.
     fn base_tree(&self, base: Base) -> Result<TreeId, WorkspaceError> {
-        let tree = match base {
-            Base::Acceptance(id) => self.store.get(id)?.body().state,
-            Base::Revision(id) => self.store.get(id)?.snapshot,
-        };
-        self.need(&[tree])?;
-        Ok(tree)
+        self.need(&[base.into()])?;
+        Ok(self.store.base_snapshot(base)?)
     }
 
     fn describe_base(&self, base: Base) -> Result<String, WorkspaceError> {

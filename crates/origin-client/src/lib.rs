@@ -73,9 +73,10 @@ endpoints! {
         /// last one it includes.
         fn fetch_records(request: &FetchRecords) -> Part =
             POST "records/fetch", json(request) => part;
-        /// Fetches the trees and blobs of a snapshot, parents first, skipping those
-        /// that one of the request's `have` snapshots holds at the same path. If a
-        /// part stops short, ask again, skipping the objects already received.
+        /// Fetches the trees and blobs of a record's snapshot, parents first,
+        /// skipping those that one of the request's `have` snapshots holds at the
+        /// same path. If a part stops short, ask again, skipping the objects already
+        /// received.
         fn fetch_snapshot(request: &FetchSnapshot) -> Part =
             POST "snapshots/fetch", json(request) => part;
         /// Stores a batch of objects: snapshots, revisions and statements. Each

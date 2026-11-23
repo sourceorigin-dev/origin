@@ -337,35 +337,49 @@ impl OriginService {
         })
     }
 
-    /// Returns the objects of the snapshot the request names that the caller lacks,
-    /// as a pack, parents before children. The caller lacks an object if none of
-    /// the snapshots it has holds it at the same path. Only the paths the request
-    /// asks for are included, and the first `skip` objects are left out (see
-    /// [`Store::added`]). The pack stops short at [`Pack::LIMIT`]: to get the rest,
-    /// ask again, skipping what came.
+    /// Returns the snapshot of a record, if it is a revision or an acceptance.
+    fn snapshot_of(&self, record: RecordId) -> Result<TreeId, ServiceError> {
+        let unknown = || ServiceError::UnknownRecord(record);
+        let snapshot = match record {
+            RecordId::Revision(id) => self.store.get(id).map(|revision| revision.snapshot),
+            RecordId::Acceptance(id) => {
+                self.store.get(id).map(|acceptance| acceptance.body().state)
+            }
+            RecordId::Statement(_) | RecordId::Snapshot(_) => {
+                return Err(ServiceError::NotASnapshot(record));
+            }
+        };
+        match snapshot {
+            Err(StoreError::NotFound(_) | StoreError::Decode { .. }) => Err(unknown()),
+            snapshot => Ok(snapshot?),
+        }
+    }
+
+    /// Returns the objects of the snapshot of the record the request names that the
+    /// caller lacks, as a pack, parents before children. The caller lacks an object
+    /// if none of the snapshots it has holds it at the same path. Only the paths
+    /// the request asks for are included, and the first `skip` objects are left out
+    /// (see [`Store::added`]). The pack stops short at [`Pack::LIMIT`]: to get the
+    /// rest, ask again, skipping what came.
     ///
     /// # Errors
     ///
-    /// Fails if the repository doesn't have the snapshot, or cannot read it.
+    /// Fails if the record isn't a revision or an acceptance, or the repository
+    /// cannot read its snapshot.
     pub fn snapshot(
         &self,
         _caller: &Caller,
         request: &FetchSnapshot,
     ) -> Result<Part, ServiceError> {
-        let is_tree = |id: TreeId| -> Result<bool, StoreError> {
-            let object = self.store.try_read(id.into())?;
-            Ok(object.is_some_and(|object| object.kind().ok() == Some(ObjectKind::Tree)))
-        };
-        if !is_tree(request.snapshot)? {
-            return Err(ServiceError::UnknownSnapshot(request.snapshot));
-        }
+        let snapshot = self.snapshot_of(request.of)?;
         let mut have = Vec::new();
         for &id in &request.have {
-            if is_tree(id)? {
+            let object = self.store.try_read(id.into())?;
+            if object.is_some_and(|object| object.kind().ok() == Some(ObjectKind::Tree)) {
                 have.push(id);
             }
         }
-        let added = self.store.added(request.snapshot, &have, &request.paths)?;
+        let added = self.store.added(snapshot, &have, &request.paths)?;
         let skip = usize::try_from(request.skip).unwrap_or(usize::MAX);
         let ids: Vec<ObjectId> = added
             .iter()
@@ -1005,6 +1019,12 @@ pub enum ServiceError {
     /// A blob, a tree or an attachment was fetched as a record.
     #[error("{0} is not a record: fetch snapshots by walking them")]
     NotARecord(ObjectId),
+    /// The repository has no such record, or the caller doesn't see it.
+    #[error("record {0} not found")]
+    UnknownRecord(RecordId),
+    /// A snapshot was asked of a record that has none.
+    #[error("{0} has no snapshot: name a revision or an acceptance")]
+    NotASnapshot(RecordId),
     /// A put object refers to another as the wrong kind: a snapshot that isn't a
     /// tree, a file that is one, or a description that isn't an attachment.
     #[error("object {id} refers to {needed} as a {kind}, which it is not")]
@@ -1087,13 +1107,15 @@ impl ServiceError {
             Self::UnknownRepository(_)
             | Self::UnknownChange(_)
             | Self::UnknownTarget(_)
-            | Self::UnknownSnapshot(_) => ErrorCode::NotFound,
+            | Self::UnknownSnapshot(_)
+            | Self::UnknownRecord(_) => ErrorCode::NotFound,
             Self::NoTarget
             | Self::NotARecord(_)
+            | Self::NotASnapshot(_)
+            | Self::WrongKind { .. }
             | Self::Malformed { .. }
             | Self::Acceptance(_)
-            | Self::Missing { .. }
-            | Self::WrongKind { .. } => ErrorCode::BadRequest,
+            | Self::Missing { .. } => ErrorCode::BadRequest,
             Self::Statement { source, .. } => match &**source {
                 AnnotateError::Store(error) => Self::store_code(error),
                 _ => ErrorCode::BadRequest,
