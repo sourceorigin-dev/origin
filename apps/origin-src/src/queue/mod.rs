@@ -45,25 +45,23 @@
 mod pending;
 mod session;
 
-use std::fmt;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
 
 use origin_platform::{DurableWrite, LockMode, LockedFile, Native, Platform};
-use origin_shared::policy::Requirement;
+use origin_shared::landing::{Blocked, Landing, Pending, Proposal};
 use origin_shared::{
-    AcceptanceBody, AcceptanceId, ChangeId, EncodedObject, NodeKey, Principal, PrincipalName,
-    Record, RecordId, RepoPath, RevisionId, Source, StatementId, TargetId, TargetName, Tree,
-    TreeId,
+    AcceptanceBody, AcceptanceId, ChangeId, EncodedObject, Head, NodeKey, Principal, PrincipalName,
+    Record, RecordId, RepoPath, RevisionId, Source, TargetId, TargetName, Tree, TreeId,
 };
 
 use crate::annotations::{AnnotateError, Annotations};
 use crate::conflict::Conflicts;
 use crate::policy::{Policy, PolicyError};
 use crate::store::{Store, StoreError};
-use crate::targets::Head;
 
+use pending::PendingFile;
 use session::{Candidate, Session};
 
 /// The landing queues of a store's targets, run by one node.
@@ -72,63 +70,6 @@ pub struct Queue<'a, P = Native> {
     store: &'a Store<P>,
     key: &'a NodeKey,
     node: PrincipalName,
-}
-
-/// What a landing lands.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Proposal {
-    /// A change, as of its head.
-    Change(ChangeId),
-    /// Another target, as of its tip.
-    Target(TargetName),
-}
-
-/// The outcome of a landing.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Landing {
-    /// It landed.
-    Landed {
-        /// What landed.
-        proposal: Proposal,
-        /// The revision or acceptance the acceptance names.
-        source: Source,
-        /// The acceptance.
-        acceptance: Head,
-    },
-    /// The target already has it, so nothing landed.
-    Unchanged(Proposal),
-    /// It waits, and the queue keeps it.
-    Pending(Pending),
-}
-
-/// A landing that waits, kept in the queue to be listed and retried.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Pending {
-    /// The target it lands on.
-    pub onto: TargetName,
-    /// What lands.
-    pub proposal: Proposal,
-    /// What the evidence must be about: the revision that would land, or the
-    /// merged snapshot when landing a target. For a conflict, the revision or
-    /// acceptance that did not merge.
-    pub subject: RecordId,
-    /// Why it waits.
-    pub blocked: Blocked,
-}
-
-/// Why a landing waits.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Blocked {
-    /// The subject lacks these statements, which the target requires.
-    Evidence(Vec<Requirement>),
-    /// Both sides changed these paths. The `core.conflict` statement lists
-    /// them too.
-    Conflict {
-        /// The statement.
-        statement: StatementId,
-        /// The paths, sorted.
-        paths: Vec<RepoPath>,
-    },
 }
 
 impl<'a, P: Platform> Queue<'a, P> {
@@ -330,8 +271,8 @@ impl<'a, P: Platform> Queue<'a, P> {
                     Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
                     Err(source) => return Err(StoreError::io(&path, source)),
                 };
-                let mut landing =
-                    Pending::decode(&text).ok_or_else(|| StoreError::Malformed(path.clone()))?;
+                let mut landing = PendingFile::decode(&text)
+                    .ok_or_else(|| StoreError::Malformed(path.clone()))?;
                 if let Blocked::Conflict { statement, paths } = &mut landing.blocked {
                     *paths = Conflicts::listed(store, &store.get(*statement)?)?.paths();
                 }
@@ -429,15 +370,6 @@ impl<'a, P: Platform> Queue<'a, P> {
             annotations: Annotations::open(self.store)?,
             _lock: lock,
         })
-    }
-}
-
-impl fmt::Display for Proposal {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Change(change) => write!(f, "change {}", change.short()),
-            Self::Target(target) => write!(f, "`{target}`"),
-        }
     }
 }
 
