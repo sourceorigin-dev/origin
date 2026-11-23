@@ -1005,6 +1005,55 @@ impl OriginService {
         Ok(self.store.write_all(&checked)?)
     }
 
+    /// Promotes results to `subject`, a revision or an acceptance the caller sees,
+    /// from the records they see on the same target with the same input digest.
+    /// Returns the promoted results, statements this node issues: the checks a
+    /// rerun can skip. A promotion claims nothing new, so any signed-in caller may
+    /// ask for one.
+    ///
+    /// If the subject has any statement, retries the landings waiting for evidence
+    /// about it, even when nothing new was promoted: a result put by a call that a
+    /// crash cut short may be what they wait for.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the caller is anonymous, or a record cannot be read or written.
+    pub fn promote(
+        &self,
+        caller: &Caller,
+        subject: RecordId,
+    ) -> Result<Vec<Annotation>, ServiceError> {
+        if *caller == Caller::Anonymous {
+            return Err(Forbidden::Anonymous.into());
+        }
+        let rights = self.rights(caller)?;
+        let mut reader = Reader::new(&self.store, &rights.paths);
+        if !reader.sees(subject)? {
+            return Err(ServiceError::UnknownRecord(subject));
+        }
+        let (promoted, stated) = self.annotations(|annotations| {
+            let promoter = self.node.principal();
+            let issued = annotations.promote(subject, &promoter, |record| reader.sees(record))?;
+            let stated = !annotations.index().statements(subject).is_empty();
+            Ok((issued, stated))
+        })?;
+        if !promoted.is_empty() {
+            self.wakeup.notify();
+        }
+        if stated || !promoted.is_empty() {
+            self.resume(Some(&HashSet::from([subject])))?;
+        }
+        Ok(promoted
+            .into_iter()
+            .map(|(id, statement)| Annotation {
+                id,
+                statement,
+                superseded_by: None,
+                holds: true,
+            })
+            .collect())
+    }
+
     /// Returns the statements about `subject`, in the order the repository received
     /// them, or none if the caller doesn't see the subject.
     ///
@@ -2022,5 +2071,26 @@ mod tests {
             &land(&service, &Caller::Owner, 1)[..],
             [Landing::Landed { .. }]
         ));
+    }
+
+    #[test]
+    fn results_whose_retry_a_crash_cut_short_land_later() {
+        let (repo, service) = requiring_ci();
+        let revisions = [1, 2].map(|change| {
+            let revision = repo.change_on_main(change, &[(&format!("docs/{change}"), "")]);
+            assert!(matches!(
+                &land(&service, &Caller::Owner, change)[..],
+                [Landing::Pending(_)]
+            ));
+            revision
+        });
+        let results = revisions.map(|revision| ci_test(revision, "user:ci").encode());
+        repo.store.write_all(&results).unwrap();
+        service
+            .promote(&Caller::Owner, RecordId::Revision(revisions[0]))
+            .unwrap();
+        assert_eq!(service.landings(&Caller::Owner).unwrap().len(), 1);
+        service.resume_waiting().unwrap();
+        assert_eq!(service.landings(&Caller::Owner).unwrap(), []);
     }
 }

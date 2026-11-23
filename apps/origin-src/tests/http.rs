@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 use origin_client::{Client, Error, Repo};
 use origin_shared::api::{
     ApiError, BrowseQuery, ErrorCode, EventsQuery, Expected, FetchRecords, FetchSnapshot,
-    InventoryRequest, LandRequest, List, LogQuery, NewTarget, PutQuery, RepoName, StatementsQuery,
-    TokenRequest,
+    InventoryRequest, LandRequest, List, LogQuery, NewTarget, PromoteRequest, PutQuery, RepoName,
+    StatementsQuery, TokenRequest,
 };
 use origin_shared::event::EventKind;
 use origin_shared::landing::{Blocked, Landing, Proposal};
@@ -764,6 +764,61 @@ async fn landings_wait_for_evidence() {
     assert!(
         matches!(landed.landings[..], [Landing::Unchanged(_)]),
         "{landed:?}"
+    );
+}
+
+#[tokio::test]
+async fn promotes_results_by_input_digest() {
+    let server = Server::start().await;
+    let repo = &server.demo;
+    let base = main_tip(repo).await;
+    let first = Made::revision(change(1), base, vec![], &[("a.txt", "a"), ("doc", "1")]);
+    let statement = Statement {
+        inputs: Some(Inputs {
+            paths: vec![RepoPath::new("a.txt").unwrap()],
+            definition: Digest::of(b"test"),
+            toolchain: Digest::of(b""),
+            external: false,
+        }),
+        ..ci_test(first.id, "user:ada")
+            .decode_as::<Statement>()
+            .unwrap()
+    }
+    .encode();
+    let mut pack = first.pack();
+    pack.objects.push(statement.clone());
+    repo.put_records(&pack).await.unwrap();
+
+    let docs_only = Made::revision(change(2), base, vec![], &[("a.txt", "a"), ("doc", "2")]);
+    repo.put_records(&docs_only.pack()).await.unwrap();
+    let request = PromoteRequest {
+        subject: RecordId::Revision(docs_only.id),
+    };
+    let promoted = repo.promote(&request).await.unwrap();
+    let [promotion] = &promoted[..] else {
+        panic!("{promoted:?}")
+    };
+    assert_eq!(
+        promotion.statement.promoted_from,
+        Some(statement.id().into())
+    );
+    assert_eq!(promotion.statement.issuer.to_string(), "node:hosted");
+    assert_eq!(
+        repo.promote(&request).await.unwrap(),
+        [],
+        "already promoted"
+    );
+
+    let changed = Made::revision(change(3), base, vec![], &[("a.txt", "b")]);
+    repo.put_records(&changed.pack()).await.unwrap();
+    let request = PromoteRequest {
+        subject: RecordId::Revision(changed.id),
+    };
+    assert_eq!(repo.promote(&request).await.unwrap(), []);
+    let anonymous = Client::new(&server.base).repo("demo".parse().unwrap());
+    assert_eq!(
+        code(anonymous.promote(&request).await.unwrap_err()),
+        ErrorCode::Forbidden
     );
 }
 
