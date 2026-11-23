@@ -583,6 +583,61 @@ impl<P: Platform> Store<P> {
     fn unsettled<'a>(access: Option<&'a PathAccess>, path: &RepoPath) -> Option<&'a PathAccess> {
         access.filter(|access| access.settled(path).is_none_or(|level| level < Level::Read))
     }
+
+    /// Returns the first path of `snapshot` whose object is neither in
+    /// `supplied` nor at the same path in one of the snapshots `references`, if
+    /// any. A revision may only hold content its writer supplied, or content
+    /// that a snapshot it refers to holds at the same path. Subtrees a reference
+    /// holds unchanged are skipped without being read.
+    ///
+    /// # Errors
+    ///
+    /// Fails if a tree of `snapshot` or of a reference cannot be read.
+    pub fn unsupplied(
+        &self,
+        snapshot: TreeId,
+        references: &[TreeId],
+        supplied: &HashSet<ObjectId>,
+    ) -> Result<Option<RepoPath>, StoreError> {
+        self.unsupplied_dir(&RepoPath::root(), snapshot, references, supplied)
+    }
+
+    fn unsupplied_dir(
+        &self,
+        dir: &RepoPath,
+        tree: TreeId,
+        references: &[TreeId],
+        supplied: &HashSet<ObjectId>,
+    ) -> Result<Option<RepoPath>, StoreError> {
+        if references.contains(&tree) {
+            return Ok(None);
+        }
+        if !supplied.contains(&tree.into()) {
+            return Ok(Some(dir.clone()));
+        }
+        let references: Vec<Tree> = references
+            .iter()
+            .map(|&id| self.get(id))
+            .collect::<Result<_, _>>()?;
+        for (name, &entry) in &self.get(tree)? {
+            let path = dir.join(name);
+            let held = references.iter().filter_map(|tree| tree.get(name.as_str()));
+            if held.clone().any(|held| *held == entry) {
+                continue;
+            }
+            let unsupplied = match entry.subtree() {
+                Some(subtree) => {
+                    let held: Vec<_> = held.filter_map(|held| held.subtree()).collect();
+                    self.unsupplied_dir(&path, subtree, &held, supplied)?
+                }
+                None => (!supplied.contains(&entry.id)).then_some(path),
+            };
+            if unsupplied.is_some() {
+                return Ok(unsupplied);
+            }
+        }
+        Ok(None)
+    }
 }
 
 /// A walk of [`Store::added`].

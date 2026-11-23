@@ -628,8 +628,14 @@ Records put:
   one reads an attachment by naming its id. A promotion is exempt, since it
   carries its original's payload.
 - The records of a batch are read before the store's, so a batch may hold
-  revisions and statements about them. The caller sees the records their
+  a stack of revisions and statements about them. The caller sees the records their
   batch adds, but a record the store already had only if they saw it before.
+
+Revisions put:
+- A revision may only evolve from revisions the caller sees.
+- It may only hold content the caller supplies, or that a snapshot it refers
+  to holds at the same path (`Store::unsupplied`), so no one reads a file by
+  placing its id where they may read.
 
 Tokens:
 - Static tokens in the server configuration keep working.

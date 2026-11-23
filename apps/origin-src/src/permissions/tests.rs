@@ -1,15 +1,19 @@
 use std::sync::Arc;
 
+use origin_platform::Native;
+use origin_shared::api::{FetchSnapshot, LandRequest};
+use origin_shared::landing::{Landing, Proposal};
 use origin_shared::pack::Pack;
 use origin_shared::{
-    AttachmentId, Base, ChangeId, EncodedObject, NodeKey, ObjectKind, Record, Revision, Statement,
-    TargetName, TreeEntry, TreeId,
+    AttachmentId, Base, ChangeId, EncodedObject, EntryKind, EntryName, NodeKey, ObjectKind, Record,
+    Revision, Statement, TargetName, Tree, TreeEntry, TreeId,
 };
 
 use super::*;
 use crate::queue::tests::Repo;
 use crate::service::{Node, OriginService, ServiceError};
 use crate::tree::Snapshots;
+use crate::tree::tests::build;
 
 /// Ada writes everything and changes the rules. Eve reads all but
 /// `secrets`, writes only `src`, and issues reviews and checks. Both
@@ -71,6 +75,21 @@ impl Fixture {
         self.repo.store.base_snapshot(self.tip(target)).unwrap()
     }
 
+    /// Returns the objects of a snapshot of `files`, and its id, without
+    /// writing them.
+    fn objects(files: &[(&str, &str)]) -> (TreeId, Vec<EncodedObject>) {
+        let dir = tempfile::tempdir().unwrap();
+        let scratch = Store::new(dir.path().join(".origin"), Native::default());
+        scratch.init().unwrap();
+        let blobs: Vec<_> = files
+            .iter()
+            .map(|(_, content)| EncodedObject::blob(content.as_bytes()))
+            .collect();
+        scratch.write_all(&blobs).unwrap();
+        let tree = build(&scratch, files);
+        (tree, scratch.read_all(&scratch.ids().unwrap()).unwrap())
+    }
+
     /// A revision of `change` by `author`, with `snapshot` on `base`, and its
     /// description.
     fn revision(
@@ -98,6 +117,14 @@ impl Fixture {
         self.service
             .put_records(caller, Pack { objects })
             .map(|_| ())
+    }
+
+    fn land(&self, caller: &Caller, proposal: Proposal) -> Result<Vec<Landing>, ServiceError> {
+        let request = LandRequest {
+            proposal,
+            onto: Some(TargetName::MAIN),
+        };
+        Ok(self.service.land(caller, &request)?.landings)
     }
 
     /// What `main` holds at `path`.
@@ -184,6 +211,98 @@ fn records_never_carry_a_file_as_their_attachment() {
         .unwrap();
     let fetched = fixture.service.records(&eve, &[crafted.id()]).unwrap();
     assert_eq!(fetched.pack.objects, [crafted]);
+}
+
+#[test]
+fn pushes_cannot_place_unreadable_objects_where_they_read() {
+    let fixture = Fixture::new();
+    let eve = caller("user:eve");
+    let base = fixture.tip(&TargetName::MAIN);
+    let state = fixture.state(&TargetName::MAIN);
+    let secret = fixture.at_main("secrets/key").unwrap();
+    let store = &fixture.repo.store;
+
+    let mut src: Tree = store
+        .get(fixture.at_main("src").unwrap().subtree().unwrap())
+        .unwrap();
+    src.insert(EntryName::new("stolen").unwrap(), secret);
+    let src = src.encode();
+    let mut root: Tree = store.get(state).unwrap();
+    let entry = TreeEntry {
+        kind: EntryKind::Tree,
+        id: src.id(),
+    };
+    root.insert(EntryName::new("src").unwrap(), entry);
+    let root = root.encode();
+    let (id, records) = Fixture::revision(2, "user:eve", base, Vec::new(), root.id().into());
+    let mut objects = vec![src, root];
+    objects.extend(records);
+    let error = forbidden(fixture.put(&eve, objects));
+    assert_eq!(
+        error,
+        Forbidden::Unsupplied {
+            revision: id,
+            path: path("src/stolen"),
+        }
+    );
+    assert!(!store.contains(id.into()).unwrap());
+
+    let request = FetchSnapshot {
+        of: RecordId::Snapshot(fixture.at_main("secrets").unwrap().subtree().unwrap()),
+        have: Vec::new(),
+        paths: Vec::new(),
+        skip: 0,
+    };
+    assert!(matches!(
+        fixture.service.snapshot(&eve, &request),
+        Err(ServiceError::NotASnapshot(_))
+    ));
+
+    let mut files = vec![("README.md", "hello"), ("src/lib.rs", "fn a() {}")];
+    files.push(("src/own.rs", "hunter2"));
+    let (tree, mut objects) = Fixture::objects(&files);
+    let (tree, trees) = {
+        let mut root: Tree = objects
+            .iter()
+            .find(|object| object.id() == tree.into())
+            .unwrap()
+            .decode_as()
+            .unwrap();
+        for kept in ["secrets", "protected"] {
+            root.insert(
+                EntryName::new(kept).unwrap(),
+                fixture.at_main(kept).unwrap(),
+            );
+        }
+        let root = root.encode();
+        (TreeId::from(root.id()), vec![root])
+    };
+    objects.extend(trees);
+    let (_, records) = Fixture::revision(3, "user:eve", base, Vec::new(), tree);
+    objects.extend(records);
+    fixture.put(&eve, objects).unwrap();
+}
+
+#[test]
+fn only_those_who_see_a_revision_succeed_it() {
+    let fixture = Fixture::new();
+    let adas = fixture
+        .repo
+        .change_on_main(30, &[("secrets/key", "rotated")]);
+    let base = fixture.tip(&TargetName::MAIN);
+    let state = fixture.state(&TargetName::MAIN);
+    let (eves, mut objects) = Fixture::revision(30, "user:eve", base, vec![adas], state);
+    objects.push(statement(RecordId::Revision(eves), "core.abandon", "user:eve").encode());
+    let blind = scoped("user:eve", &[], in_a_week());
+    assert!(fixture.put(&blind, objects.clone()).is_err());
+    let put = fixture.put(&caller("user:eve"), objects);
+    assert!(
+        matches!(put, Err(ServiceError::UnknownRecord(record)) if record == RecordId::Revision(adas)),
+        "{put:?}"
+    );
+    let change = Proposal::Change(ChangeId::from_bytes([30; 16]));
+    let landed = fixture.land(&caller("user:ada"), change).unwrap();
+    assert!(matches!(landed[..], [Landing::Landed { .. }]), "{landed:?}");
 }
 
 #[test]
@@ -347,6 +466,29 @@ fn reserved_kinds_come_from_their_authors_whatever_the_caller_annotates() {
     let mut batch = records;
     batch.push(abandon(RecordId::Revision(mine)));
     fixture.put(&eve, batch).unwrap();
+}
+
+#[test]
+fn batches_hold_stacks_and_statements_about_them() {
+    let fixture = Fixture::new();
+    let main = fixture.tip(&TargetName::MAIN);
+    let files = [
+        ("README.md", "hello"),
+        ("src/lib.rs", "fn a() {}"),
+        ("secrets/key", "hunter2"),
+        ("protected/file", "keep"),
+    ];
+    let (lower_tree, mut objects) = Fixture::objects(&[&files[..], &[("src/a.rs", "a")]].concat());
+    let (lower, records) = Fixture::revision(2, "user:eve", main, Vec::new(), lower_tree);
+    objects.extend(records);
+    let (upper_tree, more) =
+        Fixture::objects(&[&files[..], &[("src/a.rs", "a"), ("src/b.rs", "b")]].concat());
+    objects.extend(more);
+    let (upper, records) =
+        Fixture::revision(3, "user:eve", Base::Revision(lower), Vec::new(), upper_tree);
+    objects.extend(records);
+    objects.push(statement(RecordId::Revision(upper), "review", "user:eve").encode());
+    fixture.put(&caller("user:eve"), objects).unwrap();
 }
 
 #[test]
