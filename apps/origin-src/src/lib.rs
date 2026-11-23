@@ -16,6 +16,7 @@ pub mod oplog;
 pub mod output;
 pub mod policy;
 pub mod queue;
+pub mod remote;
 pub mod server;
 pub mod service;
 pub mod store;
