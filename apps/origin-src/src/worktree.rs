@@ -6,11 +6,12 @@
 //! blob id, so only files whose metadata changed are read and hashed. Every
 //! step runs in parallel.
 //!
-//! Checkouts write files from the store. They never overwrite an edit made
-//! since the working copy was last snapshotted, and the files they write
-//! are durable once they return.
+//! Checkouts clone files from the repository's other working copies when
+//! their stat caches show the files unmodified, and write the rest from the
+//! store. They never overwrite an edit made since the working copy was last
+//! snapshotted, and the files they write are durable once they return.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io;
@@ -19,12 +20,12 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::panic;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use origin_platform::Platform;
+use origin_platform::{CloneError, CloneFile, Platform};
 use origin_shared::object::{DecodeError, Reader};
 use origin_shared::{
     EncodedObject, EntryKind, EntryName, ObjectId, Record, RepoPath, Tree, TreeEntry, TreeId,
@@ -525,6 +526,10 @@ impl<'a, P: Platform> Worktree<'a, P> {
     /// before replacing it, and stops at a file edited in between, or at a
     /// directory, where it writes a file, that holds untracked files.
     ///
+    /// A file that one of `sources` has unmodified is cloned from it, or copied
+    /// where the file system cannot clone. Other files are written from the
+    /// store.
+    ///
     /// # Errors
     ///
     /// Fails with [`SnapshotError::Edited`] if a file changed since the
@@ -533,6 +538,7 @@ impl<'a, P: Platform> Worktree<'a, P> {
     pub fn checkout(
         &self,
         changes: &[FileChange],
+        sources: &[CloneSource],
         unchanged: Option<&StatCache>,
     ) -> Result<(), SnapshotError> {
         if changes.is_empty() {
@@ -541,7 +547,7 @@ impl<'a, P: Platform> Worktree<'a, P> {
         let seen = unchanged
             .map(|cache| Self::par_map(changes, |change| self.check_unchanged(change, cache)))
             .transpose()?;
-        self.apply(changes, seen.as_deref())
+        self.apply(changes, seen.as_deref(), sources)
     }
 
     /// Makes the files match a snapshot like [`Worktree::checkout`], but only
@@ -569,13 +575,18 @@ impl<'a, P: Platform> Worktree<'a, P> {
         if changes.is_empty() {
             return Ok(());
         }
-        self.apply(&changes, Some(&seen))
+        self.apply(&changes, Some(&seen), &[])
     }
 
     /// Checks `changes` out, as [`Worktree::checkout`] describes. With `seen`,
     /// the files as found unedited (one per change), it stops at a file edited
     /// since.
-    fn apply(&self, changes: &[FileChange], seen: Option<&[Seen]>) -> Result<(), SnapshotError> {
+    fn apply(
+        &self,
+        changes: &[FileChange],
+        seen: Option<&[Seen]>,
+        sources: &[CloneSource],
+    ) -> Result<(), SnapshotError> {
         let seen = |index: usize| seen.map(|seen| seen[index]);
         // Removing first frees the paths of files that become directories,
         // and of directories that become files.
@@ -618,6 +629,7 @@ impl<'a, P: Platform> Worktree<'a, P> {
                 source,
             })?;
         }
+        let originals = Originals::new(sources, writes.iter().map(|write| &write.entry));
         // Many files take long to sync: the first half is written back
         // while the second is written, so the final sync, the barrier, has
         // less left to wait for.
@@ -627,7 +639,7 @@ impl<'a, P: Platform> Worktree<'a, P> {
             0
         };
         let (first, second) = writes.split_at(half);
-        self.write_files(first)?;
+        self.write_files(first, &originals)?;
         thread::scope(|scope| {
             let early = (!first.is_empty()).then(|| {
                 scope.spawn(|| {
@@ -639,7 +651,7 @@ impl<'a, P: Platform> Worktree<'a, P> {
                         .sync_batch(files.map(|write| write.path.as_path()))
                 })
             });
-            let written = self.write_files(second);
+            let written = self.write_files(second, &originals);
             let synced = early.map(|early| {
                 early
                     .join()
@@ -655,9 +667,15 @@ impl<'a, P: Platform> Worktree<'a, P> {
     /// Writes `writes`, giving each core a contiguous run of files instead of
     /// one file at a time. Creating a file locks its directory, and a run mostly
     /// stays in its own directories, which is 40% faster.
-    fn write_files(&self, writes: &[Write]) -> Result<(), SnapshotError> {
+    fn write_files(
+        &self,
+        writes: &[Write],
+        originals: &Originals<'_>,
+    ) -> Result<(), SnapshotError> {
         Store::<P>::on_every_core(writes, |chunk| {
-            chunk.iter().try_for_each(|write| self.write_file(write))
+            chunk
+                .iter()
+                .try_for_each(|write| self.write_file(write, originals))
         })
         .into_iter()
         .collect()
@@ -762,8 +780,9 @@ impl<'a, P: Platform> Worktree<'a, P> {
     }
 
     /// Writes the file `write` describes, replacing any file there, unless that
-    /// file was edited since it was seen. Its directory must exist.
-    fn write_file(&self, write: &Write) -> Result<(), SnapshotError> {
+    /// file was edited since it was seen. Clones an original if there is one,
+    /// and otherwise writes from the store. Its directory must exist.
+    fn write_file(&self, write: &Write, originals: &Originals<'_>) -> Result<(), SnapshotError> {
         let Write { path, entry, seen } = write;
         let (path, entry) = (path.as_path(), *entry);
         let io_error = |source| SnapshotError::Io {
@@ -773,6 +792,17 @@ impl<'a, P: Platform> Worktree<'a, P> {
         Seen::check(*seen, path)?;
         // Never write through a symlink, or keep the old file's mode.
         Self::remove(path)?;
+        if let Some(original) = originals.get(entry) {
+            // A clone has a new file's mode, or on some platforms the
+            // original's, whose kind may differ: originals are found by
+            // content. Only a regular file from a regular file is right
+            // either way.
+            match original.clone_to(&self.store.platform, path) {
+                Some(EntryKind::File) if entry.kind == EntryKind::File => return Ok(()),
+                Some(_) => return Self::set_kind(path, entry.kind).map_err(io_error),
+                None => Self::remove(path)?,
+            }
+        }
         let blob = self.store.read(entry.id)?;
         let content = blob.blob_content().map_err(|source| StoreError::Decode {
             id: entry.id,
@@ -781,10 +811,20 @@ impl<'a, P: Platform> Worktree<'a, P> {
         match entry.kind {
             EntryKind::Symlink => symlink(OsStr::from_bytes(content), path).map_err(io_error),
             EntryKind::Executable => fs::write(path, content)
-                .and_then(|()| fs::set_permissions(path, fs::Permissions::from_mode(0o755)))
+                .and_then(|()| Self::set_kind(path, entry.kind))
                 .map_err(io_error),
             EntryKind::File | EntryKind::Tree => fs::write(path, content).map_err(io_error),
         }
+    }
+
+    /// Makes a regular file executable, or not.
+    fn set_kind(path: &Path, kind: EntryKind) -> io::Result<()> {
+        let mode = if kind == EntryKind::Executable {
+            0o755
+        } else {
+            0o644
+        };
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))
     }
 
     /// Maps `items` in order, on as many threads as there are cores when
@@ -839,6 +879,134 @@ impl<'a, P: Platform> Worktree<'a, P> {
     }
 }
 
+/// Another working copy of the repository. A checkout clones its files
+/// instead of writing them from the store, when its stat cache shows them
+/// unmodified.
+#[derive(Debug)]
+pub struct CloneSource {
+    root: PathBuf,
+    /// Its stat cache, read from `cache_path` the first time a checkout looks
+    /// for a file in it.
+    cache: OnceLock<StatCache>,
+    cache_path: PathBuf,
+    /// Cleared once its file system refuses a clone; files are copied from then
+    /// on.
+    clones: AtomicBool,
+}
+
+impl CloneSource {
+    /// The working copy at `root`, whose stat cache is `cache`.
+    #[must_use]
+    pub fn new(root: PathBuf, cache: StatCache) -> Self {
+        Self {
+            root,
+            cache: OnceLock::from(cache),
+            cache_path: PathBuf::new(),
+            clones: AtomicBool::new(true),
+        }
+    }
+
+    /// The working copy at `root`, whose stat cache is saved at `cache_path`.
+    /// The cache is only read if a checkout needs it.
+    #[must_use]
+    pub fn saved(root: PathBuf, cache_path: PathBuf) -> Self {
+        Self {
+            root,
+            cache: OnceLock::new(),
+            cache_path,
+            clones: AtomicBool::new(true),
+        }
+    }
+
+    fn cache(&self) -> &StatCache {
+        self.cache.get_or_init(|| StatCache::load(&self.cache_path))
+    }
+}
+
+/// A file of a [`CloneSource`] that its stat cache vouches for.
+struct Original<'s> {
+    source: &'s CloneSource,
+    path: &'s str,
+    id: ObjectId,
+}
+
+impl Original<'_> {
+    /// Clones the file to `to`, which must not exist, or copies it where the
+    /// file system cannot clone. Returns the original's kind, or `None` if the
+    /// original changed since its cache was saved or cannot be read; whatever
+    /// it made at `to` is left there.
+    fn clone_to(&self, platform: &impl CloneFile, to: &Path) -> Option<EntryKind> {
+        let from = self.source.root.join(self.path);
+        let made = if self.source.clones.load(Ordering::Relaxed) {
+            match platform.clone_file(&from, to) {
+                Ok(()) => true,
+                Err(CloneError::Unsupported { .. }) => {
+                    self.source.clones.store(false, Ordering::Relaxed);
+                    fs::copy(&from, to).is_ok()
+                }
+                Err(CloneError::Io { .. }) => false,
+            }
+        } else {
+            fs::copy(&from, to).is_ok()
+        };
+        // Every write moves a file's ctime forward, past the time its entry
+        // settled at, so an original still matching its entry now was
+        // unmodified during the clone.
+        let stat = Stat::new(&fs::symlink_metadata(&from).ok()?);
+        (made && self.source.cache().get(self.path, &stat) == Some(self.id)).then_some(stat.kind)
+    }
+}
+
+/// The settled regular files of some [`CloneSource`]s, by blob id.
+struct Originals<'s>(HashMap<ObjectId, (&'s CloneSource, &'s str)>);
+
+impl<'s> Originals<'s> {
+    /// Finds originals for the regular files among `entries`, taking each from
+    /// the first of `sources` that has it. A source's stat cache is only read
+    /// while some file still has no original.
+    fn new<'e>(sources: &'s [CloneSource], entries: impl Iterator<Item = &'e TreeEntry>) -> Self {
+        let mut originals = HashMap::new();
+        if sources.is_empty() {
+            return Self(originals);
+        }
+        let mut wanted: HashSet<ObjectId> = entries
+            .filter(|entry| Self::regular(entry))
+            .map(|entry| entry.id)
+            .collect();
+        for source in sources {
+            if wanted.is_empty() {
+                break;
+            }
+            let cache = source.cache();
+            for (path, (stat, id)) in &cache.files {
+                let regular = stat.kind != EntryKind::Symlink;
+                if regular && cache.settled(stat) && wanted.remove(id) {
+                    originals.insert(*id, (source, path.as_str()));
+                }
+            }
+        }
+        Self(originals)
+    }
+
+    /// Returns the original of a regular file. Symlinks are never cloned, even
+    /// when their blob is also a file's content.
+    fn get(&self, entry: TreeEntry) -> Option<Original<'s>> {
+        if !Self::regular(&entry) {
+            return None;
+        }
+        let &(source, path) = self.0.get(&entry.id)?;
+        Some(Original {
+            source,
+            path,
+            id: entry.id,
+        })
+    }
+
+    fn regular(entry: &TreeEntry) -> bool {
+        matches!(entry.kind, EntryKind::File | EntryKind::Executable)
+    }
+}
+
 /// A failure to snapshot or check out the working copy.
 #[derive(Debug, thiserror::Error)]
 pub enum SnapshotError {
@@ -870,7 +1038,9 @@ pub enum SnapshotError {
 
 #[cfg(test)]
 mod tests {
-    use origin_platform::Native;
+    use origin_platform::{Durability, Error, FileLock, FileSystem, FsKind, Native, ReadAt};
+
+    use std::slice;
 
     use super::*;
 
@@ -1077,13 +1247,13 @@ mod tests {
         // Back to the old snapshot, then forward to the new one.
         let worktree = fixture.worktree();
         worktree
-            .checkout(&fixture.store.diff(new, old).unwrap(), None)
+            .checkout(&fixture.store.diff(new, old).unwrap(), &[], None)
             .unwrap();
         assert!(!fixture.dir.path().join("swap/inner").exists());
         let (back, cache) = fixture.snapshot(&cache);
         assert_eq!(back, old);
         worktree
-            .checkout(&fixture.store.diff(old, new).unwrap(), None)
+            .checkout(&fixture.store.diff(old, new).unwrap(), &[], None)
             .unwrap();
         assert!(!fixture.dir.path().join("gone").exists(), "emptied dirs go");
         assert_eq!(fixture.snapshot(&cache).0, new);
@@ -1104,7 +1274,7 @@ mod tests {
         // Snapshotted, then edited again before the checkout.
         let (_, cache) = fixture.snapshot(&StatCache::default());
         fixture.write("changed", "edited since");
-        let error = worktree.checkout(&back, Some(&cache)).unwrap_err();
+        let error = worktree.checkout(&back, &[], Some(&cache)).unwrap_err();
         assert!(
             matches!(&error, SnapshotError::Edited(path) if path.ends_with("changed")),
             "{error}"
@@ -1117,7 +1287,7 @@ mod tests {
 
         // Edited back, it is as snapshotted: its content tells.
         fixture.write("changed", "after");
-        worktree.checkout(&back, Some(&cache)).unwrap();
+        worktree.checkout(&back, &[], Some(&cache)).unwrap();
         assert_eq!(fixture.snapshot(&StatCache::default()).0, old);
 
         // A file created where the checkout writes one.
@@ -1125,7 +1295,7 @@ mod tests {
         fixture.write("added", "created since");
         let forward = fixture.store.diff(old, new).unwrap();
         assert!(matches!(
-            worktree.checkout(&forward, Some(&cache)),
+            worktree.checkout(&forward, &[], Some(&cache)),
             Err(SnapshotError::Edited(_))
         ));
         assert_eq!(
@@ -1150,7 +1320,7 @@ mod tests {
             .map(|change| worktree.check_unchanged(change, &cache).unwrap())
             .collect();
         fixture.write("file", "edited meanwhile");
-        let error = worktree.apply(&back, Some(&seen)).unwrap_err();
+        let error = worktree.apply(&back, Some(&seen), &[]).unwrap_err();
         assert!(matches!(error, SnapshotError::Edited(_)), "{error}");
         assert_eq!(
             fs::read_to_string(fixture.dir.path().join("file")).unwrap(),
@@ -1169,11 +1339,11 @@ mod tests {
         let worktree = fixture.worktree();
 
         let back = fixture.store.diff(dir, file).unwrap();
-        worktree.checkout(&back, Some(&cache)).unwrap();
+        worktree.checkout(&back, &[], Some(&cache)).unwrap();
         let (found, cache) = fixture.snapshot(&StatCache::default());
         assert_eq!(found, file);
         let forth = fixture.store.diff(file, dir).unwrap();
-        worktree.checkout(&forth, Some(&cache)).unwrap();
+        worktree.checkout(&forth, &[], Some(&cache)).unwrap();
         assert_eq!(fixture.snapshot(&StatCache::default()).0, dir);
     }
 
@@ -1200,5 +1370,183 @@ mod tests {
         assert_eq!(read("moved"), "new");
         assert_eq!(read("edited"), "edited");
         assert_eq!(read("added"), "created");
+    }
+
+    #[test]
+    fn checkouts_read_only_the_stat_caches_they_need() {
+        let fixture = Fixture::new();
+        fixture.write("file", "content");
+        let (root, mut cache) = fixture.snapshot(&StatCache::default());
+        cache.scanned_at = i64::MAX;
+        let empty = Tree::default().encode();
+        fixture.store.write_all(slice::from_ref(&empty)).unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let sources = [
+            CloneSource::new(fixture.dir.path().to_owned(), cache),
+            CloneSource::saved(other.path().to_owned(), other.path().join("state")),
+        ];
+        let worktree = Worktree::new(other.path(), &fixture.store);
+        worktree.checkout(&[], &sources, None).unwrap();
+        worktree
+            .checkout(
+                &fixture.store.diff(empty.id().into(), root).unwrap(),
+                &sources,
+                None,
+            )
+            .unwrap();
+        assert!(
+            sources[1].cache.get().is_none(),
+            "the first source had every file"
+        );
+        assert_eq!(
+            fs::read_to_string(other.path().join("file")).unwrap(),
+            "content"
+        );
+    }
+
+    /// The native platform, except that it counts clones and refuses them, as
+    /// ext4 does. With `content_only`, it makes clones with the original's
+    /// content but not its mode.
+    #[derive(Debug, Default)]
+    struct FakeClones {
+        attempts: AtomicUsize,
+        content_only: bool,
+    }
+
+    impl Durability for FakeClones {
+        fn sync_batch<'f>(&self, files: impl IntoIterator<Item = &'f Path>) -> Result<(), Error> {
+            Native::default().sync_batch(files)
+        }
+    }
+
+    impl FileLock for FakeClones {}
+
+    impl ReadAt for FakeClones {}
+
+    impl CloneFile for FakeClones {
+        fn cannot_clone(&self, _: &io::Error) -> bool {
+            !self.content_only
+        }
+
+        fn clone_file(&self, from: &Path, to: &Path) -> Result<(), CloneError> {
+            self.attempts.fetch_add(1, Ordering::Relaxed);
+            let (from, to) = (from.to_owned(), to.to_owned());
+            if self.content_only {
+                return fs::read(&from)
+                    .and_then(|content| fs::write(&to, content))
+                    .map_err(|source| CloneError::Io { from, to, source });
+            }
+            Err(CloneError::Unsupported {
+                from,
+                to,
+                source: io::ErrorKind::Unsupported.into(),
+            })
+        }
+    }
+
+    impl FileSystem for FakeClones {
+        fn file_system(&self, path: &Path) -> io::Result<FsKind> {
+            Native::default().file_system(path)
+        }
+    }
+
+    #[test]
+    fn checkouts_clone_only_unmodified_files() {
+        let fixture = Fixture::new();
+        fixture.write("same", "same");
+        fixture.write("edited", "before");
+        fixture.write("run.sh", "#!/bin/sh");
+        let run = fixture.dir.path().join("run.sh");
+        fs::set_permissions(&run, fs::Permissions::from_mode(0o755)).unwrap();
+        symlink("same", fixture.dir.path().join("link")).unwrap();
+        // Enough files that every writer thread has several.
+        let files = 64;
+        for i in 0..files {
+            fixture.write(&format!("copies/{i}"), &i.to_string());
+        }
+        let (root, mut cache) = fixture.snapshot(&StatCache::default());
+        cache.scanned_at = i64::MAX;
+        fixture.write("edited", "after!");
+        let empty = Tree::default().encode();
+        fixture.store.write_all(slice::from_ref(&empty)).unwrap();
+
+        let other = tempfile::tempdir().unwrap();
+        let store = Store::new(fixture.dir.path().join(".origin"), FakeClones::default());
+        let source = CloneSource::new(fixture.dir.path().to_owned(), cache);
+        Worktree::new(other.path(), &store)
+            .checkout(
+                &store.diff(empty.id().into(), root).unwrap(),
+                slice::from_ref(&source),
+                None,
+            )
+            .unwrap();
+        // Each writer thread tries once at most: the first refusal it sees
+        // makes it, and every thread after, copy.
+        let threads = thread::available_parallelism().map_or(1, usize::from);
+        let attempts = store.platform.attempts.load(Ordering::Relaxed);
+        assert!(
+            (1..=threads.min(files)).contains(&attempts),
+            "a refused clone falls back to copies for the rest: {attempts} attempts"
+        );
+        let read = |path| fs::read_to_string(other.path().join(path)).unwrap();
+        assert_eq!(read("edited"), "before", "a modified original isn't copied");
+        assert_eq!(read("same"), "same");
+        let (copied, _) = Worktree::new(other.path(), &fixture.store)
+            .snapshot(&StatCache::default())
+            .unwrap();
+        assert_eq!(copied, root, "kinds and links are reproduced");
+    }
+
+    #[test]
+    fn clones_take_the_mode_their_entry_names() {
+        let fixture = Fixture::new();
+        fixture.write("run.sh", "#!/bin/sh");
+        let run = fixture.dir.path().join("run.sh");
+        fs::set_permissions(&run, fs::Permissions::from_mode(0o755)).unwrap();
+        let (root, mut cache) = fixture.snapshot(&StatCache::default());
+        cache.scanned_at = i64::MAX;
+        let script = fixture.entry(root, "run.sh");
+        let empty = Tree::default().encode();
+        // The script's content as an entry of `kind`, cloned from it: the
+        // mode bits for executing it.
+        let checked_out = |kind, platform: FakeClones| {
+            let mut tree = Tree::default();
+            let name = origin_shared::EntryName::new("file").unwrap();
+            tree.insert(
+                name,
+                TreeEntry {
+                    kind,
+                    id: script.id,
+                },
+            );
+            let tree = tree.encode();
+            fixture
+                .store
+                .write_all(&[empty.clone(), tree.clone()])
+                .unwrap();
+            let other = tempfile::tempdir().unwrap();
+            let store = Store::new(fixture.dir.path().join(".origin"), platform);
+            let source = CloneSource::new(fixture.dir.path().to_owned(), cache.clone());
+            Worktree::new(other.path(), &store)
+                .checkout(
+                    &store.diff(empty.id().into(), tree.id().into()).unwrap(),
+                    slice::from_ref(&source),
+                    None,
+                )
+                .unwrap();
+            assert_eq!(store.platform.attempts.load(Ordering::Relaxed), 1);
+            let file = fs::metadata(other.path().join("file")).unwrap();
+            file.permissions().mode() & 0o111
+        };
+        // A clone of the content alone, as Linux makes, of the executable.
+        let content_only = FakeClones {
+            content_only: true,
+            ..FakeClones::default()
+        };
+        let executable = checked_out(EntryKind::Executable, content_only);
+        assert_eq!(executable, 0o111, "still executable");
+        // A copy, as where cloning is refused, keeps the original's mode.
+        let regular = checked_out(EntryKind::File, FakeClones::default());
+        assert_eq!(regular, 0, "not executable");
     }
 }

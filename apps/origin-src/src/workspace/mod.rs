@@ -401,7 +401,7 @@ impl Workspace {
         unchanged: Option<&StatCache>,
     ) -> Result<(), WorkspaceError> {
         let changes = self.store.diff(from, to)?;
-        Ok(Worktree::new(&self.root, &self.store).checkout(&changes, unchanged)?)
+        Ok(Worktree::new(&self.root, &self.store).checkout(&changes, &[], unchanged)?)
     }
 
     /// `origin status`: prints the working copy's change, what it is on
