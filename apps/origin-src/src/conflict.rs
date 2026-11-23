@@ -24,6 +24,10 @@
 //! `describe`, a new change on top, or a merge) gets its own
 //! `core.conflict` listing the paths still unresolved. It is published
 //! before the revision, so the revision is never seen without it.
+//!
+//! The landing queue also issues a `core.conflict`, as a node, when a
+//! revision does not rebase onto its target. That statement only blocks
+//! landing on that target; each retry merges again.
 
 use origin_platform::Platform;
 use origin_shared::{

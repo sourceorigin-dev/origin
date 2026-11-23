@@ -1,27 +1,23 @@
-//! A repository's storage on disk, under its `.origin` directory:
-//! content-addressed objects here, and target chains in
-//! [`targets`](crate::targets).
+//! A repository's storage on disk, under its `.origin` directory. This
+//! module stores content-addressed objects; [`targets`](crate::targets)
+//! stores target chains, and [`queue`](crate::queue) pending landings.
 //!
-//! Each object lives in its own zstd-compressed file at
+//! Each object is a zstd-compressed file at
 //! `objects/loose/<first 2 hex digits>/<remaining hex digits>`. Objects are
-//! written in batches through a [`DurableWrite`]: every file of a batch is
-//! staged beside its destination, then the batch is synced at once, renamed
-//! into place and its directories synced, so a batch costs one batch sync
-//! and one sync per directory. Once [`Batch::commit`] returns, the objects
-//! survive a crash, so anything that refers to them can be published.
+//! written in batches through a [`DurableWrite`]: each file is staged next
+//! to its destination, then the whole batch is synced, renamed into place,
+//! and its directories are synced. Once [`Batch::commit`] returns, the
+//! objects survive a crash, so records that refer to them can be published.
 //! Readers never see a partial object, and concurrent writers of the same
-//! object are harmless. A batch that finds an object already there syncs
-//! its directory too, since the writer that put it there may not have yet.
-//! Writers that crash leave temporary files behind, which
-//! [`Store::remove_stale_temps`] removes. Garbage collection
-//! ([`Store::gc`]) calls it, so opening a store never pays for a walk over
-//! every object.
+//! object do no harm. Writers that crash leave temporary files behind;
+//! [`Store::remove_stale_temps`] removes them, and garbage collection
+//! ([`Store::gc`]) calls it.
 //!
-//! [`Store::compact`] moves small loose objects into [`packs`], and reads
-//! look in the loose objects first, then in the packs.
+//! [`Store::compact`] moves small loose objects into [`packs`]. Reads look in
+//! the loose objects first, then in the packs.
 //!
-//! Committing a batch also indexes its new records, see
-//! [`index`](crate::index).
+//! Committing a batch also indexes its new records (see
+//! [`index`](crate::index)).
 
 use std::fs;
 use std::io;
@@ -183,6 +179,10 @@ impl<P: Platform> Store<P> {
 
     pub(crate) fn index_dir(&self) -> PathBuf {
         self.root.join("index")
+    }
+
+    pub(crate) fn queue_dir(&self) -> PathBuf {
+        self.root.join("queue")
     }
 
     pub(crate) fn path(&self, id: ObjectId) -> PathBuf {
