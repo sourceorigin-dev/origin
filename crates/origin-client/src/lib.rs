@@ -19,9 +19,13 @@
 //! languages.
 
 use origin_shared::api::{
-    ApiError, FetchRecords, LogEntry, LogQuery, RepoName, RepoSummary, Stored, TargetInfo,
+    Annotation, ApiError, EventsQuery, FetchRecords, LandRequest, Landings, LogEntry, LogQuery,
+    NewTarget, RepoName, RepoSummary, Revisions, StatementsQuery, Stored, TargetInfo,
 };
+use origin_shared::event::Page;
+use origin_shared::landing::Pending;
 use origin_shared::pack::{Pack, PackError};
+use origin_shared::{ChangeId, Head};
 use reqwest::{Method, RequestBuilder};
 use serde::de::DeserializeOwned;
 
@@ -67,10 +71,26 @@ endpoints! {
         /// Stores a batch of objects: snapshots, revisions and statements. Each
         /// object may only depend on objects in the batch or in the repository.
         fn put_records(pack: &Pack) -> Stored = PUT "records", body(pack.encode()) => json;
+        /// Returns the statements about a record, in the order the repository
+        /// received them.
+        fn statements(query: &StatementsQuery) -> Vec<Annotation> =
+            GET "statements", query(query) => json;
+        /// Returns the revisions of a change, and its heads.
+        fn revisions(change: ChangeId) -> Revisions = GET "changes/{change}/revisions" => json;
         /// Lists every target, with its tip, authority and requirements.
         fn targets() -> Vec<TargetInfo> = GET "targets" => json;
+        /// Creates a target at the tip of another one. The server orders it.
+        fn create_target(request: &NewTarget) -> Head = POST "targets", json(request) => json;
         /// Returns the acceptances of a target, oldest first.
         fn log(query: &LogQuery) -> Vec<LogEntry> = GET "log", query(query) => json;
+        /// Submits a change, or a target's tip, to a target's landing queue, which
+        /// the server runs.
+        fn land(request: &LandRequest) -> Landings = POST "land", json(request) => json;
+        /// Lists the landings that are waiting, and why.
+        fn landings() -> Vec<Pending> = GET "landings" => json;
+        /// Returns the events after a cursor, waiting up to the query's `wait` for
+        /// some. Pass the page's `next` as the cursor of the next query.
+        fn events(query: &EventsQuery) -> Page = GET "events", query(query) => json;
     }
 }
 
