@@ -10,8 +10,11 @@ use std::str::FromStr;
 use anyhow::{Context, Result};
 use clap::error::ErrorKind;
 use clap::{Args, CommandFactory, Parser, Subcommand};
+use origin_shared::access::Capability;
 use origin_shared::policy::KindPattern;
-use origin_shared::{ChangeId, Digest, Inputs, Kind, RepoPath, TargetName, Verdict};
+use origin_shared::{
+    ChangeId, Digest, Inputs, Kind, Period, Principal, RepoPath, TargetName, Verdict,
+};
 
 use crate::config::UserConfig;
 use crate::oplog::Actor;
@@ -56,6 +59,9 @@ enum Command {
     /// Manage the repositories a server hosts.
     #[command(subcommand)]
     Repo(RepoCommand),
+    /// Manage tokens.
+    #[command(subcommand)]
+    Token(TokenCommand),
     #[command(flatten)]
     Workspace(WorkspaceCommand),
 }
@@ -70,6 +76,31 @@ enum RepoCommand {
         /// The server configuration file.
         #[arg(short, long, default_value = "origin-server.toml")]
         config: PathBuf,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum TokenCommand {
+    /// Issue a short-lived token with a narrower scope, for an agent or a CI
+    /// runner. By default the remote signs a token that acts for you. With
+    /// `--config`, a server signs one for any principal.
+    Issue {
+        /// A capability the token keeps: `read <path>`, `write <path>`,
+        /// `annotate <kind>`, `land <target>`, `land *` or `admin`. Repeat it for
+        /// several.
+        #[arg(long, required = true)]
+        scope: Vec<Capability>,
+        /// How long the token lasts, such as `1h`. At most `7d`.
+        #[arg(long, default_value = "1h")]
+        ttl: Period,
+        /// Sign the token with the key of the server this configuration file
+        /// describes, instead of asking the remote.
+        #[arg(short, long, requires = "principal")]
+        config: Option<PathBuf>,
+        /// The principal the token acts for, such as `user:agent-1`. Only with
+        /// `--config`.
+        #[arg(long = "as", requires = "config")]
+        principal: Option<Principal>,
     },
 }
 
@@ -209,6 +240,11 @@ enum WorkspaceCommand {
     /// where its change went, or onto its target's new tip, keeping the edits
     /// made since.
     Pull,
+    /// Show who the remote thinks you are.
+    Whoami,
+    /// Show what the remote lets you do: the paths you read and write, the
+    /// statements you issue, and the targets you land on.
+    Permissions,
     /// Send changes to the remote, with the changes below them: their
     /// revisions, files and statements. Lands nothing.
     Push {
@@ -493,7 +529,22 @@ impl Cli {
             Command::Repo(RepoCommand::Create { path, config }) => {
                 return ServerConfig::load(&config)?.create_repo(&path);
             }
-            Command::Init { .. } | Command::Clone { .. } | Command::Workspace(_) => {}
+            Command::Token(TokenCommand::Issue {
+                scope,
+                ttl,
+                config: Some(config),
+                principal: Some(principal),
+            }) => {
+                println!(
+                    "{}",
+                    ServerConfig::load(&config)?.issue_token(principal, scope, ttl.duration())?
+                );
+                return Ok(());
+            }
+            Command::Init { .. }
+            | Command::Clone { .. }
+            | Command::Token(_)
+            | Command::Workspace(_) => {}
         }
         let config = UserConfig::load()?;
         // The op log records the command line, without the program's name,
@@ -512,6 +563,10 @@ impl Cli {
                 Workspace::clone(&url, path.as_deref(), &target, config, &actor)?;
             }
             Command::Workspace(command) => command.run(config, &actor)?,
+            Command::Token(TokenCommand::Issue { scope, ttl, .. }) => {
+                let cwd = env::current_dir().context("cannot read the current directory")?;
+                Workspace::discover(&cwd, config, &actor)?.issue_token(scope, ttl)?;
+            }
             Command::Serve { .. } | Command::Repo(_) => unreachable!("run above"),
         }
         Ok(())
@@ -570,6 +625,8 @@ impl WorkspaceCommand {
             Self::Remote { url } => workspace.set_remote(url.as_deref())?,
             Self::Fetch { target, change } => workspace.fetch(&target, &change)?,
             Self::Pull => workspace.pull()?,
+            Self::Whoami => workspace.whoami()?,
+            Self::Permissions => workspace.permissions()?,
             Self::Push { changes } => workspace.push(&changes)?,
             Self::Watch {
                 kind,

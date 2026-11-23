@@ -105,7 +105,6 @@ paths = [
     "apps/origin-src/src/index/mod.rs",
     "apps/origin-src/src/policy.rs",
     "apps/origin-src/src/queue/mod.rs",
-    "apps/origin-src/src/service.rs",
     "apps/origin-src/src/store/mod.rs",
     "apps/origin-src/src/store/packs/mod.rs",
     "apps/origin-src/src/targets/mod.rs",

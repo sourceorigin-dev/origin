@@ -19,6 +19,7 @@
 //! back after a crash (see `Workspace::finish_move`). The design's "Workspaces
 //! and platform code" section describes all of it.
 
+mod access;
 mod annotate;
 mod land;
 mod ops;

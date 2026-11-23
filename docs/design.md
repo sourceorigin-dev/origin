@@ -417,6 +417,16 @@ Common workflows:
 
 ## The landing queue
 
+The service behind every API call, `OriginService`, lives as long as its
+process. It keeps the record index open and catches it up with the op log
+before each use, and wakes the event long-polls waiting on it whenever it
+writes. Calls don't wait for each other: each takes one of the open indexes,
+or opens a new one, up to `OriginService::MAX_INDEXES`; past that, calls wait
+for one, since each index holds everything in memory. A call holding the push
+lock may open one more, and never waits, as landings wait for that lock while
+holding indexes; the pool keeps no more than the cap. Landings on one target
+still run one at a time, under the target's queue lock.
+
 Writers never move a target. They submit changes, and the target's authority
 lands them in order. A stack lands bottom first, one acceptance per change,
 and stops at the first one that waits.

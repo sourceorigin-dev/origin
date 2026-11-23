@@ -40,6 +40,8 @@ zstd.workspace = true
 divan.workspace = true
 # The benchmarks build their working trees with the fixtures.
 origin-src = { workspace = true, features = ["fixture"] }
+# Requests the SDK never sends, to test how the server refuses them.
+reqwest.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 
