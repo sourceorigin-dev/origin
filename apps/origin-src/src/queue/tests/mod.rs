@@ -11,6 +11,8 @@ use origin_shared::{
 };
 
 use super::*;
+use crate::annotations::Annotations;
+use crate::conflict::Conflicts;
 use crate::store::Store;
 use crate::targets::Head;
 use crate::tree::tests::build;
