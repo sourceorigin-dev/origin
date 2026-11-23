@@ -100,22 +100,26 @@ impl ServerConfig {
         })
     }
 
-    /// `origin repo create`: creates an empty repository in `root` for this server
-    /// to host, with the server's node as the authority of `policy` and `main`.
+    /// `origin repo create [--admin <principal>]`: creates an empty repository in
+    /// `root` for this server to host, with the server's node as the authority of
+    /// `policy` and `main`. `admin`, if given, may change its policy over the API.
     ///
     /// # Errors
     ///
     /// Fails if `root` isn't empty, or if the key or the repository cannot be
     /// written.
-    pub fn create_repo(&self, root: &Path) -> anyhow::Result<()> {
+    pub fn create_repo(&self, root: &Path, admin: Option<&Principal>) -> anyhow::Result<()> {
         let node = self.node()?;
-        let policy = Policy::initial(&node.name, &node.key.public());
+        let policy = Policy::initial(&node.name, &node.key.public(), admin);
         OriginService::create(root.to_owned(), node, &policy)?;
         println!(
             "Created a repository in {}: node:{} is the authority of `policy` and `main`",
             root.display(),
             self.node
         );
+        if let Some(admin) = admin {
+            println!("{admin} changes its policy");
+        }
         println!("Name it in the [repos] of the configuration to serve it");
         Ok(())
     }

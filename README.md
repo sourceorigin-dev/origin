@@ -195,9 +195,13 @@ copy, and the authority of their targets: it runs their landing queues,
 and packs their small objects once a few thousand pile up loose.
 
 ```sh
-origin repo create repos/demo   # a repository the server orders `policy` and `main` of
+origin repo create repos/demo [--admin user:alice]  # a repository the server orders
 origin serve                    # host the repositories over HTTP
 ```
+
+`--admin` names who changes the new repository's policy over the API;
+without it, only the server's operator does, by landing through the
+repository's path.
 
 Both read `origin-server.toml` (or `--config <file>`), whose paths are
 relative to it:
