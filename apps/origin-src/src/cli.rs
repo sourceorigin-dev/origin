@@ -78,6 +78,12 @@ enum WorkspaceCommand {
         /// The change.
         change: String,
     },
+    /// Mark conflicted files as resolved, keeping their current content.
+    Resolve {
+        /// The files, as paths from the root of the repository.
+        #[arg(required = true)]
+        paths: Vec<RepoPath>,
+    },
     /// Show the working copy's changes and the target they're on.
     Log {
         /// Show this target's history instead.
@@ -333,6 +339,7 @@ impl WorkspaceCommand {
             Self::Show { change } => workspace.show(change.as_deref())?,
             Self::New { description } => workspace.new_change(&description)?,
             Self::Describe { description } => workspace.describe(&description)?,
+            Self::Resolve { paths } => workspace.resolve(&paths)?,
             Self::Edit { change } => workspace.edit(&change)?,
             Self::Abandon { change, reason } => workspace.abandon(change.as_deref(), &reason)?,
             Self::Converge { change } => workspace.converge(&change)?,

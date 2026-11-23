@@ -260,17 +260,112 @@ fn divergence_shows_until_converged() {
         converged.starts_with(&format!("Converged change {change}")),
         "{converged}"
     );
-    assert_eq!(
-        repo.read("file"),
-        "right\n",
-        "the working copy's files are kept"
+    assert!(
+        converged.contains("Conflicts: file hold both versions"),
+        "{converged}"
     );
-    assert!(!repo.ok(&["status"]).contains("divergent"));
+    // Both versions, the working copy's first, between markers.
+    let file = repo.read("file");
+    assert!(file.starts_with("<<<<<<< "), "{file}");
+    assert!(file.contains("\nright\n=======\nleft\n>>>>>>> "), "{file}");
+    let status = repo.ok(&["status"]);
+    assert!(!status.contains("divergent"), "{status}");
+    assert!(status.contains("Conflicts: file hold"), "{status}");
     assert!(repo.ok(&["evolog"]).contains("    converges "));
+
+    // Describing it keeps the conflict, an edit resolves it, whatever the
+    // file then holds.
+    repo.ok(&["describe", "Shared work, converged"]);
+    assert!(repo.ok(&["status"]).contains("Conflicts: file hold"));
+    repo.write("file", "Heading\n=======\nboth\n");
+    assert!(!repo.ok(&["status"]).contains("Conflicts"));
     assert!(
         repo.fails(&["converge", &change])
             .contains("is not divergent")
     );
+}
+
+#[test]
+fn binary_conflicts_resolve_only_when_accepted() {
+    let repo = Repo::new();
+    repo.write("image", "base\0");
+    repo.write("text", "base\n");
+    repo.ok(&["describe", "Shared work"]);
+    let change = repo.change();
+    let pointer = repo.path(".origin/workspace");
+    let started = fs::read_to_string(&pointer).unwrap();
+    repo.write("image", "left\0");
+    repo.write("text", "left\n");
+    repo.ok(&["describe", "Shared work"]);
+    fs::write(&pointer, started).unwrap();
+    repo.write("image", "right\0");
+    repo.write("text", "right\n");
+    repo.ok(&["converge", &change]);
+    assert_eq!(repo.read("image"), "right\0", "the working copy's side");
+
+    // An edit elsewhere leaves it unresolved, even without markers.
+    repo.write("unrelated", "docs\n");
+    assert!(repo.ok(&["status"]).contains("Conflicts: image, text hold"));
+    let resolved = repo.ok(&["resolve", "image", "unrelated"]);
+    assert!(resolved.starts_with("Resolved image\n"), "{resolved}");
+    assert!(resolved.contains("Conflicts: text hold"), "{resolved}");
+    let status = repo.ok(&["status"]);
+    assert!(status.contains("\nConflicts: text hold"), "{status}");
+    repo.ok(&["resolve", "text"]);
+    assert!(!repo.ok(&["status"]).contains("Conflicts"));
+}
+
+#[test]
+fn a_revision_is_published_only_after_its_conflicts() {
+    use origin_shared::{EncodedObject, Record, RecordId, Revision, RevisionId};
+    use origin_src::{annotations::Annotations, conflict::Conflicts, store::Store};
+
+    let repo = Repo::new();
+    repo.write("file", "base\n");
+    repo.ok(&["describe", "Shared work"]);
+    let change = repo.change();
+    let pointer = repo.path(".origin/workspace");
+    let started = fs::read_to_string(&pointer).unwrap();
+    repo.write("file", "left\n");
+    repo.ok(&["describe", "Shared work"]);
+    fs::write(&pointer, started).unwrap();
+    repo.write("file", "right\n");
+    repo.ok(&["converge", &change]);
+
+    // The `core.conflict` statement `describe` issues about its revision.
+    let store = Store::new(repo.path(".origin"), origin_platform::Native::default());
+    let converged: RevisionId = fs::read_to_string(&pointer)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let revision: Revision = store.get(converged).unwrap();
+    let claims = Annotations::open(&store)
+        .unwrap()
+        .claims(RecordId::Revision(converged))
+        .unwrap();
+    let conflicts = Conflicts::of(&store, &claims, &revision).unwrap();
+    let issuer = revision.author.clone();
+    let described = Revision {
+        predecessors: vec![converged],
+        description: EncodedObject::blob(b"Described").id().into(),
+        ..revision
+    }
+    .encode();
+    let subject = RecordId::Revision(described.id().into());
+    let (_, statement) = conflicts.statement(subject, issuer, None);
+    let hex = statement.encode().id().to_hex();
+
+    // Writing it fails: its directory is read-only.
+    let dir = repo.path(&format!(".origin/objects/loose/{}", &hex[..2]));
+    fs::create_dir_all(&dir).unwrap();
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+    repo.fails(&["describe", "Described"]);
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+
+    // So the revision, which would hide the conflict, wasn't written.
+    assert!(!store.contains(described.id()).unwrap());
+    assert!(repo.ok(&["status"]).contains("Conflicts: file hold"));
 }
 
 #[test]
@@ -822,4 +917,59 @@ fn statements_are_promoted_where_their_inputs_are_unchanged() {
             .contains("is a reserved kind")
     );
     assert!(repo.fails(&["annotate", "@", "ci.lint"]).contains("--pass"));
+}
+
+#[test]
+fn converge_merges_the_files_of_every_head() {
+    let repo = Repo::new();
+    for path in ["a", "b", "c"] {
+        repo.write(path, "base\n");
+    }
+    repo.ok(&["describe", "Shared work"]);
+    let change = repo.change();
+    // Three agents revise the same revision, each changing its own file.
+    let pointer = repo.path(".origin/workspace");
+    let started = fs::read_to_string(&pointer).unwrap();
+    for changed in ["a", "b", "c"] {
+        fs::write(&pointer, &started).unwrap();
+        for path in ["a", "b", "c"] {
+            repo.write(
+                path,
+                if path == changed {
+                    "changed\n"
+                } else {
+                    "base\n"
+                },
+            );
+        }
+        repo.ok(&["describe", "Shared work"]);
+    }
+    // Merging a third head reads the tree merging the first two.
+    let converged = repo.ok(&["converge", &change]);
+    assert!(
+        converged.ends_with(", merging their files\n"),
+        "{converged}"
+    );
+    for path in ["a", "b", "c"] {
+        assert_eq!(repo.read(path), "changed\n", "{path}");
+    }
+}
+
+#[test]
+fn converge_labels_the_side_holding_merged_heads() {
+    let repo = Repo::new();
+    repo.write("file", "base\n");
+    repo.ok(&["describe", "Shared work"]);
+    let change = repo.change();
+    let pointer = repo.path(".origin/workspace");
+    let started = fs::read_to_string(&pointer).unwrap();
+    for side in ["one", "two", "three"] {
+        fs::write(&pointer, &started).unwrap();
+        repo.write("file", &format!("{side}\n"));
+        repo.ok(&["describe", "Shared work"]);
+    }
+    repo.ok(&["converge", &change]);
+    // The third head merges into both versions of the first two.
+    let file = repo.read("file");
+    assert!(file.starts_with("<<<<<<< merged heads\n<<<<<<< "), "{file}");
 }
