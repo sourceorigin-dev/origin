@@ -14,7 +14,6 @@ use origin_shared::{
 };
 
 use super::{WorkingCopy, Workspace, WorkspaceError};
-use crate::index::Index;
 use crate::policy::Policy;
 use crate::queue::{Blocked, Landing, Pending, Proposal, Queue};
 
@@ -33,11 +32,10 @@ impl Workspace {
         onto: Option<TargetName>,
     ) -> Result<(), WorkspaceError> {
         let working_copy = self.refresh()?;
-        let index = Index::open(&self.store)?;
-        let change = working_copy.find_change(&index, change.unwrap_or("@"))?;
+        let change = working_copy.find_change(change.unwrap_or("@"))?;
         let onto = match onto {
             Some(onto) => onto,
-            None => self.target_of(Self::single_head(&index, change)?)?,
+            None => self.target_of(Self::single_head(&working_copy.index, change)?)?,
         };
         let key = self.config.node_key()?;
         let landings =
