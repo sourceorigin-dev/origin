@@ -5,6 +5,10 @@ use origin_shared::RecordId;
 use origin_shared::landing::{Blocked, Pending, Proposal};
 use origin_shared::policy::Requirement;
 
+use crate::permissions::{Caller, Scope};
+
+use super::Waiting;
+
 /// The format of the files that keep waiting landings.
 pub(super) struct PendingFile;
 
@@ -13,11 +17,14 @@ impl PendingFile {
     const HEADER: &str = "origin pending 1";
 
     /// Encodes the landing as lines: the header, `onto <target>`, `change <id>`
-    /// or `target <name>`, and `subject <kind> <id>`. Then either a
+    /// or `target <name>`, `subject <kind> <id>`, and `by owner` or
+    /// `by <principal>` for its submitter. If the submitter's token is scoped,
+    /// an `expires <seconds>` line and a `scope <capability>` line for each of
+    /// its capabilities follow. Then either a
     /// `missing <kind> <verdict> <issuer>` line for each requirement the
     /// landing lacks, or a `conflict <statement>` line naming the statement
     /// whose payload lists the conflicting paths.
-    pub(super) fn encode(pending: &Pending) -> String {
+    pub(super) fn encode(pending: &Pending, submitter: &Caller) -> String {
         let mut lines = vec![Self::HEADER.to_owned(), format!("onto {}", pending.onto)];
         lines.push(match &pending.proposal {
             Proposal::Change(change) => format!("change {change}"),
@@ -30,6 +37,17 @@ impl PendingFile {
             RecordId::Acceptance(id) => ("acceptance", id.to_hex()),
         };
         lines.push(format!("subject {kind} {id}"));
+        match submitter {
+            Caller::Principal { principal, scope } => {
+                lines.push(format!("by {principal}"));
+                if let Some(scope) = scope {
+                    lines.push(format!("expires {}", scope.expires));
+                    let capabilities = scope.capabilities.iter();
+                    lines.extend(capabilities.map(|capability| format!("scope {capability}")));
+                }
+            }
+            Caller::Owner | Caller::Anonymous => lines.push("by owner".to_owned()),
+        }
         match &pending.blocked {
             Blocked::Evidence(missing) => lines.extend(missing.iter().map(|requirement| {
                 format!(
@@ -45,7 +63,7 @@ impl PendingFile {
     /// Decodes what [`PendingFile::encode`] wrote, or returns `None` if it is
     /// malformed. A conflict comes back with no paths, since the file holds
     /// only the statement listing them.
-    pub(super) fn decode(text: &str) -> Option<Pending> {
+    pub(super) fn decode(text: &str) -> Option<Waiting> {
         let mut lines = text.lines();
         if lines.next()? != Self::HEADER {
             return None;
@@ -63,10 +81,18 @@ impl PendingFile {
             ("acceptance", id) => RecordId::Acceptance(id.parse().ok()?),
             _ => return None,
         };
+        let principal = match lines.next()?.strip_prefix("by ")? {
+            "owner" => None,
+            principal => Some(principal.parse().ok()?),
+        };
+        let mut expires = None;
+        let mut capabilities = Vec::new();
         let mut missing = Vec::new();
         let mut conflict = None;
         for line in lines {
             match line.split_once(' ')? {
+                ("expires", at) => expires = Some(at.parse().ok()?),
+                ("scope", capability) => capabilities.push(capability.parse().ok()?),
                 ("missing", requirement) => {
                     let mut fields = requirement.split(' ');
                     missing.push(Requirement {
@@ -86,11 +112,26 @@ impl PendingFile {
             },
             None => Blocked::Evidence(missing),
         };
-        Some(Pending {
-            onto,
-            proposal,
-            subject,
-            blocked,
+        if expires.is_none() && !capabilities.is_empty() {
+            return None;
+        }
+        let scope = expires.map(|expires| Scope {
+            capabilities,
+            expires,
+        });
+        let submitter = match principal {
+            Some(principal) => Caller::Principal { principal, scope },
+            None => Caller::Owner,
+        };
+        Some(Waiting {
+            pending: Pending {
+                onto,
+                proposal,
+                subject,
+                blocked,
+                expires,
+            },
+            submitter,
         })
     }
 }

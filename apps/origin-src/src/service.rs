@@ -12,12 +12,12 @@
 
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
-use std::iter;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use std::{iter, mem};
 
-use origin_platform::Native;
+use origin_platform::{LockedFile, Native};
 use origin_shared::access::{PathAccess, Rights, Token};
 use origin_shared::api::{
     Annotation, At, BrowseQuery, ErrorCode, EventsQuery, Expected, FetchSnapshot, Inventory,
@@ -25,7 +25,7 @@ use origin_shared::api::{
     NewTarget, RevisionEntry, Revisions, Stored, TargetInfo, TokenRequest,
 };
 use origin_shared::event::{EventKind, Filter, Page};
-use origin_shared::landing::{Pending, Proposal};
+use origin_shared::landing::{Blocked, Pending, Proposal};
 use origin_shared::object::DecodeError;
 use origin_shared::pack::{Pack, Packer, Part};
 use origin_shared::{
@@ -41,7 +41,7 @@ use crate::index::Index;
 pub use crate::permissions::Caller;
 use crate::permissions::{Batch, Forbidden, PutError, Reader, Writer};
 use crate::policy::{Policy, PolicyError};
-use crate::queue::{LandError, Queue};
+use crate::queue::{LandError, Queue, Waiting};
 use crate::store::{Store, StoreError};
 use crate::tree::Snapshots;
 
@@ -586,15 +586,15 @@ impl OriginService {
     }
 
     /// Writes the objects of `pack`: snapshots, attachments, revisions and
-    /// statements, all of which must be well formed with everything they need in
-    /// the repository or the pack, so it never holds a record it cannot use.
-    /// Other callers put only what [`permissions`](crate::permissions) allow.
-    /// Issues `core.divergent` for each diverging change. See `docs/design.md`.
+    /// statements. Everything an object needs must be in the repository or the
+    /// pack, of the right kind, so the repository never holds a record it
+    /// cannot use. Acceptances are refused, and a caller other than the owner
+    /// may put only what [`permissions`](crate::permissions) allows.
     ///
     /// # Errors
     ///
-    /// Fails if the caller may not put a record, if an object is malformed,
-    /// refused or lacks what it needs, or if the objects cannot be written.
+    /// Fails if the caller is anonymous, an object is malformed, refused or missing a
+    /// dependency, a promotion doesn't match its original, or a write fails.
     pub fn put_records(&self, caller: &Caller, pack: Pack) -> Result<Stored, ServiceError> {
         self.push(caller, pack, &[])
     }
@@ -633,11 +633,11 @@ impl OriginService {
         // every object is checked otherwise.
         let mut stored: HashMap<ObjectId, (ObjectId, ObjectKind)> = HashMap::new();
         let mut snapshots = SnapshotLayers::default();
-        let mut statements = Vec::new();
+        let mut statements = StatementRounds::default();
         let mut revisions = Vec::new();
-        let mut promotions = Vec::new();
         let mut decoded = Vec::new();
         let mut changes = HashSet::new();
+        let mut subjects = HashSet::new();
         for object in pack.objects {
             let id = object.id();
             let record = object
@@ -683,12 +683,9 @@ impl OriginService {
                     revisions.push(object);
                     decoded.push((id, record));
                 }
-                Object::Statement(ref statement) if statement.promoted_from.is_some() => {
-                    promotions.push((object, statement.clone()));
-                    decoded.push((id, record));
-                }
-                Object::Statement(_) => {
-                    statements.push(object);
+                Object::Statement(ref statement) => {
+                    subjects.insert(statement.subject);
+                    statements.add(object, statement.clone());
                     decoded.push((id, record));
                 }
             }
@@ -697,24 +694,9 @@ impl OriginService {
         dependencies.commit()?;
         let mut new = self.store.write_layers(&snapshots.layers())?;
         self.check_writes(caller, &held, &decoded)?;
-        // INVARIANT: held until the records are published; see `Store::lock_pushes`.
-        let _pushing = if !revisions.is_empty() || !expect.is_empty() {
-            let lock = self.store.lock_pushes()?;
-            self.check_heads(caller, expect)?;
-            Some(lock)
-        } else {
-            None
-        };
+        let pushing = self.lock_heads(caller, !revisions.is_empty(), expect)?;
         self.check_roots(caller, &decoded)?;
-        // Each layer durable before the next, as a workspace writes them:
-        // statements before the revisions they're about, so a crash never
-        // publishes a revision without its `core.conflict`.
-        for layer in [statements, revisions] {
-            if !layer.is_empty() {
-                new += self.store.write_all(&layer)?;
-            }
-        }
-        new += self.put_promotions(promotions)?;
+        new += self.put_statements(statements, revisions)?;
         if !changes.is_empty() {
             self.annotations_pushing(|annotations| {
                 for &change in &changes {
@@ -723,8 +705,31 @@ impl OriginService {
                 Ok(())
             })?;
         }
+        // INVARIANT: landings take their queue's lock, then this one, to rebase.
+        drop(pushing);
         self.wakeup.notify();
+        self.resume(Some(&subjects))?;
         Ok(Stored { new: new as u64 })
+    }
+
+    /// If the put publishes revisions (`revisions`) or expects heads, takes the
+    /// lock every publication of revisions takes (see [`Store::lock_pushes`]) and
+    /// checks the heads in `expect`. Hold the lock returned until the records are
+    /// published, so nothing else moves the changes in between.
+    fn lock_heads(
+        &self,
+        caller: &Caller,
+        revisions: bool,
+        expect: &[Expected],
+    ) -> Result<Option<LockedFile>, ServiceError> {
+        if !revisions && expect.is_empty() {
+            return Ok(None);
+        }
+        let lock = self.store.lock_pushes()?;
+        if !expect.is_empty() {
+            self.check_heads(caller, expect)?;
+        }
+        Ok(Some(lock))
     }
 
     /// Checks that the caller may put the records of `decoded`, which come in a
@@ -896,9 +901,89 @@ impl OriginService {
         })
     }
 
-    /// Writes the `promotions` that [`OriginService::put_records`] puts, each once
-    /// [`Store::claim`] accepts it, and returns how many were new. Their originals
-    /// are never promotions, so they are already stored.
+    /// Retries the landings waiting for evidence about one of `subjects`, the
+    /// records statements were just issued about, or every waiting landing if
+    /// `subjects` is `None`. Each retry runs as the landing's submitter, so the
+    /// queue continues once the evidence arrives. A retry that the policy in force
+    /// refuses, or that fails, leaves the landing as it was and is logged; the
+    /// statements that triggered it still stand. A landing whose submitter's token
+    /// expired isn't retried: it waits until someone lands it again, as
+    /// [`Pending::expired`] says.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the waiting landings cannot be read.
+    pub(crate) fn resume(&self, subjects: Option<&HashSet<RecordId>>) -> Result<(), ServiceError> {
+        if subjects.is_some_and(HashSet::is_empty) {
+            return Ok(());
+        }
+        for Waiting { pending, submitter } in Queue::waiting(&self.store)? {
+            let about = subjects.is_none_or(|subjects| subjects.contains(&pending.subject));
+            if !about || !matches!(pending.blocked, Blocked::Evidence(_)) || pending.expired() {
+                continue;
+            }
+            let request = LandRequest {
+                proposal: pending.proposal,
+                onto: Some(pending.onto),
+            };
+            if let Err(error) = self.land(&submitter, &request) {
+                tracing::warn!(
+                    error = %anyhow::Error::from(error),
+                    "a waiting landing cannot continue"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Retries every landing waiting for evidence, as a service does when it opens:
+    /// a crash may have cut short the retry that arriving evidence triggered.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the waiting landings cannot be read.
+    pub fn resume_waiting(&self) -> Result<(), ServiceError> {
+        self.resume(None)
+    }
+
+    /// Writes the statements and revisions that [`OriginService::put_records`]
+    /// puts, and returns how many were new. Writes them in layers, each durable
+    /// before the next, as a workspace does: statements before the revisions they
+    /// are about, so a crash never publishes a revision without its
+    /// `core.conflict`, then promotions and what needs them, one round at a time.
+    fn put_statements(
+        &self,
+        statements: StatementRounds,
+        mut revisions: Vec<EncodedObject>,
+    ) -> Result<usize, ServiceError> {
+        let mut new = 0;
+        for (
+            round,
+            Round {
+                statements,
+                promotions,
+            },
+        ) in statements.rounds().into_iter().enumerate()
+        {
+            let revisions = if round == 0 {
+                mem::take(&mut revisions)
+            } else {
+                Vec::new()
+            };
+            for layer in [statements, revisions] {
+                if !layer.is_empty() {
+                    new += self.store.write_all(&layer)?;
+                }
+            }
+            new += self.put_promotions(promotions)?;
+        }
+        Ok(new)
+    }
+
+    /// Writes the `promotions` of a round that [`OriginService::put_records`] puts,
+    /// each once [`Store::claim`] accepts it, and returns how many were new. Their
+    /// originals, and everything else they need, are already stored: see
+    /// [`StatementRounds`].
     fn put_promotions(
         &self,
         promotions: Vec<(EncodedObject, Statement)>,
@@ -1051,7 +1136,7 @@ impl OriginService {
             }
         };
         let queue = Queue::new(&self.store, &self.node.key, self.node.name.clone())
-            .submitted_by(rights.paths.clone());
+            .submitted_by(caller.clone(), rights.paths.clone());
         let landed = self.annotations(|annotations| {
             let landed = match &request.proposal {
                 Proposal::Change(change) => {
@@ -1305,6 +1390,73 @@ impl SnapshotLayers {
             layers[heights.get(&object.id()).copied().unwrap_or(0)].push(object);
         }
         layers
+    }
+}
+
+/// The statements of a pack, which [`OriginService::push`] writes in rounds.
+/// Each round writes its statements, then its promotions, each once
+/// [`Store::claim`] accepts it. Whatever needs a promotion in the pack comes a
+/// round after it, so a refused promotion leaves nothing stored that needs it.
+#[derive(Debug, Default)]
+struct StatementRounds(Vec<(EncodedObject, Statement)>);
+
+/// One of the [`StatementRounds`]: its statements, and its promotions.
+#[derive(Debug, Default)]
+struct Round {
+    statements: Vec<EncodedObject>,
+    promotions: Vec<(EncodedObject, Statement)>,
+}
+
+impl StatementRounds {
+    /// Adds `object`, which decodes as `statement`.
+    fn add(&mut self, object: EncodedObject, statement: Statement) {
+        self.0.push((object, statement));
+    }
+
+    /// Returns the rounds, at least one. A statement goes in the latest round of
+    /// the pack's statements it needs, or in the round after a promotion it needs.
+    fn rounds(self) -> Vec<Round> {
+        let statements = self.0;
+        let at: HashMap<ObjectId, usize> = statements
+            .iter()
+            .enumerate()
+            .map(|(at, (object, _))| (object.id(), at))
+            .collect();
+        let mut rounds = vec![0; statements.len()];
+        let mut unmet = vec![0_usize; statements.len()];
+        let mut needed_by = vec![Vec::new(); statements.len()];
+        for (at_dependent, (_, statement)) in statements.iter().enumerate() {
+            for (needed, _) in Dependencies::of_statement(statement).records {
+                if let Some(&at) = at.get(&needed) {
+                    unmet[at_dependent] += 1;
+                    needed_by[at].push(at_dependent);
+                }
+            }
+        }
+        // INVARIANT: content addressing makes no cycle, so every statement gets a round.
+        let mut ready: Vec<usize> = (0..statements.len()).filter(|&at| unmet[at] == 0).collect();
+        while let Some(at) = ready.pop() {
+            let after = rounds[at] + usize::from(statements[at].1.promoted_from.is_some());
+            for &dependent in &needed_by[at] {
+                rounds[dependent] = rounds[dependent].max(after);
+                unmet[dependent] -= 1;
+                if unmet[dependent] == 0 {
+                    ready.push(dependent);
+                }
+            }
+        }
+        let mut grouped: Vec<Round> = iter::repeat_with(Round::default)
+            .take(rounds.iter().max().map_or(1, |&last| last + 1))
+            .collect();
+        for ((object, statement), round) in statements.into_iter().zip(rounds) {
+            let round = &mut grouped[round];
+            if statement.promoted_from.is_some() {
+                round.promotions.push((object, statement));
+            } else {
+                round.statements.push(object);
+            }
+        }
+        grouped
     }
 }
 
@@ -1567,11 +1719,15 @@ impl ServiceError {
 #[cfg(test)]
 mod tests {
     use std::sync::Barrier;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread;
 
-    use origin_shared::{EncodedObject, EntryKind, Record, RepoPath, Tree};
+    use origin_shared::landing::Landing;
+    use origin_shared::{EntryKind, Record, Tree, Verdict};
 
     use super::*;
+    use crate::permissions::Scope;
+    use crate::queue::tests::{Repo, ci_test};
 
     /// Landings hold indexes while they wait for the push lock, so a call holding
     /// it gets one even when every other index is taken.
@@ -1727,6 +1883,42 @@ mod tests {
     }
 
     #[test]
+    fn statements_needing_a_refused_promotion_are_not_stored() {
+        let (repo, service) = requiring_ci();
+        let tested = repo.change_on_main(1, &[("src/a", "a")]);
+        let same = repo.change_on_main(2, &[("src/a", "a")]);
+        let original = ci_test(tested, "user:ci");
+        let forged = Statement {
+            subject: RecordId::Revision(same),
+            verdict: Some(Verdict::Fail),
+            promoted_from: Some(original.encode().id().into()),
+            ..original.clone()
+        };
+        let rerun = Statement {
+            supersedes: Some(forged.encode().id().into()),
+            ..ci_test(same, "user:ci")
+        };
+        let about = Statement {
+            subject: RecordId::Statement(rerun.encode().id().into()),
+            ..ci_test(same, "user:ci")
+        };
+        let objects = [&about, &rerun, &forged, &original].map(Statement::encode);
+
+        let refused = service.put_records(
+            &Caller::Owner,
+            Pack {
+                objects: objects.to_vec(),
+            },
+        );
+        assert!(
+            matches!(refused, Err(ServiceError::Statement { id, .. }) if id == objects[2].id().into()),
+            "{refused:?}"
+        );
+        let stored = repo.store.present(objects.iter().map(EncodedObject::id));
+        assert_eq!(stored.unwrap(), [objects[3].id()], "only the original");
+    }
+
+    #[test]
     fn calls_using_the_index_do_not_wait_for_each_other() {
         let dir = tempfile::tempdir().unwrap();
         let node = Node {
@@ -1736,13 +1928,99 @@ mod tests {
         let policy = Policy::initial(&node.name, &node.key.public(), None);
         let service = OriginService::create(dir.path().join("repo"), node, &policy).unwrap();
         // A landing holds an index all along: a read meanwhile takes another.
-        service
-            .annotations(|_| service.annotations(|_| Ok(())))
-            .unwrap();
+        let read = service.annotations(|_| {
+            service.annotations(|annotations| Ok(annotations.index().changes().count()))
+        });
+        assert_eq!(read.unwrap(), 0);
         assert_eq!(
             service.indexes.state().kept.len(),
             2,
             "both kept for later calls"
         );
+    }
+
+    #[test]
+    fn calls_wait_for_an_index_past_the_most_open() {
+        let (_repo, service) = requiring_ci();
+        let (open, most) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        thread::scope(|scope| {
+            for _ in 0..OriginService::MAX_INDEXES * 2 {
+                scope.spawn(|| {
+                    service.annotations(|_| {
+                        most.fetch_max(open.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
+                        thread::sleep(Duration::from_millis(50));
+                        open.fetch_sub(1, Ordering::SeqCst);
+                        Ok(())
+                    })
+                });
+            }
+        });
+        assert!(most.into_inner() <= OriginService::MAX_INDEXES);
+    }
+
+    /// Returns a repository whose `main` requires a passing `ci.test` from
+    /// `user:ci`, and the service of its authority.
+    fn requiring_ci() -> (Repo, OriginService) {
+        let repo = Repo::new(
+            "[targets.main]\nauthority = \"node:queue\"\n\
+             require = [{ kind = \"ci.test\", verdict = \"pass\", issuer = \"user:ci\" }]\n",
+        );
+        let node = Node {
+            name: "queue".parse().unwrap(),
+            key: Arc::new(NodeKey::from_bytes(&[7; 32])),
+        };
+        let service = OriginService::new(repo.store.clone(), node);
+        (repo, service)
+    }
+
+    fn land(service: &OriginService, caller: &Caller, change: u8) -> Vec<Landing> {
+        let request = LandRequest {
+            proposal: Proposal::Change(ChangeId::from_bytes([change; 16])),
+            onto: Some(TargetName::MAIN),
+        };
+        service.land(caller, &request).unwrap().landings
+    }
+
+    #[test]
+    fn landings_whose_token_expired_wait_to_be_landed_again() {
+        let (repo, service) = requiring_ci();
+        let revision = repo.change_on_main(1, &[("src/a", "a")]);
+        let expires = Token::now() + 2;
+        let eve = Caller::Principal {
+            principal: "user:eve".parse().unwrap(),
+            scope: Some(Scope {
+                capabilities: ["land *", "read /", "write /"]
+                    .map(|capability| capability.parse().unwrap())
+                    .to_vec(),
+                expires,
+            }),
+        };
+        assert!(matches!(
+            &land(&service, &eve, 1)[..],
+            [Landing::Pending(_)]
+        ));
+        while Token::now() <= expires {
+            thread::sleep(Duration::from_millis(100));
+        }
+        let tip = repo.tip(&TargetName::MAIN);
+        let pass = ci_test(revision, "user:ci").encode();
+        service
+            .put_records(
+                &Caller::Owner,
+                Pack {
+                    objects: vec![pass],
+                },
+            )
+            .unwrap();
+        assert_eq!(repo.tip(&TargetName::MAIN), tip, "not for eve's token");
+        let waiting = service.landings(&Caller::Owner).unwrap();
+        assert!(
+            matches!(&waiting[..], [pending] if pending.expired()),
+            "{waiting:?}"
+        );
+        assert!(matches!(
+            &land(&service, &Caller::Owner, 1)[..],
+            [Landing::Landed { .. }]
+        ));
     }
 }

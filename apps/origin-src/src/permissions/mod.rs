@@ -53,6 +53,18 @@ pub struct Scope {
 }
 
 impl Caller {
+    /// When the caller's token expires, in seconds since the Unix epoch, if
+    /// it is a scoped token.
+    #[must_use]
+    pub fn expires(&self) -> Option<u64> {
+        match self {
+            Self::Principal {
+                scope: Some(scope), ..
+            } => Some(scope.expires),
+            Self::Principal { scope: None, .. } | Self::Owner | Self::Anonymous => None,
+        }
+    }
+
     /// The caller's principal, or `None` for the owner or an anonymous caller.
     #[must_use]
     pub fn principal(&self) -> Option<&Principal> {
@@ -656,6 +668,10 @@ pub enum Forbidden {
     /// A token's scope reaches beyond its issuer's rights.
     #[error("a token may only narrow your rights, which don't include `{0}`")]
     Scope(Capability),
+    /// The token a landing was submitted with expired before the landing took
+    /// its target's lock.
+    #[error("the token that submitted this landing expired: land it again")]
+    Expired,
 }
 
 /// A failure to check a record being put.

@@ -170,10 +170,15 @@ fn pending_landings_round_trip() {
             verdict: Verdict::Pass,
             issuer: "group:runners".parse().unwrap(),
         }]),
+        expires: None,
+    };
+    let owner = Waiting {
+        pending: pending.clone(),
+        submitter: Caller::Owner,
     };
     assert_eq!(
-        PendingFile::decode(&PendingFile::encode(&pending)),
-        Some(pending.clone())
+        PendingFile::decode(&PendingFile::encode(&pending, &Caller::Owner)),
+        Some(owner)
     );
     let conflict = Pending {
         proposal: change(9),
@@ -183,10 +188,25 @@ fn pending_landings_round_trip() {
         },
         ..pending
     };
-    assert_eq!(
-        PendingFile::decode(&PendingFile::encode(&conflict)),
-        Some(conflict)
-    );
+    let scoped = |capabilities: &[&str]| Waiting {
+        pending: Pending {
+            expires: Some(1_900_000_000),
+            ..conflict.clone()
+        },
+        submitter: Caller::Principal {
+            principal: "user:agent".parse().unwrap(),
+            scope: Some(Scope {
+                capabilities: capabilities.iter().map(|c| c.parse().unwrap()).collect(),
+                expires: 1_900_000_000,
+            }),
+        },
+    };
+    for scoped in [scoped(&["write src", "land *"]), scoped(&[])] {
+        assert_eq!(
+            PendingFile::decode(&PendingFile::encode(&scoped.pending, &scoped.submitter)),
+            Some(scoped)
+        );
+    }
     assert_eq!(PendingFile::decode("origin pending 2\n"), None);
 }
 
@@ -258,4 +278,30 @@ fn a_waiting_stack_lands_whole_once_it_can() {
         "{landings:?}"
     );
     assert_eq!(Queue::pending(&repo.store).unwrap(), []);
+}
+
+#[test]
+fn an_expired_submitter_lands_nothing() {
+    let repo = Repo::new("[targets.main]\nauthority = \"node:queue\"\n");
+    repo.change_on_main(1, &[("src/lib.rs", "v2")]);
+    let expired = Caller::Principal {
+        principal: "user:eve".parse().unwrap(),
+        scope: Some(Scope {
+            capabilities: Vec::new(),
+            expires: 1,
+        }),
+    };
+    let landed = repo
+        .queue()
+        .submitted_by(expired, PathAccess::new(Level::Write, []))
+        .land_change(
+            &mut repo.annotations(),
+            ChangeId::from_bytes([1; 16]),
+            &TargetName::MAIN,
+        );
+    assert!(
+        matches!(landed, Err(LandError::Forbidden(Forbidden::Expired))),
+        "{landed:?}"
+    );
+    assert!(matches!(repo.land(1)[..], [Landing::Landed { .. }]));
 }

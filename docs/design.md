@@ -888,6 +888,41 @@ and statements.
   not issue it, if a promotion doesn't match its original (the other records
   stay stored), or if the objects cannot be written.
 
+### Putting records
+
+`put_records` writes the objects of a pack: snapshots, attachments, revisions
+and statements.
+
+- Each object must be well formed, and everything it needs must be in the
+  repository or the pack, of the right kind: a tree's entries (trees or blobs,
+  as each entry says), a revision's snapshot (a tree), description (an
+  attachment), base and dependencies, and a statement's subject and the
+  statements it supersedes or promotes. So the repository never holds a record
+  it cannot use. A statement's payload may be missing, but if the repository
+  has it, it must be an attachment; a `core.conflict`'s payload, its list of
+  conflicts, must be present. Records are looked up in the pack before the
+  repository, so a pack may hold a whole stack.
+- Acceptances are refused: only a target's authority writes them, by landing.
+  A statement of a reserved kind must come from whom the policy names
+  (`Policy::authorizes`), whoever puts it. A caller other than the owner may
+  only put records that are theirs, about what they see, and that change only
+  what they may write, as the permissions module explains.
+- Blobs and trees are made durable before the records that refer to them, and
+  each tree after the trees it holds, so the repository never has a tree
+  without its contents, which a later pack may rely on. Statements are made
+  durable before the revisions they are about. Promotions come last: each is
+  checked against its original, once the original and both subjects are
+  stored, and before the statements that need it.
+- It issues `core.divergent` for each change the new revisions made diverge,
+  and retries the landings waiting for evidence about what the statements are
+  about.
+- It fails if the caller is anonymous, if an object is malformed or is an
+  acceptance, if it needs an object that neither the pack nor the repository
+  has or that is of another kind, if the caller may not put a record or
+  doesn't see what a statement is about, if the issuer of a reserved kind may
+  not issue it, if a promotion doesn't match its original (the records that
+  don't need it stay stored), or if the objects cannot be written.
+
 ## Workspaces and platform code
 
 A repository can have several working copies, called workspaces, that share its

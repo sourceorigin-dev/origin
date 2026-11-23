@@ -200,9 +200,9 @@ impl<P: Platform> Session<'_, '_, P> {
         if !candidate.trees.is_empty() {
             store.write_all(&candidate.trees)?;
         }
-        if !self.queue.submitter.writes_all() {
+        if !self.queue.paths.writes_all() {
             for change in store.diff(self.state, candidate.state)? {
-                if !self.queue.submitter.writes(&change.path) {
+                if !self.queue.paths.writes(&change.path) {
                     return Err(Forbidden::Write(change.path).into());
                 }
             }
@@ -229,7 +229,7 @@ impl<P: Platform> Session<'_, '_, P> {
             // Promotion reads the revision.
             store.write_all(&records)?;
             records.clear();
-            let mut reader = Reader::new(store, &self.queue.submitter);
+            let mut reader = Reader::new(store, &self.queue.paths);
             let promotions = self.annotations.promotions(
                 candidate.subject,
                 &self.queue.principal(),
@@ -257,6 +257,7 @@ impl<P: Platform> Session<'_, '_, P> {
                 proposal: candidate.kept_as,
                 subject: candidate.subject,
                 blocked: Blocked::Evidence(missing),
+                expires: self.queue.submitter.expires(),
             };
             self.keep(&pending)?;
             return Ok(Landing::Pending(pending));
@@ -340,6 +341,7 @@ impl<P: Platform> Session<'_, '_, P> {
                 statement,
                 paths: conflicts.paths(),
             },
+            expires: self.queue.submitter.expires(),
         };
         self.keep(&pending)?;
         Ok(Landing::Pending(pending))
@@ -360,7 +362,7 @@ impl<P: Platform> Session<'_, '_, P> {
         let write = self.store().durable_write();
         write.stage(
             self.pending_path(&pending.proposal)?,
-            PendingFile::encode(pending).as_bytes(),
+            PendingFile::encode(pending, &self.queue.submitter).as_bytes(),
         )?;
         let waiting = Effect::Waiting {
             onto: pending.onto.clone(),

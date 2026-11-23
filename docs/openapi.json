@@ -1962,6 +1962,15 @@
             "$ref": "#/components/schemas/Blocked",
             "description": "Why it waits."
           },
+          "expires": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When the submitter's token expires, in seconds since the Unix epoch, if\nit is a scoped token. The queue retries the landing on the submitter's\nbehalf until then. After that, the landing waits until it is submitted\nagain.",
+            "minimum": 0
+          },
           "onto": {
             "$ref": "#/components/schemas/TargetName",
             "description": "The target it lands on."
