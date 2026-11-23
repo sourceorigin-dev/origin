@@ -3,9 +3,15 @@
 //! ```text
 //! .origin/
 //!   objects/ targets/ index/   the store, see `store`, `targets` and `index`
+//!   workspaces/                the other workspaces, see `registry`
 //!   workspace                  the revision the working copy is
 //!   state                      the stat cache of the last snapshot
 //! ```
+//!
+//! A repository can have several working copies, called workspaces, that share
+//! its store. The main working copy's `.origin` holds the store. The others'
+//! `.origin` holds only `workspace`, `state`, and a `repository` file that
+//! names the main one's `.origin`.
 //!
 //! The working copy is always on a revision of the current change. Every
 //! command that reads the working copy snapshots its files first. The files it
@@ -26,6 +32,7 @@
 
 mod annotate;
 mod land;
+mod registry;
 
 pub use annotate::{Annotated, Payload};
 
@@ -49,7 +56,7 @@ use crate::output::FileDiff;
 use crate::policy::PolicyError;
 use crate::queue::{LandError, Queue};
 use crate::store::{Store, StoreError};
-use crate::worktree::{SnapshotError, StatCache, Worktree};
+use crate::worktree::{CloneSource, SnapshotError, StatCache, Worktree};
 
 /// A working copy and its repository.
 #[derive(Debug)]
@@ -97,6 +104,16 @@ impl WorkingCopy {
 impl Workspace {
     /// The metadata directory at the root of every working copy.
     pub const META_DIR: &str = ".origin";
+
+    /// The file in [`Workspace::META_DIR`] that names the working copy's revision.
+    const POINTER: &str = "workspace";
+
+    /// The file in [`Workspace::META_DIR`] that holds the stat cache.
+    const STATE: &str = "state";
+
+    /// The file in a workspace's [`Workspace::META_DIR`] that names the main
+    /// working copy's, which holds the store.
+    const REPOSITORY: &str = "repository";
 
     /// `origin init`: creates a repository in `root`, with the `policy`
     /// target naming this node the authority of `policy` and `main`, an
@@ -179,30 +196,54 @@ impl Workspace {
         )
     }
 
-    /// Opens the working copy containing `start`.
+    /// Opens the working copy that contains `start`.
     ///
     /// # Errors
     ///
-    /// Fails if neither `start` nor any parent has a repository, it is on a
-    /// network file system, or its working copy file is unreadable.
+    /// Fails if neither `start` nor any of its parents has a repository, or like
+    /// [`Workspace::open`].
     pub fn discover(start: &Path, config: UserConfig) -> Result<Self, WorkspaceError> {
         let root = start
             .ancestors()
             .find(|dir| dir.join(Self::META_DIR).is_dir())
             .ok_or_else(|| WorkspaceError::NotFound(start.to_owned()))?;
+        Self::open(root, config)
+    }
+
+    /// Opens the working copy at `root`: either the main one, whose `.origin` holds
+    /// the store, or another workspace, whose `.origin/repository` names the main
+    /// one's.
+    fn open(root: &Path, config: UserConfig) -> Result<Self, WorkspaceError> {
         let meta = root.join(Self::META_DIR);
-        let path = meta.join("workspace");
-        let revision = fs::read_to_string(&path)
-            .map_err(|source| WorkspaceError::io(&path, source))?
-            .trim_end()
-            .parse()
-            .map_err(|_| WorkspaceError::Malformed(path))?;
+        let repository = meta.join(Self::REPOSITORY);
+        let store = match Self::read_path(&repository) {
+            Ok(store) if store.is_dir() => store,
+            Ok(store) => return Err(WorkspaceError::MissingRepository(store)),
+            Err(WorkspaceError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => {
+                meta
+            }
+            Err(error) => return Err(error),
+        };
+        let revision =
+            Self::read_pointer(root)?.ok_or_else(|| WorkspaceError::Incomplete(root.to_owned()))?;
         Ok(Self {
             root: root.to_owned(),
-            store: Store::open_writable(meta, Native::default())?,
+            store: Store::open_writable(store, Native::default())?,
             config,
             revision,
         })
+    }
+
+    /// Returns the revision of the working copy at `root`, if it has one.
+    fn read_pointer(root: &Path) -> Result<Option<RevisionId>, WorkspaceError> {
+        let path = root.join(Self::META_DIR).join(Self::POINTER);
+        let pointer = match fs::read_to_string(&path) {
+            Ok(pointer) => pointer,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(source) => return Err(WorkspaceError::io(&path, source)),
+        };
+        let revision = pointer.trim_end().parse();
+        Ok(Some(revision.map_err(|_| WorkspaceError::Malformed(path))?))
     }
 
     fn meta(&self, name: &str) -> PathBuf {
@@ -220,7 +261,7 @@ impl Workspace {
     fn snapshot(&mut self) -> Result<WorkingCopy, WorkspaceError> {
         let held = self.store.hold_objects()?;
         let revision: Revision = self.store.get(self.revision)?;
-        let path = self.meta("state");
+        let path = self.meta(Self::STATE);
         let loaded = StatCache::load(&path);
         let (files, cache) = Worktree::new(&self.root, &self.store).snapshot(&loaded)?;
         let cache = match cache {
@@ -348,12 +389,18 @@ impl Workspace {
 
     /// Durably records that the working copy is `revision`.
     fn point_at(&mut self, revision: RevisionId) -> Result<(), WorkspaceError> {
+        self.write_durably(self.meta(Self::POINTER), format!("{revision}\n").as_bytes())?;
+        self.revision = revision;
+        Ok(())
+    }
+
+    /// Durably replaces a metadata file.
+    fn write_durably(&self, path: PathBuf, contents: &[u8]) -> Result<(), WorkspaceError> {
         let write = self.store.durable_write();
         write
-            .stage(self.meta("workspace"), format!("{revision}\n").as_bytes())
+            .stage(path, contents)
             .and_then(|()| write.commit())
             .map_err(StoreError::from)?;
-        self.revision = revision;
         Ok(())
     }
 
@@ -391,9 +438,10 @@ impl Workspace {
         Ok(Worktree::new(&self.root, &self.store).restore(&changes)?)
     }
 
-    /// Makes the files match `to`, given that they match `from`, durably. With
-    /// `unchanged`, the stat cache of the snapshot that found `from`, it changes
-    /// nothing if a file it would change was edited since.
+    /// Makes the files match `to`, given that they match `from`, durably, cloning
+    /// the files other workspaces already have. With `unchanged`, the stat cache of
+    /// the snapshot that found `from`, it changes nothing if a file it would change
+    /// was edited since.
     fn checkout(
         &self,
         from: TreeId,
@@ -401,7 +449,19 @@ impl Workspace {
         unchanged: Option<&StatCache>,
     ) -> Result<(), WorkspaceError> {
         let changes = self.store.diff(from, to)?;
-        Ok(Worktree::new(&self.root, &self.store).checkout(&changes, &[], unchanged)?)
+        if changes.is_empty() {
+            return Ok(());
+        }
+        let sources: Vec<_> = self
+            .workspaces()?
+            .into_iter()
+            .filter(|root| *root != self.root)
+            .map(|root| {
+                let cache = root.join(Self::META_DIR).join(Self::STATE);
+                CloneSource::saved(root, cache)
+            })
+            .collect();
+        Ok(Worktree::new(&self.root, &self.store).checkout(&changes, &sources, unchanged)?)
     }
 
     /// `origin status`: prints the working copy's change, what it is on
@@ -506,10 +566,10 @@ impl Workspace {
         Ok(())
     }
 
-    /// Prints the changes `files` make to the snapshot of `base`.
-    fn print_diff(&self, base: Base, files: TreeId) -> Result<(), WorkspaceError> {
+    /// Prints the changes `snapshot` makes to `base`, line by line.
+    fn print_diff(&self, base: Base, snapshot: TreeId) -> Result<(), WorkspaceError> {
         let base = self.base_tree(base)?;
-        for change in self.store.diff(base, files)? {
+        for change in self.store.diff(base, snapshot)? {
             print!("{}", FileDiff::new(&self.store, &change)?);
         }
         Ok(())
@@ -1079,6 +1139,27 @@ pub enum WorkspaceError {
     /// The working copy file isn't a revision id.
     #[error("{} is not a revision id", .0.display())]
     Malformed(PathBuf),
+    /// A workspace's creation never finished.
+    #[error(
+        "the workspace at {} was never finished: remove it with `origin workspace rm`",
+        .0.display()
+    )]
+    Incomplete(PathBuf),
+    /// A workspace's repository is gone.
+    #[error("this workspace's repository, {}, is gone", .0.display())]
+    MissingRepository(PathBuf),
+    /// `workspace new` was given a path inside a working copy.
+    #[error("{} is inside a working copy", .0.display())]
+    Nested(PathBuf),
+    /// `workspace new` was given a directory with files in it.
+    #[error("{} is not empty", .0.display())]
+    NotEmpty(PathBuf),
+    /// `workspace rm` was given a path that isn't another workspace.
+    #[error("{} is not a workspace of this repository", .0.display())]
+    UnknownWorkspace(PathBuf),
+    /// `workspace rm` was given the main working copy, which holds the store.
+    #[error("{} is the main working copy, which holds the repository", .0.display())]
+    RemoveMain(PathBuf),
     /// A metadata file cannot be accessed.
     #[error("cannot access {}", path.display())]
     Io {
