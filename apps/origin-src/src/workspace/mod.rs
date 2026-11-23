@@ -3,15 +3,16 @@
 //! ```text
 //! .origin/
 //!   objects/ targets/ index/   the store, see `store`, `targets` and `index`
+//!   oplog/                     what this node applied, see `oplog`
 //!   workspaces/                the other workspaces, see `registry`
 //!   workspace                  the revision the working copy is
 //!   state                      the stat cache of the last snapshot
 //! ```
 //!
 //! A repository can have several working copies, called workspaces, that share
-//! its store. The main working copy's `.origin` holds the store. The others'
-//! `.origin` holds only `workspace`, `state`, and a `repository` file that
-//! names the main one's `.origin`.
+//! its store and op log. The main working copy's `.origin` holds the store. The
+//! others' `.origin` holds only `workspace`, `state`, and a `repository` file
+//! that names the main one's `.origin`.
 //!
 //! The working copy is always on a revision of the current change. Every
 //! command that reads the working copy snapshots its files first. The files it
@@ -36,6 +37,9 @@
 //! went, merging the edits made since (see [`land`]). Until then, edits stay
 //! unrecorded so the change doesn't fork, commands that only read the working
 //! copy say where the change went, and commands that build on it fail.
+//!
+//! Every move of the working copy is logged in the op log, in an entry made
+//! durable together with the `workspace` file that names the new revision.
 
 mod annotate;
 mod land;
@@ -45,7 +49,7 @@ pub use annotate::{Annotated, Payload};
 
 use std::fs;
 use std::io;
-use std::path::{self, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use origin_platform::{LockedFile, Native};
 use origin_shared::{
@@ -59,6 +63,7 @@ use crate::annotations::{AnnotateError, Annotations};
 use crate::config::{ConfigError, UserConfig};
 use crate::conflict::Conflicts;
 use crate::index::{FindChangeError, FindError, Index};
+use crate::oplog::{Actor, Effect, Move, Why};
 use crate::output::FileDiff;
 use crate::policy::PolicyError;
 use crate::queue::{LandError, Queue};
@@ -73,6 +78,9 @@ pub struct Workspace {
     config: UserConfig,
     /// The revision the working copy was last recorded as.
     revision: RevisionId,
+    /// The move that recording the draft made, saved with the command's own
+    /// records. It is logged together with the command's own move.
+    unlogged: Option<Move>,
 }
 
 /// The working copy as of a snapshot.
@@ -144,15 +152,17 @@ impl Workspace {
     ///
     /// Fails if `root` already has a repository, the node key cannot be
     /// loaded, or the repository cannot be written.
-    pub fn init(root: &Path, config: UserConfig) -> Result<Self, WorkspaceError> {
-        let root = path::absolute(root).map_err(|source| WorkspaceError::io(root, source))?;
+    pub fn init(root: &Path, config: UserConfig, actor: &Actor) -> Result<Self, WorkspaceError> {
+        // Canonical, as every command opening it spells it, so the op log
+        // names this working copy one way.
+        let root = Self::canonical(root)?;
         let meta = root.join(Self::META_DIR);
         if meta.exists() {
             return Err(WorkspaceError::AlreadyInitialized(root));
         }
         // First, so a key that cannot be loaded leaves no repository behind.
         let key = config.node_key()?;
-        let store = Store::new(meta, Native::default());
+        let store = Store::new(meta, Native::default()).with_actor(actor.in_workspace(&root));
         store.init()?;
 
         let policy = Self::policy(&config, &key.public());
@@ -175,13 +185,10 @@ impl Workspace {
             store,
             config,
             revision: encoded.id().into(),
+            unlogged: None,
         };
-        // A first revision makes no divergence, which an index would tell.
-        workspace.save(
-            &[vec![empty_description], vec![encoded]],
-            workspace.revision,
-            &mut Index::default(),
-        )?;
+        workspace.write(&[vec![empty_description], vec![encoded]])?;
+        workspace.publish_pointer(None, workspace.revision, Why::Command)?;
         println!(
             "Initialized a repository in {}: node:{} is the authority of `policy` and `main`",
             workspace.root.display(),
@@ -217,24 +224,29 @@ impl Workspace {
         )
     }
 
-    /// Opens the working copy that contains `start`.
+    /// Opens the working copy that contains `start`, for `actor` to write in.
     ///
     /// # Errors
     ///
     /// Fails if neither `start` nor any of its parents has a repository, or like
     /// [`Workspace::open`].
-    pub fn discover(start: &Path, config: UserConfig) -> Result<Self, WorkspaceError> {
+    pub fn discover(
+        start: &Path,
+        config: UserConfig,
+        actor: &Actor,
+    ) -> Result<Self, WorkspaceError> {
         let root = start
             .ancestors()
             .find(|dir| dir.join(Self::META_DIR).is_dir())
             .ok_or_else(|| WorkspaceError::NotFound(start.to_owned()))?;
-        Self::open(root, config)
+        Self::open(root, config, actor)
     }
 
     /// Opens the working copy at `root`: either the main one, whose `.origin` holds
     /// the store, or another workspace, whose `.origin/repository` names the main
     /// one's.
-    fn open(root: &Path, config: UserConfig) -> Result<Self, WorkspaceError> {
+    fn open(root: &Path, config: UserConfig, actor: &Actor) -> Result<Self, WorkspaceError> {
+        let root = &Self::canonical(root)?;
         let meta = root.join(Self::META_DIR);
         let repository = meta.join(Self::REPOSITORY);
         let store = match Self::read_path(&repository) {
@@ -249,9 +261,11 @@ impl Workspace {
             Self::read_pointer(root)?.ok_or_else(|| WorkspaceError::Incomplete(root.to_owned()))?;
         Ok(Self {
             root: root.to_owned(),
-            store: Store::open_writable(store, Native::default())?,
+            store: Store::open_writable(store, Native::default())?
+                .with_actor(actor.in_workspace(root)),
             config,
             revision,
+            unlogged: None,
         })
     }
 
@@ -450,7 +464,12 @@ impl Workspace {
     fn save_draft(&mut self) -> Result<WorkingCopy, WorkspaceError> {
         let mut working_copy = self.record()?;
         if let Some(unsaved) = working_copy.unsaved.take() {
-            self.save(&[vec![unsaved]], working_copy.id, &mut working_copy.index)?;
+            self.save(
+                &[vec![unsaved]],
+                working_copy.id,
+                Why::Draft,
+                &mut working_copy.index,
+            )?;
         }
         Ok(working_copy)
     }
@@ -472,17 +491,33 @@ impl Workspace {
         }
     }
 
-    /// Writes `layers` of objects and adds them to `index`, then makes `revision`
-    /// the working copy. Flags the change as divergent if that made it diverge.
+    /// Notes the draft a command saves with its own records as a move of its own.
+    /// The draft's move is logged together with the command's move, which starts
+    /// from the draft.
+    fn log_draft(&mut self, working_copy: &WorkingCopy) {
+        if working_copy.unsaved.is_some() {
+            self.unlogged = Some(Move {
+                from: Some(self.revision),
+                to: working_copy.id,
+                why: Why::Draft,
+            });
+            self.revision = working_copy.id;
+        }
+    }
+
+    /// Writes `layers` of objects and adds them to `index`, then makes `revision`,
+    /// which must have the working copy's files, the working copy. Flags the change
+    /// as divergent if that made it diverge.
     fn save(
         &mut self,
         layers: &[Vec<EncodedObject>],
         revision: RevisionId,
+        why: Why,
         index: &mut Index,
     ) -> Result<(), WorkspaceError> {
         self.write(layers)?;
         index.add(layers.iter().flatten())?;
-        self.point_at(revision)?;
+        self.point_at(revision, why)?;
         self.flag_divergence(index, revision)
     }
 
@@ -495,20 +530,33 @@ impl Workspace {
         Ok(())
     }
 
-    /// Durably records that the working copy is `revision`.
-    fn point_at(&mut self, revision: RevisionId) -> Result<(), WorkspaceError> {
-        self.write_durably(self.meta(Self::POINTER), format!("{revision}\n").as_bytes())?;
-        self.revision = revision;
-        Ok(())
+    /// Durably records that the working copy is `revision`, whose files it already
+    /// has, and logs the move.
+    fn point_at(&mut self, revision: RevisionId, why: Why) -> Result<(), WorkspaceError> {
+        self.publish_pointer(Some(self.revision), revision, why)
     }
 
-    /// Durably replaces a metadata file.
-    fn write_durably(&self, path: PathBuf, contents: &[u8]) -> Result<(), WorkspaceError> {
+    /// Durably records that the working copy moved from `from`, or was created, to
+    /// `to`, and logs the move in the op log. If the command saved a draft, its
+    /// move is logged first. The log entries become durable together with
+    /// `workspace`.
+    fn publish_pointer(
+        &mut self,
+        from: Option<RevisionId>,
+        to: RevisionId,
+        why: Why,
+    ) -> Result<(), WorkspaceError> {
+        // The draft's move stays to log until this commit logs it.
+        let mut moves: Vec<_> = self.unlogged.into_iter().collect();
+        moves.push(Move { from, to, why });
         let write = self.store.durable_write();
         write
-            .stage(path, contents)
-            .and_then(|()| write.commit())
+            .stage(self.meta(Self::POINTER), format!("{to}\n").as_bytes())
             .map_err(StoreError::from)?;
+        let moves: Vec<_> = moves.into_iter().map(Effect::Moved).collect();
+        self.store.commit_logged(write, &moves)?;
+        self.unlogged = None;
+        self.revision = to;
         Ok(())
     }
 
@@ -524,6 +572,7 @@ impl Workspace {
         to: RevisionId,
         revision: &Revision,
         unwritten: &[Vec<EncodedObject>],
+        why: Why,
     ) -> Result<(), WorkspaceError> {
         let checkout = self.checkout(
             working_copy.files,
@@ -536,7 +585,17 @@ impl Workspace {
             return Err(error);
         }
         self.write(unwritten)?;
-        self.point_at(to)
+        self.point_at(to, why)
+    }
+
+    /// Durably replaces a metadata file.
+    fn write_durably(&self, path: PathBuf, contents: &[u8]) -> Result<(), WorkspaceError> {
+        let write = self.store.durable_write();
+        write
+            .stage(path, contents)
+            .and_then(|()| write.commit())
+            .map_err(StoreError::from)?;
+        Ok(())
     }
 
     /// Makes the files that still match `from` match `to`, durably. Files edited
@@ -694,6 +753,7 @@ impl Workspace {
     pub fn new_change(&mut self, description: &str) -> Result<(), WorkspaceError> {
         let working_copy = self.record()?;
         let mut working_copy = self.following(working_copy)?;
+        self.log_draft(&working_copy);
         let description = EncodedObject::blob(description.as_bytes());
         let revision = Revision {
             change: ChangeId::random().map_err(WorkspaceError::Random)?,
@@ -710,7 +770,7 @@ impl Workspace {
         let first = working_copy.unsaved.take().into_iter().chain([description]);
         // It starts with the files of the one below, and their conflicts.
         let layers = self.revision_layers(first.collect(), &encoded, &working_copy.conflicts);
-        self.save(&layers, id, &mut working_copy.index)?;
+        self.save(&layers, id, Why::Command, &mut working_copy.index)?;
         // Edits recorded on a revision that is no longer its change's head
         // make that change diverge.
         if recorded {
@@ -731,6 +791,7 @@ impl Workspace {
     pub fn describe(&mut self, description: &str) -> Result<(), WorkspaceError> {
         let working_copy = self.record()?;
         let mut working_copy = self.following(working_copy)?;
+        self.log_draft(&working_copy);
         let description = EncodedObject::blob(description.as_bytes());
         let revision = Revision {
             predecessors: vec![working_copy.id],
@@ -742,7 +803,7 @@ impl Workspace {
         let id = encoded.id().into();
         let first = working_copy.unsaved.take().into_iter().chain([description]);
         let layers = self.revision_layers(first.collect(), &encoded, &working_copy.conflicts);
-        self.save(&layers, id, &mut working_copy.index)?;
+        self.save(&layers, id, Why::Command, &mut working_copy.index)?;
         println!("Working copy: {}", self.headline(&revision)?);
         Ok(())
     }
@@ -770,7 +831,7 @@ impl Workspace {
         let encoded = revision.encode();
         let id = encoded.id().into();
         let layers = self.revision_layers(Vec::new(), &encoded, &working_copy.conflicts);
-        self.save(&layers, id, &mut working_copy.index)?;
+        self.save(&layers, id, Why::Command, &mut working_copy.index)?;
         println!("Resolved {}", Self::list_paths(&resolved));
         if !working_copy.conflicts.is_empty() {
             Self::print_conflicts(&working_copy.conflicts);
@@ -792,7 +853,7 @@ impl Workspace {
         let head = Self::single_head(index, change)?;
         let revision: Revision = self.store.get(head)?;
         if head != working_copy.id {
-            self.switch_to(&working_copy, head, &revision, &[])?;
+            self.switch_to(&working_copy, head, &revision, &[], Why::Command)?;
         }
         println!("Working copy: {}", self.headline(&revision)?);
         Ok(())
@@ -858,7 +919,8 @@ impl Workspace {
         let mut layers = self.revision_layers(vec![reason, empty], &encoded, &conflicts);
         // Published before the revision that replaces the change.
         layers[1].push(statement);
-        self.switch_to(&working_copy, encoded.id().into(), &revision, &layers)?;
+        let id = encoded.id().into();
+        self.switch_to(&working_copy, id, &revision, &layers, Why::Command)?;
         println!("Abandoned change {}", change.short());
         println!("Working copy: {}", self.headline(&revision)?);
         println!("On top of: {}", self.describe_base(revision.base)?);
@@ -930,7 +992,7 @@ impl Workspace {
         let id = encoded.id().into();
         let layers = self.revision_layers(Vec::new(), &encoded, &conflicts);
         if change == working_copy.revision.change {
-            self.switch_to(&working_copy, id, &revision, &layers)?;
+            self.switch_to(&working_copy, id, &revision, &layers, Why::Command)?;
         } else {
             self.write(&layers)?;
         }

@@ -32,14 +32,19 @@ impl Repo {
         repo
     }
 
-    /// Runs `origin` in `cwd` as the configured user.
-    fn run(&self, cwd: &Path, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_origin"))
+    /// Builds an `origin` command that runs in `cwd` as the configured user.
+    fn command(&self, cwd: &Path, args: &[&str]) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_origin"));
+        command
             .args(args)
             .current_dir(cwd)
-            .env("ORIGIN_CONFIG_DIR", self.config.path())
-            .output()
-            .unwrap()
+            .env("ORIGIN_CONFIG_DIR", self.config.path());
+        command
+    }
+
+    /// Runs `origin` in `cwd` as the configured user.
+    fn run(&self, cwd: &Path, args: &[&str]) -> Output {
+        self.command(cwd, args).output().unwrap()
     }
 
     /// Runs a command that must succeed, returning its output.
@@ -887,6 +892,21 @@ fn annotating_a_statement_needs_one_and_no_inputs() {
         "{error}"
     );
     assert!(error.contains("\nUsage: origin annotate "), "{error}");
+}
+
+#[test]
+fn an_argument_that_is_not_utf8_is_no_panic() {
+    use std::os::unix::ffi::OsStrExt;
+    let repo = Repo::new();
+    let path = std::ffi::OsStr::from_bytes(b"gone\xff");
+    let output = repo
+        .command(repo.dir.path(), &["workspace", "rm"])
+        .arg(path)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(stderr.starts_with("error: "), "{stderr}");
 }
 
 #[test]

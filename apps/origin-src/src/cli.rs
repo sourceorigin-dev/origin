@@ -12,6 +12,7 @@ use clap::{Args, CommandFactory, Parser, Subcommand};
 use origin_shared::{Digest, Inputs, Kind, RepoPath, TargetName, Verdict};
 
 use crate::config::UserConfig;
+use crate::oplog::Actor;
 use crate::workspace::{Annotated, Payload, Workspace};
 
 /// A modern, git-compatible source control system.
@@ -391,20 +392,28 @@ impl Cli {
     /// Fails if the command fails; the error is meant for the user.
     pub fn run(self) -> Result<()> {
         let config = UserConfig::load()?;
+        // The op log records the command line, without the program's name,
+        // as text: an argument that isn't UTF-8, such as a path, is never
+        // an error here.
+        let args: Vec<_> = env::args_os()
+            .skip(1)
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        let actor = Actor::new(args.join(" "));
         match self.command {
             Command::Init { path } => {
-                Workspace::init(&path, config)?;
+                Workspace::init(&path, config, &actor)?;
             }
-            Command::Workspace(command) => command.run(config)?,
+            Command::Workspace(command) => command.run(config, &actor)?,
         }
         Ok(())
     }
 }
 
 impl WorkspaceCommand {
-    fn run(self, config: UserConfig) -> Result<()> {
+    fn run(self, config: UserConfig, actor: &Actor) -> Result<()> {
         let cwd = env::current_dir().context("cannot read the current directory")?;
-        let mut workspace = Workspace::discover(&cwd, config)?;
+        let mut workspace = Workspace::discover(&cwd, config, actor)?;
         match self {
             Self::Status => workspace.status()?,
             Self::Diff => workspace.diff()?,

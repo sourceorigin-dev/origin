@@ -22,6 +22,7 @@ use origin_platform::DurableWrite;
 use origin_shared::{ChangeId, Digest, EncodedObject, Record, Revision, Tree};
 
 use super::{Workspace, WorkspaceError};
+use crate::oplog::Why;
 
 impl Workspace {
     /// The directory in the store's `.origin` that holds a file for each workspace.
@@ -68,16 +69,20 @@ impl Workspace {
         self.write(&records)?;
         self.write_durably(self.registered(&root), &Self::path_bytes(&root))?;
         let mut workspace = Self {
+            store: self
+                .store
+                .clone()
+                .with_actor(self.store.actor().in_workspace(&root)),
             root,
-            store: self.store.clone(),
             config: self.config.clone(),
             revision: id,
+            unlogged: None,
         };
         let empty = Tree::default().encode().id().into();
         workspace.checkout(empty, revision.snapshot, None)?;
         let repository = Self::path_bytes(self.store.root());
         workspace.write_durably(workspace.meta(Self::REPOSITORY), &repository)?;
-        workspace.point_at(id)?;
+        workspace.publish_pointer(None, id, Why::Command)?;
         println!("Created workspace {}", workspace.root.display());
         println!("Working copy: {}", workspace.headline(&revision)?);
         println!("On top of: {}", workspace.describe_base(revision.base)?);
@@ -125,7 +130,7 @@ impl Workspace {
             return Err(WorkspaceError::UnknownWorkspace(root));
         }
         if Self::read_pointer(&root)?.is_some() {
-            let mut workspace = Self::open(&root, self.config.clone())?;
+            let mut workspace = Self::open(&root, self.config.clone(), self.store.actor())?;
             let working_copy = workspace.save_draft()?;
             // Only behind its change are its edits left unsaved.
             let working_copy = if working_copy.files == working_copy.revision.snapshot {
@@ -227,18 +232,33 @@ impl Workspace {
         Ok(PathBuf::from(OsStr::from_bytes(path)))
     }
 
-    /// Returns `path` made absolute, without symlinks or `..`. The path may not
-    /// exist, but its parent must.
-    fn canonical(path: &Path) -> Result<PathBuf, WorkspaceError> {
+    /// Returns `path` made absolute: its nearest existing ancestor resolved,
+    /// without symlinks or `..`, then the components that don't exist yet, as
+    /// given. A dangling symlink counts as not existing, so it stays as given too,
+    /// and creating anything under it fails. Creates nothing.
+    pub(super) fn canonical(path: &Path) -> Result<PathBuf, WorkspaceError> {
         let absolute = path::absolute(path).map_err(|source| WorkspaceError::io(path, source))?;
-        if let Ok(resolved) = fs::canonicalize(&absolute) {
-            return Ok(resolved);
+        let mut missing = Vec::new();
+        let mut existing = absolute.as_path();
+        loop {
+            match fs::canonicalize(existing) {
+                Ok(resolved) => {
+                    return Ok(missing
+                        .iter()
+                        .rev()
+                        .fold(resolved, |resolved, name| resolved.join(name)));
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    // A missing `..` can't be resolved without its parent.
+                    let (Some(parent), Some(name)) = (existing.parent(), existing.file_name())
+                    else {
+                        return Err(WorkspaceError::io(path, error));
+                    };
+                    missing.push(name);
+                    existing = parent;
+                }
+                Err(source) => return Err(WorkspaceError::io(existing, source)),
+            }
         }
-        let (Some(parent), Some(name)) = (absolute.parent(), absolute.file_name()) else {
-            return Err(WorkspaceError::io(path, io::ErrorKind::NotFound.into()));
-        };
-        let parent =
-            fs::canonicalize(parent).map_err(|source| WorkspaceError::io(parent, source))?;
-        Ok(parent.join(name))
     }
 }
