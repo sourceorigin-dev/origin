@@ -52,8 +52,8 @@ benchmark, and its numbers in the pull request.
 - `just bench`: the divan micro-benchmarks (encoding, store writes,
   snapshots, input digests and promotion, landing, permission checks,
   reading events, the server's request latency and long-poll wakeups,
-  syncing a 20,000-file tree over HTTP, and a fetch that brings nothing
-  from a long history).
+  syncing a 20,000-file tree over HTTP, a fetch that brings nothing from a
+  long history, and the CI worker's overhead per check).
 - `just bench-git`: times origin against git on a 20,000-file tree with
   hyperfine, and rewrites `docs/benchmarks.md`.
 
