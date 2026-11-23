@@ -652,6 +652,9 @@ impl Dependencies {
 /// A failed service call.
 #[derive(Debug, thiserror::Error)]
 pub enum ServiceError {
+    /// The server hosts no repository by that name.
+    #[error("repository `{0}` not found")]
+    UnknownRepository(origin_shared::api::RepoName),
     /// A directory holds no repository.
     #[error("{} is not an origin repository", .0.display())]
     NotARepository(PathBuf),
@@ -724,7 +727,9 @@ impl ServiceError {
     #[must_use]
     pub fn code(&self) -> ErrorCode {
         match self {
-            Self::UnknownChange(_) | Self::UnknownTarget(_) => ErrorCode::NotFound,
+            Self::UnknownRepository(_) | Self::UnknownChange(_) | Self::UnknownTarget(_) => {
+                ErrorCode::NotFound
+            }
             Self::NoTarget
             | Self::Malformed { .. }
             | Self::Acceptance(_)
