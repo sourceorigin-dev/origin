@@ -11,7 +11,8 @@
 //!
 //! Each entry has a sequence number, one more than the entry before it, which
 //! never changes. The entries one command run appends form an operation,
-//! numbered by the sequence number of its first entry.
+//! numbered by the sequence number of its first entry. `origin op log` shows
+//! operations, and `origin undo` takes them back.
 //!
 //! ```text
 //! .origin/oplog/

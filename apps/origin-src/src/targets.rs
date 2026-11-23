@@ -234,6 +234,23 @@ impl<P: Platform> Store<P> {
             .then_some(next))
     }
 
+    /// The name of the target `id`, or `None` if it doesn't exist.
+    ///
+    /// # Errors
+    ///
+    /// Fails if its name cannot be read or is malformed.
+    pub fn target_name(&self, id: TargetId) -> Result<Option<TargetName>, StoreError> {
+        let path = self.target_files(id).name();
+        TargetFiles::read(&path)?
+            .map(|bytes| {
+                String::from_utf8(bytes)
+                    .ok()
+                    .and_then(|name| TargetName::new(name).ok())
+                    .ok_or(StoreError::Malformed(path))
+            })
+            .transpose()
+    }
+
     /// The names of every target, in no particular order.
     ///
     /// # Errors
