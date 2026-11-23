@@ -58,12 +58,14 @@ use std::fs;
 use std::io;
 use std::mem;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use origin_platform::{LockedFile, Native};
+use origin_shared::api::{RevisionEntry, Revisions};
 use origin_shared::{
-    AcceptanceId, Base, BlobId, ChangeId, EncodedObject, Kind, NodePublicKey, Principal, Record,
-    RecordId, RepoPath, Revision, RevisionId, Source, Statement, StatementId, TargetId, TargetName,
-    Tree, TreeId,
+    AcceptanceId, Base, BlobId, ChangeId, EncodedObject, Kind, Principal, Record, RecordId,
+    RepoPath, Revision, RevisionId, Source, Statement, StatementId, TargetId, TargetName, Tree,
+    TreeId,
 };
 
 use crate::ancestry::Ancestry;
@@ -73,8 +75,9 @@ use crate::conflict::Conflicts;
 use crate::index::{FindChangeError, FindError, Index};
 use crate::oplog::{Actor, Effect, Move, Why};
 use crate::output::FileDiff;
-use crate::policy::PolicyError;
+use crate::policy::{Policy, PolicyError};
 use crate::queue::{LandError, Queue};
+use crate::service::{Caller, Node, OriginService, ServiceError};
 use crate::store::{Store, StoreError};
 use crate::worktree::{CloneSource, SnapshotError, StatCache, Worktree};
 
@@ -230,7 +233,7 @@ impl Workspace {
         let store = Store::new(meta, Native::default()).with_actor(actor.in_workspace(&root));
         store.init()?;
 
-        let policy = Self::policy(&config, &key.public());
+        let policy = Policy::initial(config.node(), &key.public());
         let main = Queue::new(&store, &key, config.node().clone()).init(&policy)?;
         let empty_tree = Tree::default().encode();
         let empty_description = EncodedObject::blob(b"");
@@ -262,32 +265,6 @@ impl Workspace {
         );
         println!("Working copy: {}", workspace.headline(&revision)?);
         Ok(workspace)
-    }
-
-    /// Returns the first `policy.toml`. It makes this node the authority of
-    /// `policy` and `main`, with no requirements on either, so a solo project lands
-    /// at once.
-    fn policy(config: &UserConfig, key: &NodePublicKey) -> String {
-        let node = config.node();
-        format!(
-            "# Who may land what. Changing it is a landing on `policy`.\n\
-             \n\
-             # Each node's public key.\n\
-             [nodes]\n\
-             \"{node}\" = \"{key}\"\n\
-             \n\
-             # Groups of users and nodes, for requirements:\n\
-             # [groups]\n\
-             # runners = [\"node:ci-1\"]\n\
-             \n\
-             # The node ordering each target, and the statements landing needs.\n\
-             [targets.policy]\n\
-             authority = \"node:{node}\"\n\
-             \n\
-             [targets.main]\n\
-             authority = \"node:{node}\"\n\
-             # require = [{{ kind = \"ci.test\", verdict = \"pass\", issuer = \"group:runners\" }}]\n"
-        )
     }
 
     /// Opens the working copy that contains `start`, for `actor` to write in.
@@ -424,6 +401,21 @@ impl Workspace {
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Returns this repository's service, run by this node. The commands that the
+    /// API also offers go through it. It finds records through `index` if the
+    /// command already read it, or else reads the index when needed.
+    fn service(&self, index: Option<Index>) -> Result<OriginService, WorkspaceError> {
+        let node = Node {
+            name: self.config.node().clone(),
+            key: Arc::new(self.config.node_key()?),
+        };
+        let service = OriginService::new(self.store.clone(), node);
+        Ok(match index {
+            Some(index) => service.with_index(index),
+            None => service,
+        })
     }
 
     /// Snapshots the working copy into a draft, recording nothing, for the
@@ -1262,10 +1254,12 @@ impl Workspace {
             Some(target) => target,
             None => self.target_name(on)?,
         };
-        let log = self.store.log(&target)?;
-        if log.is_empty() {
-            return Err(WorkspaceError::UnknownTarget(target));
-        }
+        // Only the last `limit` acceptances are read.
+        let since = match (limit, self.store.head(&target)?) {
+            (Some(limit), Some(head)) => (head.seq + 1).saturating_sub(limit as u64),
+            _ => 0,
+        };
+        let log = self.service(None)?.log(&Caller::Owner, &target, since)?;
         if target.id() == on {
             for (id, revision) in &stack {
                 let marker = if *id == working_copy.id { '@' } else { '○' };
@@ -1276,14 +1270,10 @@ impl Workspace {
                 );
             }
         }
-        let shown = log
-            .iter()
-            .enumerate()
-            .rev()
-            .take(limit.unwrap_or(usize::MAX));
-        for (seq, &id) in shown {
-            println!("◆ {target} #{seq} {}", id.short());
-            for source in &self.store.get(id)?.body().landed {
+        for entry in log.iter().rev() {
+            let body = entry.acceptance.body();
+            println!("◆ {target} #{} {}", body.seq, entry.id.short());
+            for source in &body.landed {
                 match *source {
                     Source::Revision(id) => {
                         let revision = self.store.get(id)?;
@@ -1309,16 +1299,18 @@ impl Workspace {
     ///
     /// Fails if the change cannot be found, or a record cannot be read.
     pub fn evolog(&mut self, change: &str) -> Result<(), WorkspaceError> {
-        let working_copy = self.snapshot()?;
-        let index = &working_copy.index;
+        let mut working_copy = self.snapshot()?;
         let change = working_copy.find_change(change)?;
-        let heads = index.heads(change);
-        println!("Change {}{}", change.short(), self.flags(index, change)?);
-        for &id in index.revisions(change).iter().rev() {
-            let revision: Revision = self.store.get(id)?;
+        let flags = self.flags(&working_copy.index, change)?;
+        let Revisions { revisions, heads } = self
+            .service(Some(mem::take(&mut working_copy.index)))?
+            .revisions(&Caller::Owner, change)?;
+        println!("Change {}{flags}", change.short());
+        for RevisionEntry { id, revision } in revisions.iter().rev() {
+            let id = *id;
             let marker = if id == working_copy.id { '@' } else { '○' };
             let head = if heads.contains(&id) { " (head)" } else { "" };
-            println!("{marker} {} {}{head}", id.short(), self.summary(&revision)?);
+            println!("{marker} {} {}{head}", id.short(), self.summary(revision)?);
             if revision.predecessors.len() > 1 {
                 println!("    converges {}", Self::list(&revision.predecessors));
             }
@@ -1607,6 +1599,9 @@ pub enum WorkspaceError {
     /// A landing failed.
     #[error(transparent)]
     Land(#[from] LandError),
+    /// The repository's service refused a call.
+    #[error(transparent)]
+    Service(#[from] ServiceError),
     /// `undo` found no operation of this workspace to take back.
     #[error("nothing to undo: no operation moved this workspace's working copy")]
     NothingToUndo,

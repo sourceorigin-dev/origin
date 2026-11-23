@@ -374,6 +374,32 @@ impl TryFrom<PolicyFile> for Policy {
 }
 
 impl Policy {
+    /// Returns the first `policy.toml` of a repository: `node`, whose public
+    /// key is `key`, is the authority of `policy` and `main`, and neither
+    /// target requires anything, so a solo project lands at once.
+    #[must_use]
+    pub fn initial(node: &PrincipalName, key: &NodePublicKey) -> String {
+        format!(
+            "# Who may land what. Changing it is a landing on `policy`.\n\
+             \n\
+             # Each node's public key.\n\
+             [nodes]\n\
+             \"{node}\" = \"{key}\"\n\
+             \n\
+             # Groups of users and nodes, for requirements:\n\
+             # [groups]\n\
+             # runners = [\"node:ci-1\"]\n\
+             \n\
+             # The node ordering each target, and the statements landing needs.\n\
+             [targets.policy]\n\
+             authority = \"node:{node}\"\n\
+             \n\
+             [targets.main]\n\
+             authority = \"node:{node}\"\n\
+             # require = [{{ kind = \"ci.test\", verdict = \"pass\", issuer = \"group:runners\" }}]\n"
+        )
+    }
+
     /// Checks that the group `principals` names, if any, is defined.
     fn check(&self, principals: Principals) -> Result<Principals, RuleError> {
         match &principals {
