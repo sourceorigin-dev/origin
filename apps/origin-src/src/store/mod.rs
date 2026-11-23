@@ -34,6 +34,7 @@ use origin_shared::object::{DecodeError, IdMismatch};
 use origin_shared::{EncodedObject, ObjectId, TargetName, TypedId};
 
 use crate::index::Entry;
+use crate::oplog::Actor;
 use crate::targets::Head;
 
 pub use packs::Compaction;
@@ -47,6 +48,8 @@ pub struct Store<P = Native> {
     root: PathBuf,
     pub(crate) platform: P,
     packs: Arc<Packs>,
+    /// The actor that the op log records as the writer.
+    pub(crate) actor: Actor,
 }
 
 impl<P: Platform> Store<P> {
@@ -66,7 +69,20 @@ impl<P: Platform> Store<P> {
             root: root.into(),
             platform,
             packs: Arc::default(),
+            actor: Actor::default(),
         }
+    }
+
+    /// Returns the store, writing as `actor` from now on.
+    #[must_use]
+    pub fn with_actor(self, actor: Actor) -> Self {
+        Self { actor, ..self }
+    }
+
+    /// The actor that the op log records as the writer.
+    #[must_use]
+    pub fn actor(&self) -> &Actor {
+        &self.actor
     }
 
     /// Opens the storage in `root` for writing, refusing a network file
@@ -136,15 +152,14 @@ impl<P: Platform> Store<P> {
         Ok(())
     }
 
-    /// Creates the directories of an empty store and its empty index,
-    /// durably, refusing a network file system. Creating every object shard
-    /// up front means batches only ever sync the shards they write to, never
-    /// a directory they had to create.
+    /// Creates the directories of an empty store, with its empty index and op
+    /// log, durably. Also creates every object shard up front, so batches never
+    /// have to create and sync a new directory.
     ///
     /// # Errors
     ///
-    /// Fails if the store would be on a network file system, or if a
-    /// directory cannot be created or synced.
+    /// Fails if the store would be on a network file system, or if a directory
+    /// cannot be created or synced.
     pub fn init(&self) -> Result<(), StoreError> {
         fs::create_dir_all(&self.root).map_err(|source| StoreError::io(&self.root, source))?;
         self.platform.check_writable(&self.root)?;
@@ -156,6 +171,7 @@ impl<P: Platform> Store<P> {
         for dir in [self.packs_dir(), self.targets_dir()] {
             fs::create_dir_all(&dir).map_err(|source| StoreError::io(&dir, source))?;
         }
+        self.oplog().init()?;
         let objects = self.root.join("objects");
         let parent = DurableWrite::<P>::parent(&self.root);
         for dir in [&loose, &objects, &self.root, parent] {
@@ -633,9 +649,26 @@ pub enum StoreError {
     /// An acceptance was appended to a target it doesn't belong to.
     #[error("the acceptance does not belong to target `{0}`")]
     WrongTarget(TargetName),
-    /// A target file isn't in the format the store writes.
-    #[error("malformed target file {}", .0.display())]
+    /// A file is not in the format the store writes.
+    #[error("malformed file {}", .0.display())]
     Malformed(PathBuf),
+    /// A file in one of the store's binary formats doesn't decode.
+    #[error("cannot decode {}", path.display())]
+    DecodeFile {
+        /// The file.
+        path: PathBuf,
+        /// Why decoding failed.
+        source: DecodeError,
+    },
+    /// The op log no longer has the entries after a cursor: retention deleted
+    /// them.
+    #[error("the op log no longer keeps the entries after #{after}: its oldest is #{oldest}")]
+    Expired {
+        /// The cursor.
+        after: u64,
+        /// The oldest entry the log still has.
+        oldest: u64,
+    },
 }
 
 impl StoreError {
