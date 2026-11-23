@@ -3,6 +3,7 @@
 mod changes;
 mod conflicts;
 mod evidence;
+mod policy;
 
 use origin_platform::Native;
 use origin_shared::{
@@ -14,6 +15,7 @@ use origin_shared::{
 use super::*;
 use crate::annotations::Annotations;
 use crate::conflict::Conflicts;
+use crate::policy::{Policy, PolicyError};
 use crate::store::Store;
 use crate::targets::Head;
 use crate::tree::tests::build;
