@@ -69,7 +69,7 @@ impl Workspace {
                 landed
             }
             None => self
-                .service(Some(mem::take(&mut working_copy.index)))?
+                .service(Some(mem::take(&mut working_copy.index)))
                 .land(&Caller::Owner, &request)?,
         };
         for landing in &landings {
@@ -108,7 +108,7 @@ impl Workspace {
                 self.sync(remote).fetch_chains(slice::from_ref(onto))?;
                 landed
             }
-            None => self.service(None)?.land(&Caller::Owner, &request)?,
+            None => self.service(None).land(&Caller::Owner, &request)?,
         };
         for landing in &landed.landings {
             self.print_landing(landing, onto)?;
@@ -123,7 +123,7 @@ impl Workspace {
     ///
     /// Fails if the queues cannot be read.
     pub fn land_status(&self) -> Result<(), WorkspaceError> {
-        let mut pending = self.service(None)?.landings(&Caller::Owner)?;
+        let mut pending = self.service(None).landings(&Caller::Owner)?;
         if let Some(remote) = self.remote()? {
             pending.extend(remote.landings()?);
         }
@@ -154,9 +154,7 @@ impl Workspace {
                 self.sync(remote).fetch_chains(slice::from_ref(name))?;
                 head
             }
-            None => self
-                .service(None)?
-                .create_target(&Caller::Owner, &request)?,
+            None => self.service(None).create_target(&Caller::Owner, &request)?,
         };
         let landed = self.store.get(head.acceptance)?.body().landed.clone();
         let from = match landed[..] {
@@ -176,7 +174,7 @@ impl Workspace {
     ///
     /// Fails if the remote fails, or the targets or the policy cannot be read.
     pub fn targets(&self) -> Result<(), WorkspaceError> {
-        let mut targets = self.service(None)?.targets(&Caller::Owner)?;
+        let mut targets = self.service(None).targets(&Caller::Owner)?;
         if let Some(remote) = self.remote()? {
             let remote = remote.targets()?;
             targets.retain(|own| !remote.iter().any(|target| target.name == own.name));

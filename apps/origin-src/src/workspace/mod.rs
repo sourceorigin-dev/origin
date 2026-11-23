@@ -35,7 +35,7 @@ use std::fs;
 use std::io;
 use std::mem;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 
 use origin_platform::{LockMode, LockedFile, Native};
 use origin_shared::api::{LogQuery, RevisionEntry, Revisions};
@@ -408,13 +408,14 @@ impl Workspace {
 
     /// Returns this repository's service, run by this node. The commands that the
     /// API also offers go through it. It finds records through `index` if the
-    /// command already read it, or else reads the index when needed.
-    fn service(&self, index: Option<Index>) -> Result<OriginService, WorkspaceError> {
-        let service = OriginService::new(self.store.clone(), self.node()?);
-        Ok(match index {
+    /// command already read it, or else reads the index when needed. It loads the
+    /// node's key only once a call signs.
+    fn service(&self, index: Option<Index>) -> OriginService {
+        let service = OriginService::new(self.store.clone(), Node::of(&self.config));
+        match index {
             Some(index) => service.with_index(index),
             None => service,
-        })
+        }
     }
 
     /// Returns what a plugin run in this working copy learns of it, after recording
@@ -429,19 +430,6 @@ impl Workspace {
             repository: self.store.root().to_owned(),
             revision: self.refresh()?.id,
             remote: Self::remote_url(&self.store)?,
-        })
-    }
-
-    /// Returns this node, with its key.
-    fn node(&self) -> Result<Node, WorkspaceError> {
-        Self::node_of(&self.config)
-    }
-
-    /// Returns the node `config` names, with its key.
-    fn node_of(config: &UserConfig) -> Result<Node, WorkspaceError> {
-        Ok(Node {
-            name: config.node().clone(),
-            key: Arc::new(config.node_key()?),
         })
     }
 
@@ -1401,7 +1389,7 @@ impl Workspace {
             since,
             limit: limit.map(|limit| u64::try_from(limit).unwrap_or(u64::MAX)),
         };
-        let log = self.service(None)?.log(&Caller::Owner, &query)?;
+        let log = self.service(None).log(&Caller::Owner, &query)?;
         if target.id() == on {
             for (id, revision) in &stack {
                 let marker = if *id == working_copy.id { '@' } else { '○' };
@@ -1445,7 +1433,7 @@ impl Workspace {
         let change = working_copy.find_change(change)?;
         let flags = self.flags(&working_copy.index, change)?;
         let Revisions { revisions, heads } = self
-            .service(Some(mem::take(&mut working_copy.index)))?
+            .service(Some(mem::take(&mut working_copy.index)))
             .revisions(&Caller::Owner, change)?;
         println!("Change {}{flags}", change.short());
         for RevisionEntry { id, revision } in revisions.iter().rev() {

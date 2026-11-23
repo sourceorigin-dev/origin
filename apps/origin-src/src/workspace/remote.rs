@@ -224,12 +224,12 @@ impl Workspace {
         Ok(self.remote.get_or_init(|| remote).as_ref())
     }
 
-    /// Opens the remote at `url` for the user of `config`, with their token for it
-    /// if they have one. Refuses a repository on a local path that has a remote of
-    /// its own, such as a clone: it only holds the snapshots it read, but syncing
-    /// needs a remote that holds the snapshot of every record.
+    /// Opens the remote at `url` for the user of `config`. Refuses a repository on
+    /// a local path that has a remote of its own, such as a clone: it only holds
+    /// the snapshots it read, but syncing needs a remote that holds the snapshot of
+    /// every record.
     fn open_remote(url: &RemoteUrl, config: &UserConfig) -> Result<Remote, WorkspaceError> {
-        let remote = Remote::open(url, Self::node_of(config)?, url.token(config))?;
+        let remote = Remote::open_for(url, config)?;
         if let Remote::Local(service) = &remote
             && Self::remote_url(service.store())?.is_some()
         {

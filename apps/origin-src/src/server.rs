@@ -94,10 +94,10 @@ impl ServerConfig {
     ///
     /// Fails if the key cannot be read, or generated and saved.
     pub fn node(&self) -> anyhow::Result<Node> {
-        Ok(Node {
-            name: self.node.clone(),
-            key: Arc::new(KeyFile(self.key.clone()).load()?),
-        })
+        Ok(Node::new(
+            self.node.clone(),
+            KeyFile(self.key.clone()).load()?,
+        ))
     }
 
     /// `origin repo create [--admin <principal>]`: creates an empty repository in
@@ -110,7 +110,7 @@ impl ServerConfig {
     /// written.
     pub fn create_repo(&self, root: &Path, admin: Option<&Principal>) -> anyhow::Result<()> {
         let node = self.node()?;
-        let policy = Policy::initial(&node.name, &node.key.public(), admin);
+        let policy = Policy::initial(&node.name, &node.key()?.public(), admin);
         OriginService::create(root.to_owned(), node, &policy)?;
         println!(
             "Created a repository in {}: node:{} is the authority of `policy` and `main`",
@@ -140,7 +140,7 @@ impl ServerConfig {
         ttl: Duration,
     ) -> anyhow::Result<String> {
         let ttl = ttl.min(OriginService::MAX_TOKEN_TTL);
-        Ok(Token::new(principal, scope, ttl).sign(&self.node()?.key))
+        Ok(Token::new(principal, scope, ttl).sign(self.node()?.key()?))
     }
 
     /// `origin serve`: serves the repositories until interrupted, logging failures
@@ -159,7 +159,7 @@ impl ServerConfig {
             .with_writer(std::io::stderr)
             .init();
         let node = self.node()?;
-        let credentials = Credentials::new(node.clone(), Box::new(self.tokens));
+        let credentials = Credentials::new(node.key()?.public(), Box::new(self.tokens));
         let repositories = Repositories::open(self.repos, &node, credentials)?;
         repositories.compact_in_background();
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -351,7 +351,7 @@ mod tests {
         let text = config
             .issue_token("user:agent".parse().unwrap(), Vec::new(), month)
             .unwrap();
-        let token = Token::verify(&text, &config.node().unwrap().key.public()).unwrap();
+        let token = Token::verify(&text, &config.node().unwrap().key().unwrap().public()).unwrap();
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
         let cap = (now + OriginService::MAX_TOKEN_TTL).as_secs();
         assert!(token.expires <= cap && token.expires + 60 > cap);

@@ -517,6 +517,20 @@ fn init_with_a_malformed_key_leaves_no_repository() {
 }
 
 #[test]
+fn only_commands_that_sign_load_the_node_key() {
+    let repo = Repo::new();
+    let key = repo.config().join("node.key");
+    fs::remove_file(&key).unwrap();
+    repo.ok(&["targets"]);
+    assert!(!key.exists(), "reading created a key");
+    fs::write(&key, b"short").unwrap();
+    repo.ok(&["targets"]);
+    repo.ok(&["log", "main"]);
+    let refused = repo.fails(&["land"]);
+    assert!(refused.contains("is not a node key"), "{refused}");
+}
+
+#[test]
 fn only_the_creator_of_a_change_or_admins_abandon_it() {
     let repo = Repo::new();
     repo.write("file", "ada's\n");

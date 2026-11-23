@@ -7,7 +7,13 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[[bin]]
+name = "origin-ci"
+path = "src/main.rs"
+
 [dependencies]
+anyhow.workspace = true
+clap.workspace = true
 origin-platform.workspace = true
 origin-shared.workspace = true
 origin-src.workspace = true

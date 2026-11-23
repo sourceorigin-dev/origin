@@ -17,6 +17,7 @@ use std::io::{self, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process;
+use std::sync::OnceLock;
 
 use origin_platform::{Durability, Native};
 use origin_shared::{InvalidName, NodeKey, Principal, PrincipalName};
@@ -150,7 +151,49 @@ impl UserConfig {
     ///
     /// Fails like [`KeyFile::load`].
     pub fn node_key(&self) -> Result<NodeKey, ConfigError> {
-        KeyFile(self.dir.join("node.key")).load()
+        self.key_file().load()
+    }
+
+    /// Returns the file holding this node's key.
+    #[must_use]
+    pub fn key_file(&self) -> KeyFile {
+        KeyFile(self.dir.join("node.key"))
+    }
+}
+
+/// A node's key: in hand, or in its [`KeyFile`], loaded the first time it's
+/// needed, so a node that never signs never reads or creates the file.
+#[derive(Debug)]
+pub enum LazyKey {
+    /// The key.
+    Loaded(NodeKey),
+    /// The file holding the key, and the key once loaded.
+    File(KeyFile, OnceLock<NodeKey>),
+}
+
+impl From<KeyFile> for LazyKey {
+    fn from(file: KeyFile) -> Self {
+        Self::File(file, OnceLock::new())
+    }
+}
+
+impl LazyKey {
+    /// Returns the key, loading it from its file the first time.
+    ///
+    /// # Errors
+    ///
+    /// Fails like [`KeyFile::load`].
+    pub fn get(&self) -> Result<&NodeKey, ConfigError> {
+        match self {
+            Self::Loaded(key) => Ok(key),
+            Self::File(file, loaded) => {
+                if let Some(key) = loaded.get() {
+                    return Ok(key);
+                }
+                let key = file.load()?;
+                Ok(loaded.get_or_init(|| key))
+            }
+        }
     }
 }
 
