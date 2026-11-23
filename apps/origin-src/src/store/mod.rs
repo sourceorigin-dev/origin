@@ -243,9 +243,7 @@ impl<P: Platform> Store<P> {
     /// failure may not be durable.
     pub fn write_all(&self, objects: &[EncodedObject]) -> Result<usize, StoreError> {
         let batch = self.batch();
-        let written = Self::on_every_core(objects, |chunk| batch.write_all(chunk))
-            .into_iter()
-            .sum::<Result<usize, _>>()?;
+        let written = batch.stage_all(objects)?;
         batch.commit()?;
         Ok(written)
     }
@@ -321,6 +319,24 @@ impl<P: Platform> Store<P> {
     /// Fails if the packs cannot be loaded.
     pub fn contains(&self, id: ObjectId) -> Result<bool, StoreError> {
         Ok(self.path(id).exists() || self.find_packed(id)?.is_some())
+    }
+
+    /// Returns those of `ids` that the store has, in order.
+    ///
+    /// # Errors
+    ///
+    /// Fails like [`Store::contains`].
+    pub fn present<I: Into<ObjectId> + Copy>(
+        &self,
+        ids: impl IntoIterator<Item = I>,
+    ) -> Result<Vec<I>, StoreError> {
+        let mut present = Vec::new();
+        for id in ids {
+            if self.contains(id.into())? {
+                present.push(id);
+            }
+        }
+        Ok(present)
     }
 
     /// Returns when this node stored the object: when its loose file was
@@ -694,11 +710,26 @@ impl<P: Platform> Batch<'_, P> {
         Ok(self.store.packs.find(id).is_some())
     }
 
-    /// Stages each of `objects` in turn, returning how many were new.
-    fn write_all(&self, objects: &[EncodedObject]) -> Result<usize, StoreError> {
-        objects.iter().try_fold(0, |written, object| {
-            Ok(written + usize::from(self.write(object)?))
+    /// Makes `path`, a file or directory written in place, durable before
+    /// anything the batch stages is published.
+    pub(crate) fn sync_first(&self, path: impl Into<PathBuf>) {
+        self.write.sync_with(path);
+    }
+
+    /// Stages `objects` using every core, and returns how many were new, like
+    /// [`Store::write_all`].
+    ///
+    /// # Errors
+    ///
+    /// Fails like [`Batch::write`].
+    pub fn stage_all(&self, objects: &[EncodedObject]) -> Result<usize, StoreError> {
+        Store::<P>::on_every_core(objects, |chunk| {
+            chunk.iter().try_fold(0, |written, object| {
+                Ok(written + usize::from(self.write(object)?))
+            })
         })
+        .into_iter()
+        .sum()
     }
 
     /// Publishes every staged object durably, and appends the new records to

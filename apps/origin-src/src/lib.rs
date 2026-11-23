@@ -20,6 +20,7 @@ pub mod remote;
 pub mod server;
 pub mod service;
 pub mod store;
+pub mod sync;
 pub mod targets;
 pub mod tree;
 pub mod workspace;

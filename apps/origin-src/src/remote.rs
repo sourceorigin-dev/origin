@@ -3,8 +3,8 @@
 //! A remote is a server over HTTP, `http://host[:port]/<repository>`, or a
 //! repository on a local path (a server's repository or a working copy's). This
 //! node serves a local one with an in-process [`OriginService`], so both kinds
-//! answer the same calls and syncing treats them the same. Calls block: an HTTP
-//! remote runs the SDK on its own runtime.
+//! answer the same calls and [`sync`](crate::sync) treats them the same. Calls
+//! block: an HTTP remote runs the SDK on its own runtime.
 
 use std::fmt;
 use std::path::{self, Path, PathBuf};
