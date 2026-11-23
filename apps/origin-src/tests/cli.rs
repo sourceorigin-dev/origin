@@ -2,7 +2,7 @@
 
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::slice;
@@ -208,6 +208,34 @@ fn edit_switches_the_files_to_another_change() {
             .ends_with("A dir/added\nD run.sh\nM shared\n")
     );
     assert!(repo.fails(&["edit", "zz"]).contains("is not a change id"));
+}
+
+#[test]
+fn a_directory_holding_untracked_files_refuses_to_become_a_file() {
+    let repo = Repo::new();
+    repo.write("a", "a file\n");
+    repo.ok(&["describe", "File"]);
+    let file = repo.change();
+    repo.ok(&["new", "Directory"]);
+    fs::remove_file(repo.path("a")).unwrap();
+    repo.write("a/b", "in a directory\n");
+    repo.ok(&["describe", "Directory"]);
+    let pointer = repo.path(".origin/workspace");
+    let revision = fs::read_to_string(&pointer).unwrap();
+    // Another tool's repository in it, which no snapshot tracks.
+    repo.write("a/.git/HEAD", "ref\n");
+
+    let refused = repo.fails(&["edit", &file]);
+    assert!(
+        refused.contains("changed while origin was moving"),
+        "{refused}"
+    );
+    // The files it removed are back, and the working copy stays.
+    assert_eq!(repo.read("a/b"), "in a directory\n");
+    assert_eq!(repo.read("a/.git/HEAD"), "ref\n");
+    let status = repo.ok(&["status"]);
+    assert!(status.contains(" Directory\n"), "{status}");
+    assert_eq!(fs::read_to_string(&pointer).unwrap(), revision);
 }
 
 #[test]
@@ -943,6 +971,31 @@ fn statements_are_promoted_where_their_inputs_are_unchanged() {
         repo.ok(&["gc"])
             .starts_with("Dropped 0 payloads past their retention")
     );
+}
+
+#[test]
+fn a_move_that_fails_takes_its_files_back() {
+    let repo = Repo::new();
+    repo.write("ro/keep", "keep\n");
+    repo.write("ro/new", "new\n");
+    let first = repo.change();
+    repo.ok(&["new"]);
+    let second = repo.change();
+    fs::remove_file(repo.path("ro/new")).unwrap();
+    repo.write("extra", "extra\n");
+    // Moving back removes `extra`, then fails to write in `ro`, unless
+    // this runs as root, who writes there anyway.
+    if fs::metadata(repo.path("extra")).unwrap().uid() == 0 {
+        return;
+    }
+    fs::set_permissions(repo.path("ro"), fs::Permissions::from_mode(0o555)).unwrap();
+    let refused = repo.fails(&["edit", &first]);
+    fs::set_permissions(repo.path("ro"), fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(refused.contains("ro/new"), "{refused}");
+    assert_eq!(repo.read("extra"), "extra\n", "taken back");
+    assert_eq!(repo.change(), second);
+    let status = repo.ok(&["status"]);
+    assert!(status.ends_with("A extra\nD ro/new\n"), "{status}");
 }
 
 #[test]

@@ -135,16 +135,16 @@ impl Workspace {
     /// or the change cannot be written or checked out.
     pub fn new_on(&mut self, target: &TargetName, description: &str) -> Result<(), WorkspaceError> {
         let working_copy = self.refresh()?;
-        self.start_on(target, description, working_copy.revision.snapshot)
+        self.start_on(&working_copy, target, description)
     }
 
     /// Starts a change with `description` on the tip of `target`, and checks it out
-    /// over the files of `files`.
+    /// over the working copy's files.
     fn start_on(
         &mut self,
+        working_copy: &WorkingCopy,
         target: &TargetName,
         description: &str,
-        files: TreeId,
     ) -> Result<(), WorkspaceError> {
         let tip = self
             .store
@@ -161,9 +161,13 @@ impl Workspace {
             author: self.config.user(),
         };
         let encoded = revision.encode();
-        self.write(&[vec![description], vec![encoded.clone()]])?;
-        self.checkout(files, revision.snapshot)?;
-        self.point_at(encoded.id().into())?;
+        let id = encoded.id().into();
+        self.switch_to(
+            working_copy,
+            id,
+            &revision,
+            &[vec![description], vec![encoded]],
+        )?;
         println!("Working copy: {}", self.headline(&revision)?);
         println!("On top of: {}", self.describe_base(revision.base)?);
         Ok(())
@@ -194,7 +198,6 @@ impl Workspace {
         landings: &[Landing],
     ) -> Result<(), WorkspaceError> {
         let revision = &working_copy.revision;
-        let files = revision.snapshot;
         // A change the target already had is as good as landed.
         let landed = |change: ChangeId| {
             landings.iter().any(|landing| match landing {
@@ -205,7 +208,7 @@ impl Workspace {
             })
         };
         if landed(revision.change) {
-            return self.start_on(onto, "", files);
+            return self.start_on(working_copy, onto, "");
         }
         for landing in landings {
             if let Landing::Pending(Pending {
@@ -217,12 +220,9 @@ impl Workspace {
                 && *rebased != working_copy.id
             {
                 let rebased = *rebased;
-                self.checkout(files, self.store.get(rebased)?.snapshot)?;
-                self.point_at(rebased)?;
-                println!(
-                    "Working copy: {}",
-                    self.headline(&self.store.get(rebased)?)?
-                );
+                let revision: Revision = self.store.get(rebased)?;
+                self.switch_to(working_copy, rebased, &revision, &[])?;
+                println!("Working copy: {}", self.headline(&revision)?);
                 return Ok(());
             }
         }
@@ -266,9 +266,10 @@ impl Workspace {
             ..current.clone()
         };
         let encoded = revision.encode();
-        self.write(&[merge.trees, vec![encoded.clone()]])?;
-        self.checkout(current.snapshot, revision.snapshot)?;
-        self.point_at(encoded.id().into())?;
+        // Checking the revision out reads its trees.
+        self.write(&[merge.trees])?;
+        let id = encoded.id().into();
+        self.switch_to(working_copy, id, &revision, &[vec![encoded]])?;
         println!("Working copy: {}", self.headline(&revision)?);
         println!("On top of: {}", self.describe_base(revision.base)?);
         Ok(())
