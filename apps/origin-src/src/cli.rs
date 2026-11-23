@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use clap::error::ErrorKind;
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use origin_shared::policy::KindPattern;
-use origin_shared::{Digest, Inputs, Kind, RepoPath, TargetName, Verdict};
+use origin_shared::{ChangeId, Digest, Inputs, Kind, RepoPath, TargetName, Verdict};
 
 use crate::config::UserConfig;
 use crate::oplog::Actor;
@@ -33,6 +33,19 @@ enum Command {
         /// Where to create it.
         #[arg(default_value = ".")]
         path: PathBuf,
+    },
+    /// Clone a remote repository. Copies the chains of `policy` and of a
+    /// target, and the target's tip, then starts a new change on that tip.
+    /// Other snapshots are fetched when something reads them.
+    Clone {
+        /// The repository: `http://host[:port]/<repository>`, or a path.
+        url: String,
+        /// Where to create the clone: by default, a directory named after the
+        /// repository.
+        path: Option<PathBuf>,
+        /// The target to follow and start the new change on.
+        #[arg(short, long, default_value = "main")]
+        target: TargetName,
     },
     /// Serve repositories over HTTP, acting as their authority.
     Serve {
@@ -168,9 +181,6 @@ enum WorkspaceCommand {
     Target(TargetCommand),
     /// List the targets with their tips, authorities and requirements.
     Targets,
-    /// Move the working copy to where its change went from another workspace,
-    /// or onto its target's new tip, keeping the edits made since.
-    Pull,
     /// Manage workspaces: working copies that share this repository.
     #[command(subcommand)]
     Workspace(WorkspacesCommand),
@@ -180,6 +190,31 @@ enum WorkspaceCommand {
     /// Move this workspace's working copy back to where it was before its
     /// latest operation. Records and targets are not changed.
     Undo,
+    /// Show the remote, or set it.
+    Remote {
+        /// The new remote: `http://host[:port]/<repository>`, or a path.
+        url: Option<String>,
+    },
+    /// Fetch the remote's new acceptances on the followed targets, and the
+    /// records of the changes this repository knows. Changes no files.
+    Fetch {
+        /// Also follow this target.
+        #[arg(long)]
+        target: Vec<TargetName>,
+        /// Also fetch this change, given by its full id.
+        #[arg(long)]
+        change: Vec<ChangeId>,
+    },
+    /// Fetch from the remote, if there is one, then move the working copy to
+    /// where its change went, or onto its target's new tip, keeping the edits
+    /// made since.
+    Pull,
+    /// Send changes to the remote, with the changes below them: their
+    /// revisions, files and statements. Lands nothing.
+    Push {
+        /// The changes to push: the working copy's by default.
+        changes: Vec<String>,
+    },
     /// Print events as they happen, one per line. The first line is the cursor
     /// to resume from. Runs until interrupted.
     Watch {
@@ -454,7 +489,7 @@ impl Cli {
             Command::Repo(RepoCommand::Create { path, config }) => {
                 return ServerConfig::load(&config)?.create_repo(&path);
             }
-            Command::Init { .. } | Command::Workspace(_) => {}
+            Command::Init { .. } | Command::Clone { .. } | Command::Workspace(_) => {}
         }
         let config = UserConfig::load()?;
         // The op log records the command line, without the program's name,
@@ -468,6 +503,9 @@ impl Cli {
         match self.command {
             Command::Init { path } => {
                 Workspace::init(&path, config, &actor)?;
+            }
+            Command::Clone { url, path, target } => {
+                Workspace::clone(&url, path.as_deref(), &target, config, &actor)?;
             }
             Command::Workspace(command) => command.run(config, &actor)?,
             Command::Serve { .. } | Command::Repo(_) => unreachable!("run above"),
@@ -518,7 +556,6 @@ impl WorkspaceCommand {
                 workspace.target_new(&name, &from)?;
             }
             Self::Targets => workspace.targets()?,
-            Self::Pull => workspace.pull()?,
             Self::Workspace(WorkspacesCommand::New { change, path }) => {
                 workspace.add_workspace(change.as_deref(), path.as_deref())?;
             }
@@ -526,6 +563,10 @@ impl WorkspaceCommand {
             Self::Workspace(WorkspacesCommand::Rm { path }) => workspace.remove_workspace(&path)?,
             Self::Op(OpCommand::Log { limit }) => workspace.op_log(limit)?,
             Self::Undo => workspace.undo()?,
+            Self::Remote { url } => workspace.set_remote(url.as_deref())?,
+            Self::Fetch { target, change } => workspace.fetch(&target, &change)?,
+            Self::Pull => workspace.pull()?,
+            Self::Push { changes } => workspace.push(&changes)?,
             Self::Watch {
                 kind,
                 subject,

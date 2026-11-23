@@ -71,6 +71,14 @@ impl Repo {
         repo
     }
 
+    /// Clones `url` as `user`, passing `args` to `clone` as well.
+    pub fn clone(user: &User, url: &str, args: &[&str]) -> Self {
+        let repo = Self::empty(user);
+        let root = repo.root().to_str().unwrap().to_owned();
+        repo.ok(&[&["clone", url, &root], args].concat());
+        repo
+    }
+
     fn empty(user: &User) -> Self {
         Self {
             dir: tempfile::tempdir().unwrap(),
@@ -178,6 +186,14 @@ impl Repo {
         let line = status.lines().next().unwrap();
         let headline = line.strip_prefix("Working copy: ").unwrap();
         headline.split(' ').next().unwrap().to_owned()
+    }
+
+    /// Returns the full id of the working copy's change.
+    pub fn full_change(&self) -> String {
+        let show = self.ok(&["show"]);
+        let line = show.lines().next().unwrap();
+        let change = line.strip_prefix("Change ").unwrap();
+        change.split(' ').next().unwrap().to_owned()
     }
 
     /// Creates a workspace at `path` and returns its change.
@@ -298,6 +314,11 @@ impl Server {
     /// repositories.
     pub fn dir(&self) -> &Path {
         self.dir.path()
+    }
+
+    /// Returns the URL of `demo`.
+    pub fn url(&self) -> String {
+        format!("{}/demo", self.base)
     }
 }
 

@@ -592,6 +592,20 @@ keys, come later.
 
 ## Sync
 
+A repository has at most one remote, named in `.origin/remote` and shared by
+its workspaces. A remote on a local path has no remote of its own, so it holds
+every snapshot. A clone holds the chains of the targets it follows, the records
+of the changes it knows, and only the snapshots it read. When a command needs a
+snapshot the clone lacks, such as for a checkout, it fetches it from the remote,
+skipping what the working copy already holds. Syncing never changes files under
+a running workspace: `pull` is a fetch, then a move of the working copy.
+
+`.origin/remote-cursor` keeps the remote's event cursor as of the last fetch,
+and the generation of the op log it belongs to, so the next fetch only compares
+the changes that moved since. Whenever this repository learns of a change, it
+brings everything the remote has of it, so the changes it knows are complete as
+of that cursor.
+
 - **`clone`** fetches the chains of `policy` and one target (`main` by
   default), then that tip's snapshot. Other snapshots are fetched lazily, when
   a command needs them.
@@ -641,6 +655,9 @@ The changes it compares are those the remote's events name since the last
 fetch (`Sync::moved`), so a fetch that brings nothing costs the same however
 long the history. Only without a cursor, or once it expired, does it compare
 every change this node knows.
+
+Snapshots are fetched when something reads them, such as a checkout, so a
+clone fetches a single snapshot, its target's tip.
 
 ### Pushing
 
