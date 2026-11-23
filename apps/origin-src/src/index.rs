@@ -265,14 +265,17 @@ impl Index {
 
     /// Adds the published records of the op log entries after the last one
     /// indexed, and appends them to `index/log`, as the module docs describe.
-    /// Returns `false` if the op log no longer has those entries: then only a
-    /// rebuild can catch up.
+    /// Returns `false` if the op log no longer has those entries, or damage
+    /// lost some of them: then only a rebuild can catch up.
     fn catch_up<P: Platform>(&mut self, store: &Store<P>) -> Result<bool, StoreError> {
         let oplog = store.oplog();
         let read = match oplog.after(self.applied) {
             Err(StoreError::Expired { .. }) => return Ok(false),
             read => read?,
         };
+        if read.damage.is_some() {
+            return Ok(false);
+        }
         let Some(last) = read.entries.last() else {
             return Ok(true);
         };
@@ -901,6 +904,7 @@ mod tests {
     use origin_shared::{Base, BlobId, Inputs, Kind, Record, Tree, Verdict};
 
     use super::*;
+    use crate::oplog::FramePart;
 
     fn store() -> (tempfile::TempDir, Store) {
         let dir = tempfile::tempdir().unwrap();
@@ -1216,6 +1220,27 @@ mod tests {
         assert!(index.catch_up(&store).unwrap());
         let reopened = Index::open(&store).unwrap();
         assert_eq!(reopened.heads(change(1)), [revision_id(&written)]);
+    }
+
+    #[test]
+    fn op_log_damage_rebuilds_the_index() {
+        let (_dir, store) = store();
+        Index::open(&store).unwrap();
+        let written: Vec<_> = (1..=3)
+            .map(|seed| revision(change(seed), &[], "lost"))
+            .collect();
+        for revision in &written {
+            store.write_all(slice::from_ref(revision)).unwrap();
+        }
+        // The entry of the second revision: the store has it, the op log
+        // no longer says so.
+        store
+            .oplog()
+            .damage(store.oplog().last_seq().unwrap() - 1, FramePart::Check);
+        let index = Index::open(&store).unwrap();
+        for (seed, revision) in (1..).zip(&written) {
+            assert_eq!(index.heads(change(seed)), [revision_id(revision)]);
+        }
     }
 
     #[test]
