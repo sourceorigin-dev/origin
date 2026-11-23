@@ -4,16 +4,18 @@ use std::process::ExitCode;
 
 use anyhow::{Context as _, Result, bail};
 use clap::{Parser, Subcommand};
+use origin_ci::checks::Check;
 use origin_ci::runner::{Outcome, Runner};
 use origin_ci::state::State;
 use origin_shared::api::At;
-use origin_shared::{ChangeId, RecordId, RevisionId};
+use origin_shared::{ChangeId, RecordId, RepoPath, RevisionId};
 use origin_src::config::UserConfig;
 use origin_src::output;
 use origin_src::plugin::Context;
 use origin_src::remote::{Remote, RemoteUrl};
 
-/// Run the checks of `checks.toml` and issue their results.
+/// Run the checks of `checks.toml`, or a command as a check, and issue
+/// their results.
 #[derive(Debug, Parser)]
 #[command(name = "origin ci", version)]
 struct Cli {
@@ -32,6 +34,31 @@ enum Command {
         /// head, or a revision's full id.
         #[arg(default_value = "@")]
         rev: String,
+    },
+    /// Run a command as a check of a revision, the way `run` runs the checks
+    /// of `checks.toml`: in a checkout of the revision, issuing a `ci.<name>`
+    /// result as you that supersedes your previous one. Runs even if a result
+    /// already covers it. Fails if the check fails.
+    Exec {
+        /// The check's name: its results are of the kind `ci.<name>`.
+        name: String,
+        /// The revision, as for `run`.
+        #[arg(long, default_value = "@")]
+        rev: String,
+        /// The files and directories the check reads: the whole snapshot by
+        /// default. Its result is promoted to revisions where they are the same.
+        #[arg(long, num_args = 1..)]
+        inputs: Vec<RepoPath>,
+        /// A shell command whose output identifies the tools it runs with.
+        #[arg(long)]
+        toolchain: Option<String>,
+        /// The check also reads something outside the snapshot, such as the
+        /// network, so its result is never promoted.
+        #[arg(long)]
+        external: bool,
+        /// The command, after `--`. Its words are quoted for `sh -c`.
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
     },
 }
 
@@ -55,6 +82,18 @@ impl Cli {
                 let (runner, subject) = Self::here(context.as_ref(), &config, "run", &rev)?;
                 let outcomes = runner.check(subject, &At::Record(subject), None)?;
                 Ok(Self::report(&outcomes))
+            }
+            Command::Exec {
+                name,
+                rev,
+                inputs,
+                toolchain,
+                external,
+                command,
+            } => {
+                let (runner, subject) = Self::here(context.as_ref(), &config, "exec", &rev)?;
+                let check = Check::adhoc(&name, &command, inputs, toolchain, external)?;
+                Ok(Self::report(&[runner.exec(subject, &check)?]))
             }
         }
     }

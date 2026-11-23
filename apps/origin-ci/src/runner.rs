@@ -45,6 +45,15 @@ pub struct Runner {
     snapshots: Mutex<Vec<Arc<Snapshot>>>,
 }
 
+/// When a check runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Rerun {
+    /// Only if no result by the issuer already covers the record.
+    Uncovered,
+    /// Always, because it was asked for.
+    Always,
+}
+
 /// What became of one check.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
@@ -166,8 +175,23 @@ impl Runner {
                 external: check.external || foreign,
                 ..check.clone()
             })
-            .map(|check| self.run(&snapshot, subject, &check, &statements))
+            .map(|check| self.run(&snapshot, subject, &check, &statements, Rerun::Uncovered))
             .collect()
+    }
+
+    /// Runs `check` on `subject`, the way [`Runner::check`] runs the checks of
+    /// a `checks.toml`, for a check given rather than read from one. It always
+    /// runs, even where a result by the issuer covers it, since it was asked
+    /// for. The result supersedes the issuer's previous result of its kind.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the subject has no snapshot, the command cannot be started,
+    /// the toolchain command fails, or the remote refuses.
+    pub fn exec(&self, subject: RecordId, check: &Check) -> Result<Outcome, RunError> {
+        let snapshot = self.fetch_snapshot(subject)?;
+        let statements = self.claims(subject)?;
+        self.run(&snapshot, subject, check, &statements, Rerun::Always)
     }
 
     /// Returns the acceptance at the tip of `target`.
@@ -330,14 +354,15 @@ impl Runner {
             .collect()
     }
 
-    /// Runs `check` in a checkout of `snapshot`, unless one of `statements`
-    /// about `subject` already covers it.
+    /// Runs `check` in a checkout of `snapshot`. Skips it if `rerun` allows
+    /// that and one of `statements` about `subject` already covers it.
     fn run(
         &self,
         snapshot: &Snapshot,
         subject: RecordId,
         check: &Check,
         statements: &[(Annotation, Statement)],
+        rerun: Rerun,
     ) -> Result<Outcome, RunError> {
         let mut checkout = None;
         let toolchain = match &check.toolchain {
@@ -352,7 +377,7 @@ impl Runner {
         let covering = statements.iter().find(|(_, claim)| {
             mine(claim) && !claim.withdraws() && claim.inputs.as_ref() == Some(&inputs)
         });
-        if let Some((annotation, claim)) = covering {
+        if let Some((annotation, claim)) = covering.filter(|_| rerun == Rerun::Uncovered) {
             return Ok(Outcome::Covered {
                 kind: check.kind.clone(),
                 verdict: claim.verdict,
