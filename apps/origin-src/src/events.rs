@@ -32,6 +32,7 @@ use origin_platform::{Native, Platform};
 use origin_shared::event::{Event, EventKind, Filter, Page};
 use origin_shared::landing::{Blocked, Pending};
 use origin_shared::{Object, ObjectId};
+use parking_lot::{Condvar, Mutex};
 
 use crate::index;
 use crate::oplog::{Effect, Entry};
@@ -42,6 +43,39 @@ use crate::store::{Store, StoreError};
 #[derive(Debug)]
 pub struct Events<'a, P = Native> {
     store: &'a Store<P>,
+    /// Wakes [`Events::wait`] as soon as this process writes, if set.
+    /// Otherwise it only polls.
+    wakeup: Option<&'a Wakeup>,
+}
+
+/// Wakes the readers in this process that wait for events as soon as the
+/// process writes, instead of at their next poll of the op log. Writes from
+/// other processes are still seen only at the next poll.
+#[derive(Debug, Default)]
+pub struct Wakeup {
+    /// How many writes this process has made.
+    writes: Mutex<u64>,
+    written: Condvar,
+}
+
+impl Wakeup {
+    /// Wakes every waiting reader. Call it after this process writes.
+    pub fn notify(&self) {
+        *self.writes.lock() += 1;
+        self.written.notify_all();
+    }
+
+    /// How many writes this process has made so far.
+    fn writes(&self) -> u64 {
+        *self.writes.lock()
+    }
+
+    /// Waits up to `timeout`, or until the write count is no longer `seen`.
+    fn sleep(&self, seen: u64, timeout: Duration) {
+        let mut writes = self.writes.lock();
+        self.written
+            .wait_while_for(&mut writes, |writes| *writes == seen, timeout);
+    }
 }
 
 impl<'a, P: Platform> Events<'a, P> {
@@ -50,7 +84,19 @@ impl<'a, P: Platform> Events<'a, P> {
 
     /// Creates a reader of the events of `store`.
     pub fn new(store: &'a Store<P>) -> Self {
-        Self { store }
+        Self {
+            store,
+            wakeup: None,
+        }
+    }
+
+    /// Returns these events with [`Events::wait`] also woken by `wakeup`.
+    #[must_use]
+    pub fn waking_on(self, wakeup: &'a Wakeup) -> Self {
+        Self {
+            wakeup: Some(wakeup),
+            ..self
+        }
     }
 
     /// Returns the cursor after every event so far. Reading from it delivers
@@ -100,8 +146,10 @@ impl<'a, P: Platform> Events<'a, P> {
         Ok(page)
     }
 
-    /// Like [`Events::after`], but waits up to `timeout` for events, reading
-    /// the op log every [`Events::POLL`]. Returns an empty page if none came.
+    /// Like [`Events::after`], but waits up to `timeout` for events. It reads
+    /// the op log every [`Events::POLL`], and also as soon as the [`Wakeup`],
+    /// if any, reports a write by this process. Returns an empty page if none
+    /// came.
     ///
     /// # Errors
     ///
@@ -116,6 +164,8 @@ impl<'a, P: Platform> Events<'a, P> {
         let start = Instant::now();
         let mut cursor = cursor;
         loop {
+            // Read before the op log, so no write after it is missed.
+            let seen = self.wakeup.map(Wakeup::writes);
             let page = self.after(cursor, filter, limit)?;
             let left = timeout.saturating_sub(start.elapsed());
             if !page.events.is_empty() || left.is_zero() {
@@ -123,7 +173,11 @@ impl<'a, P: Platform> Events<'a, P> {
             }
             // Entries with no matching events are read past.
             cursor = page.next;
-            thread::sleep(Self::POLL.min(left));
+            let pause = Self::POLL.min(left);
+            match (self.wakeup, seen) {
+                (Some(wakeup), Some(seen)) => wakeup.sleep(seen, pause),
+                _ => thread::sleep(pause),
+            }
         }
     }
 

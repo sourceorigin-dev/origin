@@ -9,7 +9,6 @@ use std::str::FromStr;
 use anyhow::{Context, Result};
 use clap::error::ErrorKind;
 use clap::{Args, CommandFactory, Parser, Subcommand};
-use origin_shared::event::Filter;
 use origin_shared::policy::KindPattern;
 use origin_shared::{Digest, Inputs, Kind, RepoPath, TargetName, Verdict};
 
@@ -498,13 +497,7 @@ impl WorkspaceCommand {
                 kind,
                 subject,
                 since,
-            } => workspace.watch(
-                &Filter {
-                    kinds: kind,
-                    subjects: subject,
-                },
-                since,
-            )?,
+            } => workspace.watch(kind, subject, since)?,
         }
         Ok(())
     }

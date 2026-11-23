@@ -16,16 +16,16 @@
 //! doesn't diverge.
 
 use std::collections::{BTreeMap, HashSet};
-use std::time::Duration;
 
-use origin_shared::event::Filter;
+use origin_shared::api::{EventsQuery, List};
 use origin_shared::landing::Proposal;
-use origin_shared::{Record, RecordId, Revision, RevisionId};
+use origin_shared::policy::KindPattern;
+use origin_shared::{Period, Record, RecordId, Revision, RevisionId};
 
 use super::{Workspace, WorkspaceError};
-use crate::events::Events;
 use crate::index;
 use crate::oplog::{Effect, Entry, Move, Why};
+use crate::service::{Caller, OriginService};
 
 impl Workspace {
     /// `origin op log [-n <limit>]`: prints the latest operations of every
@@ -205,24 +205,33 @@ impl Workspace {
     }
 
     /// `origin watch [--kind <kind>]... [--subject <subject>]... [--since
-    /// <cursor>]`: prints the events that pass `filter` as they happen, one per
-    /// line, from `since`, or from now. Runs until interrupted.
+    /// <cursor>]`: prints the events of those kinds about those subjects as they
+    /// happen, one per line, from `since`, or from now. Without kinds or subjects,
+    /// prints every event. Runs until interrupted.
     ///
     /// # Errors
     ///
     /// Fails if the cursor expired, or the op log or a record cannot be read.
-    pub fn watch(&self, filter: &Filter, since: Option<u64>) -> Result<(), WorkspaceError> {
-        let events = Events::new(&self.store);
-        let mut cursor = match since {
-            Some(since) => since,
-            None => events.end()?,
+    pub fn watch(
+        &self,
+        kinds: Vec<KindPattern>,
+        subjects: Vec<String>,
+        since: Option<u64>,
+    ) -> Result<(), WorkspaceError> {
+        let service = self.service(None)?;
+        let mut query = EventsQuery {
+            cursor: since,
+            wait: Some(Period::from_secs(OriginService::MAX_WAIT.as_secs())),
+            limit: Some(256),
+            kind: List(kinds),
+            subject: List(subjects),
         };
         loop {
-            let page = events.wait(cursor, filter, 256, Duration::from_secs(60))?;
+            let page = service.events(&Caller::Owner, &query)?;
             for event in &page.events {
                 println!("{event}");
             }
-            cursor = page.next;
+            query.cursor = Some(page.next);
         }
     }
 }
