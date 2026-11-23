@@ -2,8 +2,8 @@
 //!
 //! - **Fetching** brings each followed target's chain after the last
 //!   acceptance this node holds, verified against its governing policy
-//!   (`docs/design.md`). It then compares the records of changes with the
-//!   remote's, by id, and fetches the missing ones and what they refer to.
+//!   (`docs/design.md`). It then fetches the missing records of the changes
+//!   that moved since the last fetch ([`Sync::moved`]), and what they refer to.
 //! - Snapshots are not fetched with records: [`Sync::need`] fetches one when
 //!   something reads it, such as a checkout. [`Store::fetching`] marks it
 //!   meanwhile, so an interrupted fetch is redone, not taken for a whole one.
@@ -16,15 +16,19 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::mem;
 
 use origin_platform::Native;
-use origin_shared::api::{FetchRecords, FetchSnapshot, InventoryRequest, LogQuery};
+use origin_shared::api::{
+    ErrorCode, EventsQuery, FetchRecords, FetchSnapshot, InventoryRequest, List, LogQuery,
+};
+use origin_shared::event::EventKind;
 use origin_shared::object::{BadSignature, DecodeError};
 use origin_shared::pack::Part;
 use origin_shared::{
     Acceptance, AcceptanceId, ChangeId, EncodedObject, Head, Object, ObjectId, ObjectKind,
-    Principal, PrincipalName, Record, Revision, TargetName, TreeId,
+    Principal, PrincipalName, Record, RecordId, Revision, TargetName, TreeId,
 };
 
 use crate::annotations::Annotations;
+use crate::index::Index;
 use crate::policy::{Policy, PolicyError};
 use crate::remote::{Remote, RemoteError};
 use crate::service::Dependencies;
@@ -59,6 +63,39 @@ pub struct Fetched {
     pub statements: usize,
 }
 
+/// What a fetch did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Fetch {
+    /// The targets whose chains it extended.
+    pub advanced: Vec<Advanced>,
+    /// The records it fetched.
+    pub fetched: Fetched,
+    /// The remote's event cursor to fetch from next time.
+    pub cursor: Cursor,
+}
+
+/// A position in the remote's events: a sequence number of its op log. It
+/// only means something in the op log of the same generation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Cursor {
+    /// The generation of the remote's op log.
+    pub generation: String,
+    /// The sequence number to read after.
+    pub next: u64,
+}
+
+/// What the remote's events say moved since a cursor.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Moved {
+    /// The remote's cursor after those events: where the next fetch reads
+    /// from.
+    pub cursor: Cursor,
+    /// The changes whose revisions or statements the events name, or `None` if
+    /// the events since the cursor are unknown: there was no cursor, the remote
+    /// no longer has those events, or the cursor is from another op log.
+    pub changes: Option<HashSet<ChangeId>>,
+}
+
 /// A target's new acceptances, verified and ready to be appended.
 struct Chain {
     target: TargetName,
@@ -70,6 +107,10 @@ struct Chain {
 }
 
 impl<'a> Sync<'a> {
+    /// The most events one page of [`Sync::moved`] asks for: as many as a
+    /// server sends.
+    const EVENTS: u32 = 1024;
+
     /// Syncs `store` with `remote`, as the node `node`.
     pub fn new(store: &'a Store, remote: &'a Remote, node: PrincipalName) -> Self {
         Self {
@@ -77,6 +118,46 @@ impl<'a> Sync<'a> {
             remote,
             node: Principal::Node(node),
         }
+    }
+
+    /// Fetches as the module docs describe: the chains of the targets this node
+    /// follows and of `targets`, then the records of `changes` and of the
+    /// changes this node knows that moved since `cursor` (the remote's event
+    /// cursor as of the last fetch). Without a cursor, fetches the records of
+    /// every change it knows.
+    ///
+    /// # Errors
+    ///
+    /// Fails like [`Sync::fetch_chains`] and [`Sync::fetch_changes`].
+    pub fn fetch(
+        &self,
+        targets: &[TargetName],
+        changes: &[ChangeId],
+        cursor: Option<&Cursor>,
+    ) -> Result<Fetch, SyncError> {
+        // INVARIANT: read first, so what moves while this fetches is fetched again.
+        let moved = self.moved(cursor)?;
+        let (advanced, landed) = self.chains(targets)?;
+        let mut wanted: Vec<ChangeId> = match &moved.changes {
+            Some(moved) if moved.is_empty() => Vec::new(),
+            Some(moved) => {
+                let index = Index::open(self.store)?;
+                moved
+                    .iter()
+                    .copied()
+                    .filter(|&change| !index.revisions(change).is_empty())
+                    .collect()
+            }
+            None => Index::open(self.store)?.changes().collect(),
+        };
+        wanted.extend(changes.iter().chain(&landed));
+        wanted.sort_unstable();
+        wanted.dedup();
+        Ok(Fetch {
+            advanced,
+            fetched: self.fetch_changes(&wanted)?,
+            cursor: moved.cursor,
+        })
     }
 
     /// Fetches the chains of `policy`, of the targets this node holds, and of
@@ -280,6 +361,121 @@ impl<'a> Sync<'a> {
         let on_chain = body.target == TargetName::POLICY.id()
             && self.store.acceptance_at(body.target, body.seq)? == Some(id);
         Ok(on_chain.then_some(body.state))
+    }
+
+    /// Returns the remote's cursor after its events since `since`, and the
+    /// changes those events say moved: those with a new revision, or a
+    /// statement issued about them or about a statement about them. Without
+    /// `since`, or if the remote no longer has those events, or its op log is
+    /// of another generation (as after a restore), returns the remote's current
+    /// cursor and no changes: every change may have moved.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the remote or the store fails.
+    pub fn moved(&self, since: Option<&Cursor>) -> Result<Moved, SyncError> {
+        let kinds = ["revision.created", "statement.issued"]
+            .into_iter()
+            .filter_map(|kind| kind.parse().ok())
+            .collect();
+        let mut query = EventsQuery {
+            kind: List(kinds),
+            limit: Some(Self::EVENTS),
+            ..EventsQuery::default()
+        };
+        let everything = |query: &mut EventsQuery| {
+            query.cursor = None;
+            query.generation = None;
+            let page = self.remote.events(query)?;
+            Ok(Moved {
+                cursor: Cursor {
+                    generation: page.generation,
+                    next: page.next,
+                },
+                changes: None,
+            })
+        };
+        let Some(since) = since else {
+            return everything(&mut query);
+        };
+        let mut cursor = since.clone();
+        let mut events = Vec::new();
+        loop {
+            query.cursor = Some(cursor.next);
+            query.generation = Some(cursor.generation.clone());
+            let page = match self.remote.events(&query) {
+                Err(error) if error.code() == Some(ErrorCode::Expired) => {
+                    return everything(&mut query);
+                }
+                page => page?,
+            };
+            cursor.next = page.next;
+            let last = page.events.len() < Self::EVENTS as usize;
+            events.extend(page.events.into_iter().map(|event| event.kind));
+            if last {
+                break;
+            }
+        }
+        Ok(Moved {
+            cursor,
+            changes: Some(self.changes_moved(&events)?),
+        })
+    }
+
+    /// Returns the changes `events` name, as [`Sync::moved`] describes. A
+    /// statement is traced to its subject through the events, then through this
+    /// node's records. A statement about a record this node doesn't know is
+    /// about no change it knows.
+    fn changes_moved(&self, events: &[EventKind]) -> Result<HashSet<ChangeId>, SyncError> {
+        let mut changes = HashSet::new();
+        let mut revisions = HashMap::new();
+        let mut subjects = HashMap::new();
+        for event in events {
+            match *event {
+                EventKind::RevisionCreated {
+                    revision, change, ..
+                } => {
+                    changes.insert(change);
+                    revisions.insert(revision, change);
+                }
+                EventKind::StatementIssued {
+                    statement, subject, ..
+                } => {
+                    subjects.insert(statement, subject);
+                }
+                _ => {}
+            }
+        }
+        for &subject in subjects.values() {
+            let mut subject = subject;
+            let change = loop {
+                match subject {
+                    RecordId::Revision(id) => match revisions.get(&id) {
+                        Some(&change) => break Some(change),
+                        None => break self.stored(id)?.map(|revision| revision.change),
+                    },
+                    RecordId::Statement(id) => match subjects.get(&id) {
+                        Some(&next) if next != subject => subject = next,
+                        _ => match self.stored(id)? {
+                            Some(statement) => subject = statement.subject,
+                            None => break None,
+                        },
+                    },
+                    RecordId::Acceptance(_) | RecordId::Snapshot(_) => break None,
+                }
+            };
+            changes.extend(change);
+        }
+        Ok(changes)
+    }
+
+    /// Returns the record `id` names, if this node has it.
+    fn stored<I: origin_shared::TypedId>(&self, id: I) -> Result<Option<I::Record>, StoreError> {
+        match self.store.get(id) {
+            Ok(record) => Ok(Some(record)),
+            Err(StoreError::NotFound(_)) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     /// Fetches the records of `changes` that the remote has and this node

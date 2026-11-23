@@ -712,9 +712,16 @@ impl OriginService {
     ///
     /// # Errors
     ///
-    /// Fails if the op log no longer keeps the events after the cursor, or if the
-    /// op log or a record cannot be read.
+    /// Fails if the op log no longer keeps the events after the cursor, or belongs
+    /// to another generation than the query names, or if the op log or a record
+    /// cannot be read.
     pub fn events(&self, _caller: &Caller, query: &EventsQuery) -> Result<Page, ServiceError> {
+        let generation = self.store.oplog().generation()?;
+        if let Some(theirs) = &query.generation
+            && *theirs != generation
+        {
+            return Err(ServiceError::OtherLog(theirs.clone()));
+        }
         let events = Events::new(&self.store).waking_on(&self.wakeup);
         let cursor = match query.cursor {
             Some(cursor) => cursor,
@@ -731,7 +738,8 @@ impl OriginService {
         let wait = query
             .wait
             .map_or(Duration::ZERO, origin_shared::Period::duration);
-        Ok(events.wait(cursor, &filter, limit, wait.min(Self::MAX_WAIT))?)
+        let page = events.wait(cursor, &filter, limit, wait.min(Self::MAX_WAIT))?;
+        Ok(Page { generation, ..page })
     }
 }
 
@@ -946,6 +954,9 @@ pub enum ServiceError {
         /// The change's heads now.
         heads: Vec<origin_shared::RevisionId>,
     },
+    /// An events cursor belongs to another op log than the repository's.
+    #[error("the cursor is of another op log, generation {0}: read from the end")]
+    OtherLog(String),
     /// A put statement the repository doesn't accept: a promotion that doesn't
     /// match its original.
     #[error("statement {} cannot be put", .id.short())]
@@ -986,6 +997,7 @@ impl ServiceError {
                 _ => ErrorCode::BadRequest,
             },
             Self::Moved { .. } => ErrorCode::Conflict,
+            Self::OtherLog(_) => ErrorCode::Expired,
             Self::Land(error) => match error {
                 LandError::UnknownTarget(_) | LandError::UnknownChange(_) => ErrorCode::NotFound,
                 LandError::TargetExists(_)

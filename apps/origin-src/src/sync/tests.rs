@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use origin_platform::Native;
-use origin_shared::event::{EventKind, Filter};
+use origin_shared::event::Filter;
 use origin_shared::pack::Pack;
-use origin_shared::{AcceptanceBody, Base, NodeKey, RepoPath};
+use origin_shared::{AcceptanceBody, Base, NodeKey, RepoPath, Statement};
 
 use super::*;
 use crate::events::Events;
@@ -48,6 +48,10 @@ impl Client {
     fn sync(&self) -> Sync<'_> {
         Sync::new(&self.store, &self.remote, "laptop".parse().unwrap())
     }
+}
+
+fn main_tip(store: &Store) -> Base {
+    Base::Acceptance(store.head(&TargetName::MAIN).unwrap().unwrap().acceptance)
 }
 
 /// Writes to `store` a snapshot of a `policy.toml` that makes `key` the key
@@ -371,4 +375,58 @@ fn interrupted_snapshot_fetches_are_fetched_again() {
     assert!(client.store.diff(empty, snapshot).is_err());
     client.sync().repair(snapshot).unwrap();
     assert_eq!(client.store.diff(empty, snapshot).unwrap().len(), 1);
+}
+
+#[test]
+fn the_remote_events_say_which_changes_moved() {
+    let server = Repo::new(MAIN_RULES);
+    let first = server.change_on_main(1, &[("a", "a")]);
+    let second = server.change_on_main(2, &[("b", "b")]);
+    let client = Client::new(&server);
+    let both = [1, 2].map(|change| ChangeId::from_bytes([change; 16]));
+    client.sync().fetch_changes(&both).unwrap();
+    let moved = client.sync().moved(None).unwrap();
+    assert_eq!(moved.changes, None, "without a cursor, any change may have");
+    let cursor = moved.cursor;
+    let nothing = client.sync().moved(Some(&cursor)).unwrap();
+    assert_eq!(nothing.changes, Some(HashSet::new()));
+    assert_eq!(nothing.cursor, cursor);
+
+    let annotations = server.annotations();
+    let result = annotations
+        .issue(&ci_test(second, "node:ci"), None)
+        .unwrap();
+    let flaky = Statement {
+        subject: RecordId::Statement(result),
+        kind: "flaky".parse().unwrap(),
+        verdict: None,
+        inputs: None,
+        ..ci_test(second, "user:ada")
+    };
+    annotations.issue(&flaky, None).unwrap();
+    let tip = main_tip(&server.store);
+    server.revision(1, &[first], tip, &[("a", "again")]);
+    let moved = client.sync().moved(Some(&cursor)).unwrap();
+    assert_eq!(moved.changes, Some(HashSet::from(both)));
+    assert!(moved.cursor.next > cursor.next);
+}
+
+#[test]
+fn cursors_of_another_op_log_read_everything() {
+    let server = Repo::new(MAIN_RULES);
+    let first = server.change_on_main(1, &[("a", "a")]);
+    let change = ChangeId::from_bytes([1; 16]);
+    let client = Client::new(&server);
+    let fetch = client
+        .sync()
+        .fetch(&[TargetName::MAIN], &[change], None)
+        .unwrap();
+    let cursor = Cursor {
+        generation: "restored".to_owned(),
+        next: fetch.cursor.next + 10_000,
+    };
+    let newer = server.revision(1, &[first], main_tip(&server.store), &[("a", "new")]);
+    let fetch = client.sync().fetch(&[], &[], Some(&cursor)).unwrap();
+    assert!(client.store.contains(newer.into()).unwrap());
+    assert_ne!(fetch.cursor.generation, cursor.generation);
 }

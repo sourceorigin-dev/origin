@@ -183,7 +183,8 @@ fn unpublished_entries_hold_back_later_events_while_writes_are_in_progress() {
         held,
         Page {
             events: Vec::new(),
-            next: crashed - 1
+            next: crashed - 1,
+            ..Page::default()
         },
         "it may be in progress"
     );
@@ -246,7 +247,8 @@ fn waiting_returns_as_soon_as_an_event_arrives() {
         empty,
         Page {
             events: Vec::new(),
-            next: end
+            next: end,
+            ..Page::default()
         }
     );
     thread::scope(|scope| {
