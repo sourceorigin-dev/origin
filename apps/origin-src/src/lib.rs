@@ -11,6 +11,7 @@ pub mod fixture;
 pub mod index;
 pub mod output;
 pub mod policy;
+pub mod queue;
 pub mod store;
 pub mod targets;
 pub mod tree;
