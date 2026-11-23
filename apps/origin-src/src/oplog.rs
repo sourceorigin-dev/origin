@@ -10,9 +10,10 @@
 //! - a working copy moving, by recording a draft or by a command.
 //!
 //! Each entry has a sequence number, one more than the entry before it, which
-//! never changes. The entries one command run appends form an operation,
-//! numbered by the sequence number of its first entry. `origin op log` shows
-//! operations, and `origin undo` takes them back.
+//! never changes. It is the cursor of the [event stream](crate::events). The
+//! entries one command run appends form an operation, numbered by the sequence
+//! number of its first entry. `origin op log` shows operations, and
+//! `origin undo` takes them back.
 //!
 //! ```text
 //! .origin/oplog/
@@ -31,7 +32,9 @@
 //! ([`DurableWrite::sync_with`]), so logging costs no extra sync. Before
 //! appending its first entry, the writer creates and locks `writers/<n>`,
 //! where `n` is that entry's sequence number; every entry names its writer.
-//! Once the write is published, the writer removes the file.
+//! Once the write is published, the writer removes the file. A target's
+//! `target.advanced` event comes from the entry logged when its head moves,
+//! not from the entry that wrote the acceptance.
 //!
 //! The [index] catches up from the entries, so writers don't
 //! update it.

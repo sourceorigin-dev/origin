@@ -356,9 +356,10 @@ impl<P: Platform> Store<P> {
         Ok(id)
     }
 
-    /// Durably replaces the head of a target, and logs that it advanced.
-    /// Publishing the first acceptance creates the target: its name is written
-    /// too, and its directory made durable.
+    /// Durably replaces the head of a target, and logs that it advanced. The
+    /// target's `target.advanced` event comes from that entry. Publishing the
+    /// first acceptance creates the target: its name is written too, and its
+    /// directory made durable.
     fn publish(
         &self,
         files: &TargetFiles,

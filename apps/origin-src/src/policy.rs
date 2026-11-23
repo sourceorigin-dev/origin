@@ -66,7 +66,7 @@ struct TargetRules {
 
 /// A statement that landing needs: of `kind`, with `verdict`, from one of
 /// `issuer`, about what lands.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Requirement {
     /// The statement's kind.
     pub kind: Kind,
@@ -78,7 +78,7 @@ pub struct Requirement {
 
 /// One user or node, or the members of a group: `user:alice`,
 /// `node:ci-1` or `group:runners`.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Principals {
     /// A user or a node.
     One(Principal),
@@ -567,9 +567,10 @@ impl TryFrom<BTreeMap<String, String>> for Retention {
     }
 }
 
-/// The kinds a retention rule applies to.
+/// A pattern of statement kinds, as retention rules and
+/// `origin watch --kind` write them.
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum KindPattern {
+pub enum KindPattern {
     /// `*`: every kind.
     Any,
     /// `ci.*`: the kinds under a prefix, but not the prefix itself.
@@ -587,6 +588,12 @@ impl KindPattern {
             Self::Prefix(prefix) => prefix.as_str() == "core" || prefix.is_reserved(),
             Self::Exact(kind) => kind.is_reserved(),
         }
+    }
+
+    /// Whether the pattern matches `kind`.
+    #[must_use]
+    pub fn matches(&self, kind: &Kind) -> bool {
+        self.specificity(kind).is_some()
     }
 
     /// How specifically the pattern matches `kind`, or `None` if it does not
