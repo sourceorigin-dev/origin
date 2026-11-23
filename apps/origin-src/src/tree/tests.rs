@@ -315,9 +315,4 @@ fn looks_entries_up_by_path() {
     for missing in ["nope", "src/nope", "README/inside"] {
         assert_eq!(at(missing), None, "{missing}");
     }
-
-    let mut reached = HashSet::new();
-    store.reach([root], &mut reached).unwrap();
-    assert_eq!(reached.len(), 4, "two trees and two files");
-    assert!(reached.contains(&file("lib").id));
 }

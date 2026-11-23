@@ -67,7 +67,7 @@ endpoints! {
 
     impl Repo {
         /// Fetches records by id, in the order requested. Each record is followed
-        /// by its blob if the server has it: a revision's description or a
+        /// by its attachment if the server has it: a revision's description or a
         /// statement's payload. A part that stops short holds the records up to the
         /// last one it includes.
         fn fetch_records(request: &FetchRecords) -> Part =

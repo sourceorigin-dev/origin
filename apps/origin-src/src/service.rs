@@ -32,7 +32,7 @@ use origin_shared::landing::{Pending, Proposal};
 use origin_shared::object::DecodeError;
 use origin_shared::pack::{Pack, Packer, Part};
 use origin_shared::{
-    Base, ChangeId, Head, NodeKey, Object, ObjectId, ObjectKind, Principal, PrincipalName,
+    Base, ChangeId, Head, Kind, NodeKey, Object, ObjectId, ObjectKind, Principal, PrincipalName,
     RecordId, Statement, StatementId, TargetName, TreeId,
 };
 use parking_lot::{Condvar, Mutex, MutexGuard};
@@ -206,18 +206,18 @@ impl OriginService {
     }
 
     /// Returns the records `ids` name, in that order, as a pack: revisions,
-    /// statements and acceptances. Each is followed by the blob it carries, if the
-    /// repository has it: a revision's description or a statement's payload.
+    /// statements and acceptances. Each is followed by the attachment it carries,
+    /// if the repository has it: a revision's description or a statement's payload.
     /// Snapshots are fetched with [`OriginService::snapshot`] instead.
     ///
     /// The pack stops short at [`Pack::LIMIT`], before a record that doesn't fit
-    /// with its blob. To get the rest, ask again for the ids after the last record
-    /// it holds.
+    /// with its attachment. To get the rest, ask again for the ids after the last
+    /// record it holds.
     ///
     /// # Errors
     ///
-    /// Fails if the repository doesn't have a record, if one is a blob or a tree,
-    /// or if a record cannot be read.
+    /// Fails if the repository doesn't have a record, if one is a blob, a tree or
+    /// an attachment, or if a record cannot be read.
     pub fn records(&self, _caller: &Caller, ids: &[ObjectId]) -> Result<Part, ServiceError> {
         let mut packer = Packer::new(self.pack_limit);
         for &id in ids {
@@ -226,15 +226,18 @@ impl OriginService {
                 .decode()
                 .map_err(|source| StoreError::Decode { id, source })?
             {
-                Object::Blob(_) | Object::Tree(_) => return Err(ServiceError::NotARecord(id)),
-                Object::Revision(revision) => Some(revision.description.into()),
-                Object::Statement(statement) => statement.payload.map(Into::into),
+                Object::Blob(_) | Object::Tree(_) | Object::Attachment(_) => {
+                    return Err(ServiceError::NotARecord(id));
+                }
+                Object::Revision(revision) => Some(revision.description),
+                Object::Statement(statement) => statement.payload,
                 Object::Acceptance(_) => None,
             };
             let carried = carried
-                .map(|id| self.store.try_read(id))
+                .map(|id| self.store.try_read(id.into()))
                 .transpose()?
-                .flatten();
+                .flatten()
+                .filter(|object| object.kind().ok() == Some(ObjectKind::Attachment));
             let group: Vec<_> = iter::once(object).chain(carried).collect();
             if !packer.fits(&group) {
                 return Ok(Part {
@@ -339,27 +342,16 @@ impl OriginService {
         })
     }
 
-    /// Writes the objects of `pack`: snapshots, revisions and statements.
-    ///
-    /// Each object must be well formed, and everything it needs must be in the
-    /// repository or the pack, of the right kind: a tree's entries (trees or blobs,
-    /// as each entry says), a revision's snapshot (a tree), description, base and
-    /// dependencies, and a statement's subject and the statements it supersedes or
-    /// promotes. So the repository never holds a record it cannot use. Acceptances
-    /// are refused: only a target's authority writes them, by landing.
-    ///
-    /// Blobs and trees are made durable before the records that refer to them, and
-    /// statements before the revisions they are about. Promotions come last: each
-    /// is checked against its original by [`Store::claim`], once the original and
-    /// both subjects are stored. Issues `core.divergent` for each change the new
-    /// revisions made diverge.
+    /// Writes the objects of `pack`: snapshots, attachments, revisions and
+    /// statements, each well formed, with what it needs in the repository or the
+    /// pack, of the right kind (see "Sync" in `docs/design.md`). Acceptances are
+    /// refused. Issues `core.divergent` for each change the new revisions made diverge.
     ///
     /// # Errors
     ///
-    /// Fails if an object is malformed or is an acceptance, if it needs an object
-    /// that neither the pack nor the repository has or that is of another kind, if
-    /// a promotion doesn't match its original (the other records stay stored), or
-    /// if the objects cannot be written.
+    /// Fails if an object is malformed, an acceptance, or needs a missing object or
+    /// one of another kind, if a promotion doesn't match its original (the other
+    /// records stay stored), or if the objects cannot be written.
     pub fn put_records(&self, caller: &Caller, pack: Pack) -> Result<Stored, ServiceError> {
         self.push(caller, pack, &[])
     }
@@ -424,9 +416,16 @@ impl OriginService {
                     None => return Err(ServiceError::Missing { id, needed }),
                 }
             }
+            Self::check_payload(id, &decoded, |id| match held.get(&id) {
+                Some(&kind) => Ok(kind),
+                None => Ok(self
+                    .store
+                    .try_read(id)?
+                    .and_then(|object| object.kind().ok())),
+            })?;
             match decoded {
                 Object::Acceptance(_) => return Err(ServiceError::Acceptance(id.into())),
-                Object::Blob(_) | Object::Tree(_) => snapshots.push(object),
+                Object::Blob(_) | Object::Tree(_) | Object::Attachment(_) => snapshots.push(object),
                 Object::Revision(revision) => {
                     if !revision.predecessors.is_empty() {
                         changes.insert(revision.change);
@@ -522,6 +521,33 @@ impl OriginService {
             Ok(())
         });
         checked.into_iter().collect()
+    }
+
+    /// Checks that the payload `record` (`id`) carries, if any, is an attachment,
+    /// as far as `kind` knows the object. The repository may lack a payload, since
+    /// it is a detail, except a `core.conflict`'s: reading the conflict needs its
+    /// list (see [`Conflicts::listed`](crate::conflict::Conflicts::listed)).
+    fn check_payload(
+        id: ObjectId,
+        record: &Object,
+        kind: impl Fn(ObjectId) -> Result<Option<ObjectKind>, StoreError>,
+    ) -> Result<(), ServiceError> {
+        let Object::Statement(statement) = record else {
+            return Ok(());
+        };
+        let Some(payload) = statement.payload else {
+            return Ok(());
+        };
+        let needed = payload.into();
+        match kind(needed)? {
+            None if statement.kind == Kind::CONFLICT => Err(ServiceError::Missing { id, needed }),
+            Some(kind) if kind != ObjectKind::Attachment => Err(ServiceError::WrongKind {
+                id,
+                needed,
+                kind: ObjectKind::Attachment,
+            }),
+            _ => Ok(()),
+        }
     }
 
     /// Returns the statements about `subject`, in the order the repository received
@@ -808,14 +834,14 @@ impl Drop for Taken<'_> {
 pub(crate) struct Dependencies {
     /// Revisions, statements and acceptances.
     pub records: Vec<(ObjectId, ObjectKind)>,
-    /// Trees and blobs.
+    /// Trees, blobs and attachments.
     pub content: Vec<(ObjectId, ObjectKind)>,
 }
 
 impl Dependencies {
     pub(crate) fn of(object: &Object) -> Self {
         match object {
-            Object::Blob(_) | Object::Acceptance(_) => Self::default(),
+            Object::Blob(_) | Object::Attachment(_) | Object::Acceptance(_) => Self::default(),
             Object::Tree(tree) => Self {
                 records: Vec::new(),
                 content: tree
@@ -839,7 +865,7 @@ impl Dependencies {
                     records,
                     content: vec![
                         (revision.snapshot.into(), ObjectKind::Tree),
-                        (revision.description.into(), ObjectKind::Blob),
+                        (revision.description.into(), ObjectKind::Attachment),
                     ],
                 }
             }
@@ -892,7 +918,7 @@ pub enum ServiceError {
     /// The repository has no such snapshot.
     #[error("snapshot {0} not found")]
     UnknownSnapshot(TreeId),
-    /// A blob or a tree was fetched as a record.
+    /// A blob, a tree or an attachment was fetched as a record.
     #[error("{0} is not a record: fetch snapshots by walking them")]
     NotARecord(ObjectId),
     /// A target's tip was proposed for landing without a target to land on.
@@ -920,7 +946,7 @@ pub enum ServiceError {
         needed: ObjectId,
     },
     /// A put object refers to another as the wrong kind: a snapshot that isn't a
-    /// tree, or a file that is one.
+    /// tree, a file that is one, or a description that isn't an attachment.
     #[error("object {id} refers to {needed} as a {kind}, which it is not")]
     WrongKind {
         /// The object put.
@@ -1069,15 +1095,16 @@ mod tests {
         });
     }
 
-    #[test]
-    fn pushes_publish_statements_before_the_revisions_they_are_about() {
-        let repo = crate::queue::tests::Repo::new("[targets.main]\nauthority = \"node:queue\"\n");
+    /// Returns a service of `repo`, and the objects that put a revision with a
+    /// conflict: its description, the conflict's payload, the revision and the
+    /// conflict.
+    fn conflicted(repo: &crate::queue::tests::Repo) -> (OriginService, [EncodedObject; 4]) {
         let node = Node {
             name: "queue".parse().unwrap(),
             key: Arc::new(NodeKey::from_bytes(&[7; 32])),
         };
         let service = OriginService::new(repo.store.clone(), node);
-        let description = EncodedObject::blob(b"");
+        let description = EncodedObject::attachment(b"");
         let revision = origin_shared::Revision {
             change: origin_shared::ChangeId::from_bytes([1; 16]),
             predecessors: Vec::new(),
@@ -1094,10 +1121,18 @@ mod tests {
         }]);
         let subject = RecordId::Revision(revision.id().into());
         let (payload, conflict) = conflicts.statement(subject, "user:ada".parse().unwrap(), None);
-        let conflict = conflict.encode();
+        (service, [description, payload, revision, conflict.encode()])
+    }
+
+    #[test]
+    fn pushes_publish_statements_before_the_revisions_they_are_about() {
+        let repo = crate::queue::tests::Repo::new("[targets.main]\nauthority = \"node:queue\"\n");
+        let (service, objects) = conflicted(&repo);
+        let [_, _, revision, conflict] = objects.clone();
+        let subject = RecordId::Revision(revision.id().into());
         let oplog = repo.store.oplog();
         let before = oplog.last_seq().unwrap();
-        let objects = vec![description, payload, revision, conflict.clone()];
+        let objects = objects.to_vec();
         service
             .put_records(&Caller::Owner, Pack { objects })
             .unwrap();
@@ -1115,6 +1150,30 @@ mod tests {
         };
         let conflict = RecordId::Statement(conflict.id().into());
         assert!(written(conflict) < written(subject));
+    }
+
+    #[test]
+    fn conflicts_come_with_the_list_they_carry() {
+        let repo = crate::queue::tests::Repo::new("[targets.main]\nauthority = \"node:queue\"\n");
+        let (service, [description, payload, revision, conflict]) = conflicted(&repo);
+        let without = vec![description, revision, conflict.clone()];
+        let refused = service.put_records(
+            &Caller::Owner,
+            Pack {
+                objects: without.clone(),
+            },
+        );
+        assert!(
+            matches!(refused, Err(ServiceError::Missing { id, needed })
+                if id == conflict.id() && needed == payload.id()),
+            "{refused:?}"
+        );
+        assert!(!repo.store.contains(conflict.id()).unwrap());
+        repo.store.write_all(&[payload]).unwrap();
+        service
+            .put_records(&Caller::Owner, Pack { objects: without })
+            .unwrap();
+        assert!(repo.store.contains(conflict.id()).unwrap());
     }
 
     #[test]

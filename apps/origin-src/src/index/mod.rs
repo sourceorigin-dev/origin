@@ -595,7 +595,7 @@ impl Entry {
     pub(crate) fn of(object: &EncodedObject) -> Result<Option<Self>, DecodeError> {
         let id = object.id();
         Ok(match object.kind()? {
-            ObjectKind::Blob | ObjectKind::Tree => None,
+            ObjectKind::Blob | ObjectKind::Tree | ObjectKind::Attachment => None,
             ObjectKind::Revision => {
                 let revision: Revision = object.decode_as()?;
                 Some(Self::Revision {

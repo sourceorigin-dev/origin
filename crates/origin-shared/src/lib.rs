@@ -15,8 +15,8 @@ mod target;
 mod text;
 
 pub use id::{
-    AcceptanceId, BlobId, ChangeId, Digest, ObjectId, ParseIdError, RevisionId, StatementId,
-    TargetId, TreeId, TypedId,
+    AcceptanceId, AttachmentId, BlobId, ChangeId, Digest, ObjectId, ParseIdError, RevisionId,
+    StatementId, TargetId, TreeId, TypedId,
 };
 pub use name::InvalidName;
 pub use object::{

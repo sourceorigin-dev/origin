@@ -59,6 +59,18 @@ lists, and no trailing bytes.
 | Acceptance | One landing on a target. |
 | Attachment | A description or a payload. |
 
+Encodings in detail:
+
+- A blob and an attachment are their content, as is. An attachment is a
+  separate kind so that no record can carry a file's content as its
+  attachment: someone who may read a record may not read every file.
+- A tree is its entries.
+- A revision, statement and acceptance are their fields in declaration order.
+  Integers are little endian, ids are their raw bytes, names and paths are a
+  `u32` length then UTF-8, lists are a `u32` count then the items, and options
+  and enums are a tag byte then the value. An acceptance ends with a 64-byte
+  ed25519 signature of everything before it.
+
 ```rust
 /// One immutable version of a change.
 struct Revision {
@@ -236,6 +248,14 @@ Rules:
   - `origin gc` drops expired payloads and keeps the statements: subject,
     kind, verdict, issuer and inputs.
   - Payloads of `core.*` statements are never dropped.
+  - A payload stays while any statement whose retention has not ended refers
+    to it, or while a revision's description is the same attachment (an empty
+    description and an empty payload, for example).
+  - `origin gc` waits for the writers holding objects, landings on `policy`
+    among them, then reads the rules from `retention` and the index again.
+    This way no writer refers to a payload deleted under it, and a policy
+    landed in the meantime applies. If there are no rules, it returns without
+    waiting or reading anything.
 - **Every statement fires an event** with its subject, kind, verdict and
   issuer (see [Events](#events)).
 
@@ -627,6 +647,21 @@ of that cursor.
   - It refuses a stale change, and compares the expected heads atomically.
   - It sends a statement together with the statements it depends on.
   - It splits large transfers into parts of at most 64 MiB.
+  - Every object it writes must be well formed, and everything it needs must
+    be in the repository or the pack, of the right kind: a tree's entries
+    (trees or blobs, as each entry says), a revision's snapshot (a tree),
+    description (an attachment), base and dependencies, and a statement's
+    subject and the statements it supersedes or promotes. So the repository
+    never holds a record it cannot use.
+  - A statement's payload may be missing, but if the repository has it, it
+    must be an attachment; a `core.conflict`'s payload, its list of conflicts,
+    must be present.
+  - Acceptances are refused: only a target's authority writes them, by landing.
+  - Blobs and trees are made durable before the records that refer to them, and
+    statements before the revisions they are about. Promotions come last: each
+    is checked against its original, once the original and both subjects are
+    stored. A `core.divergent` statement is issued for each change the new
+    revisions made diverge.
 - **`fetch`** fetches each held target's chain after the last acceptance this
   node has, and verifies it. It then fetches the changes the remote's events
   say moved since the last fetch, and falls back to comparing every known

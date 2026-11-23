@@ -38,7 +38,7 @@ use std::sync::{Arc, OnceLock};
 use origin_platform::{LockMode, LockedFile, Native};
 use origin_shared::api::{LogQuery, RevisionEntry, Revisions};
 use origin_shared::{
-    AcceptanceId, Base, BlobId, ChangeId, EncodedObject, Kind, ObjectKind, Principal, Record,
+    AcceptanceId, AttachmentId, Base, ChangeId, EncodedObject, Kind, ObjectKind, Principal, Record,
     RecordId, RepoPath, Revision, RevisionId, Source, Statement, StatementId, TargetId, TargetName,
     Tree, TreeId,
 };
@@ -223,7 +223,7 @@ impl Workspace {
         let policy = Policy::initial(config.node(), &key.public());
         let main = Queue::new(&store, &key, config.node().clone()).init(&policy)?;
         let empty_tree = Tree::default().encode();
-        let empty_description = EncodedObject::blob(b"");
+        let empty_description = EncodedObject::attachment(b"");
 
         let revision = Revision {
             change: ChangeId::random().map_err(WorkspaceError::Random)?,
@@ -1018,7 +1018,7 @@ impl Workspace {
         let working_copy = self.record()?;
         let mut working_copy = self.following(working_copy)?;
         self.log_draft(&working_copy);
-        let description = EncodedObject::blob(description.as_bytes());
+        let description = EncodedObject::attachment(description.as_bytes());
         let revision = Revision {
             change: ChangeId::random().map_err(WorkspaceError::Random)?,
             predecessors: Vec::new(),
@@ -1056,7 +1056,7 @@ impl Workspace {
         let working_copy = self.record()?;
         let mut working_copy = self.following(working_copy)?;
         self.log_draft(&working_copy);
-        let description = EncodedObject::blob(description.as_bytes());
+        let description = EncodedObject::attachment(description.as_bytes());
         let revision = Revision {
             predecessors: vec![working_copy.id],
             description: description.id().into(),
@@ -1142,7 +1142,7 @@ impl Workspace {
             None => working_copy.revision.change,
         };
         let head = Self::single_head(index, change)?;
-        let reason = EncodedObject::blob(reason.as_bytes());
+        let reason = EncodedObject::attachment(reason.as_bytes());
         let statement = Statement {
             subject: RecordId::Revision(head),
             kind: Kind::ABANDON,
@@ -1168,7 +1168,7 @@ impl Workspace {
         }
 
         let abandoned: Revision = self.store.get(head)?;
-        let empty = EncodedObject::blob(b"");
+        let empty = EncodedObject::attachment(b"");
         let revision = Revision {
             change: ChangeId::random().map_err(WorkspaceError::Random)?,
             predecessors: Vec::new(),
@@ -1437,14 +1437,13 @@ impl Workspace {
         self.text(revision.description)
     }
 
-    /// A blob's content, as text.
-    fn text(&self, blob: BlobId) -> Result<String, WorkspaceError> {
-        let id = blob.into();
-        let blob = self.store.read(id)?;
-        let content = blob
-            .blob_content()
-            .map_err(|source| StoreError::Decode { id, source })?;
-        Ok(String::from_utf8_lossy(content).into_owned())
+    /// Returns an attachment's content, as text.
+    fn text(&self, attachment: AttachmentId) -> Result<String, WorkspaceError> {
+        let content = self
+            .store
+            .try_attachment(attachment)?
+            .ok_or(StoreError::NotFound(attachment.into()))?;
+        Ok(String::from_utf8_lossy(&content).into_owned())
     }
 
     /// The first line of a revision's description.

@@ -61,7 +61,7 @@ impl Client {
             .iter()
             .map(|(_, content)| EncodedObject::blob(content.as_bytes()))
             .collect();
-        let description = EncodedObject::blob(b"work");
+        let description = EncodedObject::attachment(b"work");
         let revision = Revision {
             change: ChangeId::from_bytes([change; 16]),
             predecessors: predecessors.to_vec(),
@@ -740,7 +740,7 @@ fn a_push_in_parts_never_lands_an_abandoned_revision() {
                 base: main_tip(&client.store),
                 deps: Vec::new(),
                 snapshot: build(&client.store, &[("a", "gone")]),
-                description: EncodedObject::blob(b"").id().into(),
+                description: EncodedObject::attachment(b"").id().into(),
                 author: "user:ada".parse().unwrap(),
             };
             client
@@ -757,8 +757,8 @@ fn a_push_in_parts_never_lands_an_abandoned_revision() {
                 .collect();
             let room = Pack::LIMIT
                 - wire(content)
-                - wire(vec![revision.encode(), EncodedObject::blob(b"")]);
-            let description = EncodedObject::blob(&vec![b'x'; room]);
+                - wire(vec![revision.encode(), EncodedObject::attachment(b"")]);
+            let description = EncodedObject::attachment(&vec![b'x'; room]);
             revision.description = description.id().into();
             let revision = revision.encode();
             client

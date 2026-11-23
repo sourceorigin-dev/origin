@@ -270,7 +270,7 @@ impl<'a, P: Platform> Annotations<'a, P> {
             .iter()
             .map(|head| head.to_hex() + "\n")
             .collect::<String>();
-        let payload = EncodedObject::blob(list.as_bytes());
+        let payload = EncodedObject::attachment(list.as_bytes());
         let statement = Statement {
             subject: RecordId::Revision(heads[0]),
             kind: Kind::DIVERGENT,

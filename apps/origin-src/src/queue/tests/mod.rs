@@ -10,8 +10,8 @@ use origin_platform::Native;
 use origin_shared::landing::{Blocked, Landing, Pending, Proposal};
 use origin_shared::policy::Requirement;
 use origin_shared::{
-    AcceptanceBody, Base, BlobId, ChangeId, Digest, EncodedObject, Head, Inputs, Kind, NodeKey,
-    PrincipalName, Record, RecordId, RepoPath, Revision, RevisionId, Source, Statement,
+    AcceptanceBody, AttachmentId, Base, ChangeId, Digest, EncodedObject, Head, Inputs, Kind,
+    NodeKey, PrincipalName, Record, RecordId, RepoPath, Revision, RevisionId, Source, Statement,
     StatementId, TargetName, Tree, TreeId, Verdict,
 };
 
@@ -94,7 +94,7 @@ impl Repo {
             base,
             deps: Vec::new(),
             snapshot: self.files(files),
-            description: BlobId::from(EncodedObject::blob(b"").id()),
+            description: AttachmentId::from(EncodedObject::attachment(b"").id()),
             author: "user:ada".parse().unwrap(),
         }
         .encode();

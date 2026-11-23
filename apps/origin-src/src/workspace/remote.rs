@@ -125,7 +125,7 @@ impl Workspace {
         sync.need(state, &[])?;
 
         let empty_tree = Tree::default().encode();
-        let empty_description = EncodedObject::blob(b"");
+        let empty_description = EncodedObject::attachment(b"");
         let revision = Revision {
             change: ChangeId::random().map_err(WorkspaceError::Random)?,
             predecessors: Vec::new(),

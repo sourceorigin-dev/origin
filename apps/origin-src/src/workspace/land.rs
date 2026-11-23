@@ -284,7 +284,7 @@ impl Workspace {
             state,
             [Self::OURS, &tip_label],
         )?;
-        let description = EncodedObject::blob(description.as_bytes());
+        let description = EncodedObject::attachment(description.as_bytes());
         let revision = Revision {
             change: ChangeId::random().map_err(WorkspaceError::Random)?,
             predecessors: Vec::new(),
