@@ -461,6 +461,7 @@ async fn promotions_must_match_their_original() {
         issuer: "user:ada".parse().unwrap(),
         inputs: Some(Inputs {
             paths: vec!["a.txt".parse().unwrap()],
+            target_paths: Vec::new(),
             definition: Digest::of(b"test"),
             toolchain: Digest::of(b"rustc"),
             external: false,
@@ -776,6 +777,7 @@ async fn promotes_results_by_input_digest() {
     let statement = Statement {
         inputs: Some(Inputs {
             paths: vec![RepoPath::new("a.txt").unwrap()],
+            target_paths: Vec::new(),
             definition: Digest::of(b"test"),
             toolchain: Digest::of(b""),
             external: false,

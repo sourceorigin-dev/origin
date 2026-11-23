@@ -1,11 +1,71 @@
-use origin_shared::{EncodedObject, Kind, TargetName, Verdict};
+use origin_shared::{
+    AcceptanceId, AttachmentId, ChangeId, Digest, EncodedObject, Inputs, Kind, ObjectId, RepoPath,
+    Revision, RevisionId, TargetName, Verdict,
+};
 
 use super::*;
 use crate::annotations::AnnotateError;
 use crate::annotations::tests::{
-    FILES, check, issue, principal, promote, revision, revision_on, store,
+    FILES, check, issue, principal, promote, revision, revision_on, revision_on_state, store,
 };
 use crate::index::Index;
+
+#[test]
+fn target_paths_are_read_from_the_base() {
+    let (_dir, store) = store();
+    let inputs = Inputs {
+        paths: vec![RepoPath::new("src").unwrap()],
+        target_paths: vec![RepoPath::new("checks.toml").unwrap()],
+        definition: Digest::of(b"cargo test"),
+        toolchain: Digest::of(b"rustc 1.99.0"),
+        external: false,
+    };
+    let digest = |revision: RevisionId| {
+        let mut trees = store.input_trees(RecordId::Revision(revision)).unwrap();
+        Snapshots::new(&store)
+            .input_digest(trees.as_mut().unwrap(), &inputs)
+            .unwrap()
+    };
+    let files = [("src/lib.rs", "v1"), ("checks.toml", "its own")];
+    let on = |state: &[(&str, &str)]| {
+        revision_on_state(&store, &TargetName::MAIN, state, 1, &[], &files)
+    };
+    let below = on(&[("checks.toml", "old"), ("src/lib.rs", "v0")]);
+    let old = digest(below);
+    assert!(old.is_some());
+    assert_ne!(
+        digest(on(&[("checks.toml", "new"), ("src/lib.rs", "v0")])),
+        old,
+        "the base's checks.toml is an input"
+    );
+    assert_eq!(
+        digest(on(&[
+            ("checks.toml", "old"),
+            ("src/lib.rs", "v2"),
+            ("docs", "x")
+        ])),
+        old,
+        "the rest of the base isn't"
+    );
+
+    let based = |base, change| {
+        let revision = Revision {
+            change: ChangeId::from_bytes([change; 16]),
+            predecessors: Vec::new(),
+            base,
+            deps: Vec::new(),
+            snapshot: store.get(below).unwrap().snapshot,
+            description: AttachmentId::from(EncodedObject::attachment(b"").id()),
+            author: principal("user:alice"),
+        }
+        .encode();
+        store.write_all(std::slice::from_ref(&revision)).unwrap();
+        RevisionId::from(revision.id())
+    };
+    assert_eq!(digest(based(Base::Revision(below), 2)), old);
+    let missing = AcceptanceId::from(ObjectId::from_bytes([7; 32]));
+    assert_eq!(digest(based(Base::Acceptance(missing), 3)), None);
+}
 
 #[test]
 fn results_promote_within_their_target_only() {

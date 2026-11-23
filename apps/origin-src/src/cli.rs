@@ -456,6 +456,7 @@ impl AnnotateArgs {
         let digest = |arg: &Option<DigestArg>| arg.map_or_else(|| Digest::of(b""), |arg| arg.0);
         (!self.inputs.is_empty()).then(|| Inputs {
             paths: self.inputs.clone(),
+            target_paths: Vec::new(),
             definition: digest(&self.definition),
             toolchain: digest(&self.toolchain),
             external: self.external,

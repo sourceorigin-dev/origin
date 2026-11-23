@@ -1641,7 +1641,7 @@
       },
       "Inputs": {
         "type": "object",
-        "description": "What a statement depended on.\n\nThe input digest of a snapshot hashes the ids it stores at `paths`, with\n`definition` and `toolchain`. A statement that declares inputs and isn't\n`external` is promoted to every revision with the same input digest.",
+        "description": "The inputs a statement depended on.\n\nA record's input digest hashes the ids that its snapshot stores at\n`paths`, the ids that the state of its target stores at `target_paths`,\n`definition` and `toolchain`. A statement that declares inputs and isn't\n`external` is promoted to every revision on the same target with the\nsame input digest.",
         "required": [
           "paths",
           "definition",
@@ -1663,6 +1663,13 @@
               "$ref": "#/components/schemas/RepoPath"
             },
             "description": "The files and directories read, each covering everything under it."
+          },
+          "target_paths": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RepoPath"
+            },
+            "description": "The files and directories to read from the state of the record's target\nrather than from its snapshot, such as the definition of the checks in\nforce there. A revision is on the target of the acceptance it's based\non, directly or through the revisions below it. An acceptance is on its\nown target."
           },
           "toolchain": {
             "$ref": "#/components/schemas/Digest",

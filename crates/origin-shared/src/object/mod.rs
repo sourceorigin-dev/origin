@@ -18,7 +18,7 @@ pub use encoding::Reader;
 pub(crate) use encoding::{Field, fields, tagged};
 pub use errors::{DecodeError, IdMismatch};
 pub use revision::{Base, Revision};
-pub use statement::{Inputs, Kind, RecordId, Statement, Verdict};
+pub use statement::{InputSource, Inputs, Kind, RecordId, Statement, Verdict};
 pub use tree::{EntryKind, EntryName, Tree, TreeEntry};
 
 mod acceptance;
