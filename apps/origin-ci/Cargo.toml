@@ -1,0 +1,16 @@
+[package]
+name = "origin-ci"
+description = "origin's CI plugin: runs the checks of checks.toml and issues their results"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+origin-shared.workspace = true
+serde.workspace = true
+toml.workspace = true
+
+[lints]
+workspace = true

@@ -1,8 +1,9 @@
 # How origin applies the engineering standard; the README of the
 # `sourceorigin-standard` crate lists its rules and every key here.
 
-# The `origin` binary's library, whose server setup and error reports use anyhow.
-anyhow-crates = ["origin-src"]
+# The libraries of the `origin` and `origin-ci` binaries, whose setup and error
+# reports use anyhow.
+anyhow-crates = ["origin-ci", "origin-src"]
 
 # CI's check on the minimum supported Rust, which runs no recipe.
 cargo-in-ci = ["cargo +\"$MSRV\" check --locked --workspace --all-targets --all-features"]
