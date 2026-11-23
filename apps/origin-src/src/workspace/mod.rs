@@ -8,43 +8,16 @@
 //!   workspace                  the revision the working copy is
 //!   state                      the stat cache of the last snapshot
 //!   moving                     the move in progress, if a checkout is
+//!   lock                       held by the command working in the working copy
 //! ```
 //!
 //! A repository can have several working copies, called workspaces, that share
-//! its store and op log. The main working copy's `.origin` holds the store. The
-//! others' `.origin` holds only `workspace`, `state`, `moving`, and a
-//! `repository` file that names the main one's `.origin`.
-//!
-//! The working copy is always on a revision of the current change. Every
-//! command that reads the working copy snapshots its files first. The files it
-//! finds are the draft. Commands that only read the working copy show the draft
-//! without recording it. Commands that build on the working copy record the
-//! draft first: if the files changed, they become a new revision of the change.
-//!
-//! Records are written before anything refers to them: the snapshot's objects,
-//! then the revision, then the `workspace` file that names it. The statements a
-//! new revision needs, such as its unresolved conflicts, are written before the
-//! revision, so it is never found without them.
-//!
-//! A command that moves the working copy to another revision, such as a merge,
-//! checks out the files before it writes the revision. If a file was edited
-//! since the snapshot, the checkout fails and puts back the files it changed.
-//! The working copy and its change stay where they were, so the command can run
-//! again.
-//!
-//! Another workspace can move the change on without this working copy: the
-//! change can land, or the landing queue can rebase it. The working copy is
-//! then behind its change. Only `origin pull` moves it to where the change
-//! went, merging the edits made since (see [`land`]). Until then, edits stay
-//! unrecorded so the change doesn't fork, commands that only read the working
-//! copy say where the change went, and commands that build on it fail.
-//!
-//! Every move of the working copy is logged in the op log, in an entry made
-//! durable together with the `workspace` file that names the new revision. A
-//! move that changes files first writes `moving`, which names the files it
-//! starts from, the files it goes to, and their revision. If a crash cuts the
-//! move short, the next command to open the workspace finishes it, or takes it
-//! back if the revision wasn't written (see `Workspace::finish_move`).
+//! its store and op log (see [`registry`]). The working copy is always on a
+//! revision of the current change, and every command that reads it snapshots
+//! its files first. A working copy can fall behind its change (see [`land`]).
+//! A move of the working copy is logged in the op log and finished or taken
+//! back after a crash (see `Workspace::finish_move`). The design's "Workspaces
+//! and platform code" section describes all of it.
 
 mod annotate;
 mod land;
@@ -62,7 +35,7 @@ use std::mem;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
-use origin_platform::{LockedFile, Native};
+use origin_platform::{LockMode, LockedFile, Native};
 use origin_shared::api::{LogQuery, RevisionEntry, Revisions};
 use origin_shared::{
     AcceptanceId, Base, BlobId, ChangeId, EncodedObject, Kind, ObjectKind, Principal, Record,
@@ -102,6 +75,9 @@ pub struct Workspace {
     unreadable_move: Option<PathBuf>,
     /// The repository's remote, once opened: see [`Workspace::remote`].
     remote: OnceLock<Option<Remote>>,
+    /// Held while the command that opened the working copy works in it, so only one
+    /// command at a time does: see [`Workspace::open`].
+    lock: Option<LockedFile>,
 }
 
 /// The working copy as of a snapshot.
@@ -219,6 +195,10 @@ impl Workspace {
     /// [`Moving`].
     const MOVING: &str = "moving";
 
+    /// The file in [`Workspace::META_DIR`] that the command working in the working
+    /// copy holds locked.
+    const LOCK: &str = "lock";
+
     /// `origin init`: creates a repository in `root`, with the `policy`
     /// target naming this node the authority of `policy` and `main`, an
     /// empty `main`, and a first change on top of it.
@@ -287,10 +267,18 @@ impl Workspace {
 
     /// Opens the working copy at `root`: either the main one, whose `.origin` holds
     /// the store, or another workspace, whose `.origin/repository` names the main
-    /// one's. First finishes any move that a crash cut short.
+    /// one's. Waits for any command already working in it, then finishes any move
+    /// that a crash cut short.
     fn open(root: &Path, config: UserConfig, actor: &Actor) -> Result<Self, WorkspaceError> {
         let root = &Self::canonical(root)?;
         let meta = root.join(Self::META_DIR);
+        // INVARIANT: held until the command is done, so `moving` is only found once its move was cut short.
+        let lock = LockedFile::open(
+            &Native::default(),
+            &meta.join(Self::LOCK),
+            LockMode::Exclusive,
+        )
+        .map_err(StoreError::from)?;
         let repository = meta.join(Self::REPOSITORY);
         let store = match Self::read_path(&repository) {
             Ok(store) if store.is_dir() => store,
@@ -304,7 +292,10 @@ impl Workspace {
             Self::read_pointer(root)?.ok_or_else(|| WorkspaceError::Incomplete(root.to_owned()))?;
         let store = Store::open_writable(store, Native::default())?;
         let store = store.with_actor(actor.in_workspace(root));
-        let mut workspace = Self::at(root.to_owned(), store, config, revision);
+        let mut workspace = Self {
+            lock: Some(lock),
+            ..Self::at(root.to_owned(), store, config, revision)
+        };
         workspace.finish_move()?;
         Ok(workspace)
     }
@@ -320,6 +311,7 @@ impl Workspace {
             unlogged: None,
             unreadable_move: None,
             remote: OnceLock::new(),
+            lock: None,
         }
     }
 

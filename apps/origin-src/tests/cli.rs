@@ -1093,6 +1093,12 @@ fn removing_a_workspace_keeps_its_work() {
             .contains("+not snapshotted yet\n")
     );
 
+    let own = others.path().join("own");
+    let change = repo.workspace(&own, &[]);
+    let removed = repo.ok_in(&own, &["workspace", "rm", "."]);
+    assert!(removed.starts_with(&format!("Kept its working copy: {change} ")));
+    assert!(!own.exists());
+
     assert!(
         repo.fails(&["workspace", "rm", "."])
             .contains("is the main working copy")
@@ -1417,6 +1423,18 @@ fn commands_in_different_workspaces_run_concurrently() {
     for (_, change) in &workspaces {
         assert_eq!(revisions(change), 1 + 2 * EDITS);
     }
+}
+
+#[test]
+fn commands_in_one_workspace_wait_for_each_other() {
+    let repo = Repo::new();
+    let lock = fs::File::create(repo.path(".origin/lock")).unwrap();
+    lock.lock().unwrap();
+    let (mut status, _) = repo.spawn(&["status"]);
+    thread::sleep(Duration::from_millis(500));
+    assert!(status.try_wait().unwrap().is_none(), "it waits");
+    drop(lock);
+    assert!(status.wait().unwrap().success());
 }
 
 #[test]
