@@ -10,6 +10,7 @@ use origin_shared::{
 };
 
 use super::*;
+use crate::conflict::Conflicts;
 use crate::queue::tests::Repo;
 use crate::service::{Node, OriginService, ServiceError};
 use crate::tree::Snapshots;
@@ -342,6 +343,501 @@ fn landings_never_change_what_the_submitter_cannot_write() {
     let landed = fixture.land(&ada, from_side).unwrap();
     assert!(matches!(landed[..], [Landing::Landed { .. }]), "{landed:?}");
     assert!(fixture.at_main("protected/file").is_none());
+}
+
+#[test]
+fn converging_cannot_smuggle_others_changes() {
+    let fixture = Fixture::new();
+    let eve = caller("user:eve");
+    let repo = &fixture.repo;
+    let base = fixture.tip(&TargetName::MAIN);
+    let files = [
+        ("README.md", "hello"),
+        ("src/lib.rs", "fn a() {}"),
+        ("secrets/key", "hunter2"),
+    ];
+    let first = repo.revision(
+        5,
+        &[],
+        base,
+        &[&files[..], &[("protected/file", "keep")]].concat(),
+    );
+    let ada_head = repo.revision(
+        5,
+        &[first],
+        base,
+        &[&files[..], &[("protected/file", "ada")]].concat(),
+    );
+    let mut eves = files.to_vec();
+    eves[1] = ("src/lib.rs", "fn eve() {}");
+    eves.push(("protected/file", "keep"));
+    let eve_head = repo.revision(5, &[first], base, &eves);
+
+    let merged = repo
+        .store
+        .merge(
+            Some(repo.store.get(first).unwrap().snapshot),
+            repo.store.get(eve_head).unwrap().snapshot,
+            repo.store.get(ada_head).unwrap().snapshot,
+        )
+        .unwrap();
+    let (id, records) =
+        Fixture::revision(5, "user:eve", base, vec![ada_head, eve_head], merged.tree);
+    let mut objects = merged.trees.clone();
+    objects.extend(records.clone());
+    assert_eq!(
+        forbidden(fixture.put(&eve, objects)),
+        Forbidden::Write(path("protected/file"))
+    );
+
+    repo.store.write_all(&merged.trees).unwrap();
+    repo.store.write_all(&records).unwrap();
+    assert_eq!(
+        repo.annotations()
+            .index()
+            .heads(ChangeId::from_bytes([5; 16])),
+        [id]
+    );
+    assert_eq!(
+        forbidden(fixture.land(&eve, Proposal::Change(ChangeId::from_bytes([5; 16])))),
+        Forbidden::Write(path("protected/file"))
+    );
+}
+
+/// `main`'s files, with `edits` applied.
+fn main_with(edits: &[(&'static str, &'static str)]) -> Vec<(&'static str, &'static str)> {
+    let main = [
+        ("README.md", "hello"),
+        ("src/lib.rs", "fn a() {}"),
+        ("secrets/key", "hunter2"),
+        ("protected/file", "keep"),
+    ];
+    main.iter()
+        .map(|&(at, content)| {
+            let edit = edits.iter().find(|(edited, _)| *edited == at);
+            edit.copied().unwrap_or((at, content))
+        })
+        .collect()
+}
+
+#[test]
+fn successors_have_their_predecessors_effect_where_their_writer_cannot_write() {
+    let fixture = Fixture::new();
+    let (eve, repo) = (caller("user:eve"), &fixture.repo);
+    let base = fixture.tip(&TargetName::MAIN);
+    let succeed = |predecessors: Vec<RevisionId>, base, files: &[(&str, &str)]| {
+        let (tree, mut objects) = Fixture::objects(files);
+        let (id, records) = Fixture::revision(30, "user:eve", base, predecessors, tree);
+        objects.extend(records);
+        fixture.put(&eve, objects).map(|()| id)
+    };
+
+    let edits = [("README.md", "ada"), ("src/lib.rs", "fn ada() {}")];
+    let adas = repo.revision(30, &[], base, &main_with(&edits));
+    let undone = main_with(&[("src/lib.rs", "fn ada() {}")]);
+    assert_eq!(
+        forbidden(succeed(vec![adas], base, &undone)),
+        Forbidden::Write(path("README.md"))
+    );
+
+    let edits = [("README.md", "ada"), ("src/lib.rs", "fn eve() {}")];
+    let taken = succeed(vec![adas], base, &main_with(&edits)).unwrap();
+
+    repo.change_on_main(31, &[("protected/file", "newer")]);
+    repo.land(31);
+    let tip = fixture.tip(&TargetName::MAIN);
+    let rebased = [&edits[..], &[("protected/file", "newer")]].concat();
+    let rebased = succeed(vec![taken], tip, &main_with(&rebased)).unwrap();
+
+    let edits = [("README.md", "ada"), ("src/lib.rs", "fn other() {}")];
+    let other = succeed(vec![taken], base, &main_with(&edits)).unwrap();
+    let edits = [("README.md", "ada"), ("src/lib.rs", "fn both() {}")];
+    succeed(vec![rebased, other], base, &main_with(&edits)).unwrap();
+    let landed = fixture
+        .land(
+            &caller("user:ada"),
+            Proposal::Change(ChangeId::from_bytes([30; 16])),
+        )
+        .unwrap();
+    assert!(matches!(landed[..], [Landing::Landed { .. }]), "{landed:?}");
+    assert_eq!(
+        fixture.at_main("README.md").unwrap().id,
+        EncodedObject::blob(b"ada").id()
+    );
+}
+
+/// Probes from the third review: a successor that keeps ada's files, but
+/// on a base that already has her edits, so it changes nothing.
+#[test]
+fn no_base_makes_a_successor_drop_its_predecessors_effect() {
+    let fixture = Fixture::new();
+    let repo = &fixture.repo;
+    let reader = scoped("user:eve", &["read /"], in_a_week());
+    let base = fixture.tip(&TargetName::MAIN);
+    let state = fixture.state(&TargetName::MAIN);
+    let edits = [("README.md", "ada"), ("src/lib.rs", "fn ada() {}")];
+    let adas = repo.revision(40, &[], base, &main_with(&edits));
+    let snapshot = repo.store.get(adas).unwrap().snapshot;
+    let succeed = |base, predecessors| {
+        let (id, records) = Fixture::revision(40, "user:eve", base, predecessors, snapshot);
+        fixture.put(&reader, records).map(|()| id)
+    };
+
+    assert_eq!(
+        forbidden(succeed(Base::Revision(adas), vec![adas])),
+        Forbidden::Below(ChangeId::from_bytes([40; 16]))
+    );
+    let (on_adas, records) =
+        Fixture::revision(41, "user:eve", Base::Revision(adas), Vec::new(), snapshot);
+    fixture.put(&reader, records).unwrap();
+    assert_eq!(
+        forbidden(succeed(Base::Revision(on_adas), vec![adas])),
+        Forbidden::Below(ChangeId::from_bytes([41; 16]))
+    );
+    repo.change_on_main(42, &edits);
+    repo.land(42);
+    let tip = fixture.tip(&TargetName::MAIN);
+    assert_eq!(
+        forbidden(succeed(tip, vec![adas])),
+        Forbidden::Write(path("README.md"))
+    );
+
+    let taken = succeed(base, vec![adas]).unwrap();
+    let (_, records) = Fixture::revision(40, "user:eve", base, vec![taken], state);
+    assert_eq!(
+        forbidden(fixture.put(&reader, records)),
+        Forbidden::Write(path("README.md"))
+    );
+}
+
+#[test]
+fn changes_keep_their_history() {
+    let fixture = Fixture::new();
+    let repo = &fixture.repo;
+    let reader = scoped("user:eve", &["read /"], in_a_week());
+    let base = fixture.tip(&TargetName::MAIN);
+    let state = fixture.state(&TargetName::MAIN);
+    let change = ChangeId::from_bytes([43; 16]);
+    let adas = repo.revision(43, &[], base, &main_with(&[("README.md", "ada")]));
+    let snapshot = repo.store.get(adas).unwrap().snapshot;
+
+    let (_, records) = Fixture::revision(43, "user:eve", base, Vec::new(), state);
+    assert_eq!(
+        forbidden(fixture.put(&reader, records)),
+        Forbidden::History(change)
+    );
+    let (eves, records) = Fixture::revision(44, "user:eve", base, Vec::new(), state);
+    fixture.put(&reader, records).unwrap();
+    let (_, records) = Fixture::revision(43, "user:eve", base, vec![adas, eves], snapshot);
+    assert_eq!(
+        forbidden(fixture.put(&reader, records)),
+        Forbidden::History(change)
+    );
+    let (_, mut records) = Fixture::revision(45, "user:ada", base, Vec::new(), state);
+    records.extend(Fixture::revision(45, "user:ada", base, Vec::new(), snapshot).1);
+    assert_eq!(
+        forbidden(fixture.put(&caller("user:ada"), records)),
+        Forbidden::History(ChangeId::from_bytes([45; 16]))
+    );
+
+    let abandon = statement(RecordId::Revision(adas), "core.abandon", "user:ada").encode();
+    fixture.put(&caller("user:ada"), vec![abandon]).unwrap();
+    let landed = fixture.land(&caller("user:ada"), Proposal::Change(change));
+    assert!(
+        matches!(
+            landed,
+            Err(ServiceError::Land(crate::queue::LandError::Abandoned(_)))
+        ),
+        "{landed:?}"
+    );
+}
+
+#[test]
+fn successors_resolve_no_conflict_their_writer_cannot_write() {
+    let fixture = Fixture::new();
+    let (eve, repo) = (caller("user:eve"), &fixture.repo);
+    let base = fixture.tip(&TargetName::MAIN);
+    let marked = main_with(&[("README.md", "<<<<<<< ours")]);
+    let adas = repo.revision(46, &[], base, &marked);
+    let snapshot = repo.store.get(adas).unwrap().snapshot;
+    let readme = Snapshots::new(&repo.store)
+        .entry_at(snapshot, &path("README.md"))
+        .unwrap();
+    let conflicts = Conflicts::new(vec![crate::conflict::Conflicted {
+        path: path("README.md"),
+        written: readme.map(|entry| entry.id),
+    }]);
+    let listing = |subject, issuer: &str, supersedes| {
+        let (payload, statement) = conflicts.statement(
+            RecordId::Revision(subject),
+            issuer.parse().unwrap(),
+            supersedes,
+        );
+        (payload, statement.encode())
+    };
+    let (payload, adas_listing) = listing(adas, "user:ada", None);
+    repo.store.write_all(&[payload, adas_listing]).unwrap();
+
+    let (taken, records) = Fixture::revision(46, "user:eve", base, vec![adas], snapshot);
+    assert_eq!(
+        forbidden(fixture.put(&eve, records.clone())),
+        Forbidden::Resolve(path("README.md"))
+    );
+    let (payload, kept) = listing(taken, "user:eve", None);
+    let kept_id = StatementId::from(kept.id());
+    fixture
+        .put(&eve, [vec![payload, kept], records].concat())
+        .unwrap();
+
+    let (payload, empty) = Conflicts::default().statement(
+        RecordId::Revision(taken),
+        "user:eve".parse().unwrap(),
+        Some(kept_id),
+    );
+    assert_eq!(
+        forbidden(fixture.put(&eve, vec![payload, empty.encode()])),
+        Forbidden::Resolve(path("README.md"))
+    );
+    let review = Statement {
+        supersedes: Some(kept_id),
+        ..statement(RecordId::Revision(taken), "review", "user:eve")
+    };
+    assert_eq!(
+        forbidden(fixture.put(&eve, vec![review.encode()])),
+        Forbidden::Resolve(path("README.md"))
+    );
+    let landed = fixture.land(
+        &caller("user:ada"),
+        Proposal::Change(ChangeId::from_bytes([46; 16])),
+    );
+    assert!(
+        matches!(
+            landed,
+            Err(ServiceError::Land(
+                crate::queue::LandError::Unresolved { .. }
+            ))
+        ),
+        "{landed:?}"
+    );
+}
+
+#[test]
+fn revisions_add_no_conflict_their_writer_cannot_write() {
+    let fixture = Fixture::new();
+    let (eve, base) = (caller("user:eve"), fixture.tip(&TargetName::MAIN));
+    let mallory = scoped("user:mallory", &["read /"], in_a_week());
+    let change = ChangeId::from_bytes([47; 16]);
+    let (tree, mut objects) = Fixture::objects(&main_with(&[("src/lib.rs", "fn eve() {}")]));
+    let (eves, records) = Fixture::revision(47, "user:eve", base, Vec::new(), tree);
+    objects.extend(records);
+    fixture.put(&eve, objects).unwrap();
+    let listing = |subject, issuer: &str| {
+        let readme = fixture.at_main("README.md").map(|entry| entry.id);
+        let conflicts = Conflicts::new(vec![crate::conflict::Conflicted {
+            path: path("README.md"),
+            written: readme,
+        }]);
+        let (payload, statement) =
+            conflicts.statement(RecordId::Revision(subject), issuer.parse().unwrap(), None);
+        vec![payload, statement.encode()]
+    };
+    let (mallorys, mut records) = Fixture::revision(47, "user:mallory", base, vec![eves], tree);
+    records.extend(listing(mallorys, "user:mallory"));
+    assert_eq!(
+        forbidden(fixture.put(&mallory, records)),
+        Forbidden::Conflict(path("README.md"))
+    );
+    let (root, mut records) = Fixture::revision(48, "user:eve", base, Vec::new(), tree);
+    records.extend(listing(root, "user:eve"));
+    assert_eq!(
+        forbidden(fixture.put(&eve, records)),
+        Forbidden::Conflict(path("README.md"))
+    );
+    let landed = fixture.land(&eve, Proposal::Change(change)).unwrap();
+    assert!(matches!(landed[..], [Landing::Landed { .. }]), "{landed:?}");
+
+    let marked = main_with(&[("README.md", "<<<<<<< ours")]);
+    let adas = fixture.repo.revision(49, &[], base, &marked);
+    let snapshot = fixture.repo.store.get(adas).unwrap().snapshot;
+    let readme = Snapshots::new(&fixture.repo.store)
+        .entry_at(snapshot, &path("README.md"))
+        .unwrap();
+    let conflicts = Conflicts::new(vec![crate::conflict::Conflicted {
+        path: path("README.md"),
+        written: readme.map(|entry| entry.id),
+    }]);
+    let carry = |subject, issuer: &str| {
+        let (payload, statement) =
+            conflicts.statement(RecordId::Revision(subject), issuer.parse().unwrap(), None);
+        vec![payload, statement.encode()]
+    };
+    fixture
+        .repo
+        .store
+        .write_all(&carry(adas, "user:ada"))
+        .unwrap();
+    let on_adas = Base::Revision(adas);
+    let (root, records) = Fixture::revision(50, "user:eve", on_adas, Vec::new(), snapshot);
+    assert_eq!(
+        forbidden(fixture.put(&eve, records.clone())),
+        Forbidden::Resolve(path("README.md"))
+    );
+    fixture
+        .put(&eve, [records, carry(root, "user:eve")].concat())
+        .unwrap();
+}
+
+/// A `core.conflict` by `issuer` about `subject`, superseding
+/// `supersedes`, that lists a conflict at each of `paths` with the entry
+/// `snapshot` has there. Returns its id, then its payload and itself,
+/// encoded.
+fn listing(
+    store: &Store<Native>,
+    snapshot: TreeId,
+    paths: &[&str],
+    (subject, issuer): (RevisionId, &str),
+    supersedes: Option<StatementId>,
+) -> (StatementId, Vec<EncodedObject>) {
+    let mut snapshots = Snapshots::new(store);
+    let conflicted = paths.iter().map(|&at| crate::conflict::Conflicted {
+        path: path(at),
+        written: snapshots
+            .entry_at(snapshot, &path(at))
+            .unwrap()
+            .map(|entry| entry.id),
+    });
+    let (payload, statement) = Conflicts::new(conflicted.collect()).statement(
+        RecordId::Revision(subject),
+        issuer.parse().unwrap(),
+        supersedes,
+    );
+    let statement = statement.encode();
+    (statement.id().into(), vec![payload, statement])
+}
+
+#[test]
+fn superseding_another_issuers_listing_reads_nothing_of_it() {
+    let fixture = Fixture::new();
+    let repo = &fixture.repo;
+    let base = fixture.tip(&TargetName::MAIN);
+    let marked = main_with(&[("secrets/key", "<<<<<<< ours")]);
+    let first = repo.revision(52, &[], base, &marked);
+    let second = repo.revision(52, &[first], base, &marked);
+    let snapshot = repo.store.get(first).unwrap().snapshot;
+    let at = ["secrets/key"];
+    let (_, firsts) = listing(&repo.store, snapshot, &at, (first, "user:ada"), None);
+    let (seconds, records) = listing(&repo.store, snapshot, &at, (second, "user:ada"), None);
+    repo.store.write_all(&[firsts, records].concat()).unwrap();
+
+    let visible = repo.change_on_main(53, &[("src/lib.rs", "fn b() {}")]);
+    let review = Statement {
+        supersedes: Some(seconds),
+        ..statement(RecordId::Revision(visible), "review", "user:eve")
+    };
+    fixture
+        .put(&caller("user:eve"), vec![review.encode()])
+        .unwrap();
+}
+
+#[test]
+fn narrowed_tokens_keep_their_bearers_listings() {
+    let fixture = Fixture::new();
+    let repo = &fixture.repo;
+    let base = fixture.tip(&TargetName::MAIN);
+    let adas = repo.revision(54, &[], base, &main_with(&[("README.md", "<<<<<<< ours")]));
+    let snapshot = repo.store.get(adas).unwrap().snapshot;
+    let readme = ["README.md"];
+    let (listed, records) = listing(&repo.store, snapshot, &readme, (adas, "user:ada"), None);
+    repo.store.write_all(&records).unwrap();
+
+    let narrowed = scoped("user:ada", &["read /", "write src"], in_a_week());
+    let (_, empty) = listing(&repo.store, snapshot, &[], (adas, "user:ada"), Some(listed));
+    assert_eq!(
+        forbidden(fixture.put(&narrowed, empty)),
+        Forbidden::Resolve(path("README.md"))
+    );
+}
+
+#[test]
+fn listings_put_again_change_nothing() {
+    let fixture = Fixture::new();
+    let repo = &fixture.repo;
+    let base = fixture.tip(&TargetName::MAIN);
+    let adas = repo.revision(55, &[], base, &main_with(&[("README.md", "<<<<<<< ours")]));
+    let snapshot = repo.store.get(adas).unwrap().snapshot;
+    let readme = ["README.md"];
+    let (listed, old) = listing(&repo.store, snapshot, &readme, (adas, "user:ada"), None);
+    let (_, resolved) = listing(&repo.store, snapshot, &[], (adas, "user:ada"), Some(listed));
+    repo.store
+        .write_all(&[old.clone(), resolved].concat())
+        .unwrap();
+
+    let eve = caller("user:eve");
+    let (taken, records) = Fixture::revision(55, "user:eve", base, vec![adas], snapshot);
+    let (_, carried) = listing(&repo.store, snapshot, &readme, (taken, "user:eve"), None);
+    let carrying = [old.clone(), records.clone(), carried].concat();
+    assert_eq!(
+        forbidden(fixture.put(&eve, carrying)),
+        Forbidden::Conflict(path("README.md"))
+    );
+    fixture.put(&eve, [old, records].concat()).unwrap();
+}
+
+#[test]
+fn rebases_keep_the_conflicts_they_carry() {
+    let fixture = Fixture::new();
+    let repo = &fixture.repo;
+    let base = fixture.tip(&TargetName::MAIN);
+    let adas = repo.revision(56, &[], base, &main_with(&[("src/lib.rs", "fn ada() {}")]));
+    let snapshot = repo.store.get(adas).unwrap().snapshot;
+    let (_, records) = listing(
+        &repo.store,
+        snapshot,
+        &["README.md"],
+        (adas, "user:ada"),
+        None,
+    );
+    repo.store.write_all(&records).unwrap();
+
+    repo.change_on_main(57, &[("README.md", "newer")]);
+    repo.land(57);
+    let tip = fixture.tip(&TargetName::MAIN);
+    let edits = [("README.md", "newer"), ("src/lib.rs", "fn ada() {}")];
+    let (tree, mut objects) = Fixture::objects(&main_with(&edits));
+    objects.extend(Fixture::revision(56, "user:eve", tip, vec![adas], tree).1);
+    assert_eq!(
+        forbidden(fixture.put(&caller("user:eve"), objects)),
+        Forbidden::Resolve(path("README.md"))
+    );
+}
+
+#[test]
+fn concurrent_roots_never_make_a_change_diverge() {
+    let fixture = Fixture::new();
+    let (ada, base) = (&caller("user:ada"), fixture.tip(&TargetName::MAIN));
+    let state = fixture.state(&TargetName::MAIN);
+    let change = ChangeId::from_bytes([58; 16]);
+    let (_, first) = Fixture::revision(58, "user:ada", base, Vec::new(), state);
+    let (tree, mut second) = Fixture::objects(&main_with(&[("README.md", "ada")]));
+    second.extend(Fixture::revision(58, "user:ada", base, Vec::new(), tree).1);
+
+    let publishing = fixture.repo.store.lock_pushes().unwrap();
+    let fixture = &fixture;
+    let pushed: Vec<_> = std::thread::scope(|scope| {
+        let push = |objects| scope.spawn(move || fixture.put(ada, objects));
+        let pushes = [first, second].map(push);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        drop(publishing);
+        pushes.map(|push| push.join().unwrap()).into()
+    });
+    let refused: Vec<_> = pushed.into_iter().filter_map(Result::err).collect();
+    let [refused] = &refused[..] else {
+        panic!("expected one push refused, got {refused:?}")
+    };
+    assert!(
+        matches!(refused, ServiceError::Forbidden(Forbidden::History(id)) if *id == change),
+        "{refused:?}"
+    );
 }
 
 #[test]

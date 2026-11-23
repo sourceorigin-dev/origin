@@ -6,9 +6,9 @@
 //! A service lives as long as its process; its calls run concurrently, up to
 //! [`OriginService::MAX_INDEXES`] (see "The landing queue" in `docs/design.md`).
 //!
-//! Every method takes the [`Caller`], and does only what their [`Rights`] under
-//! the policy in force allow, as [`permissions`](crate::permissions) explains:
-//! it filters what they read, and checks what they write.
+//! Every method takes the [`Caller`], and does only what their [`Rights`]
+//! allow, as [`permissions`](crate::permissions) explains: it filters what they
+//! read, and checks what they write.
 
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
@@ -705,6 +705,7 @@ impl OriginService {
         } else {
             None
         };
+        self.check_roots(caller, &decoded)?;
         // Each layer durable before the next, as a workspace writes them:
         // statements before the revisions they're about, so a crash never
         // publishes a revision without its `core.conflict`.
@@ -739,14 +740,16 @@ impl OriginService {
     ) -> Result<(), ServiceError> {
         let policy = self.policy()?;
         let rights = self.rights(caller)?;
-        let batch = Batch::new(&self.store, held.keys().copied().collect(), decoded);
+        let batch = Batch::new(&self.store, held.keys().copied().collect(), decoded)?;
         let Some(principal) = caller.principal() else {
             return self.check_records(&batch, decoded, None, |issuer| {
                 policy.rights(Some(issuer)).admin
             });
         };
-        let writer = Writer::new(&batch, principal, &rights);
-        self.check_records(&batch, decoded, Some(writer), |_| rights.admin)
+        self.annotations(|annotations| {
+            let writer = Writer::new(&batch, annotations, principal, &rights);
+            self.check_records(&batch, decoded, Some(writer), |_| rights.admin)
+        })
     }
 
     /// Checks the records of `batch` (`decoded`), as
@@ -854,6 +857,39 @@ impl OriginService {
                         change: expected.change,
                         heads,
                     });
+                }
+            }
+            Ok(())
+        })
+    }
+
+    /// Checks that no root in `decoded` that a signed-in caller puts, new to the
+    /// repository, belongs to a change that already has revisions in the index,
+    /// caught up first. Runs under the lock every publication of revisions takes,
+    /// so of two pushes giving a new change a root, the second is refused, as
+    /// [`permissions`](crate::permissions) explains.
+    fn check_roots(
+        &self,
+        caller: &Caller,
+        decoded: &[(ObjectId, Object)],
+    ) -> Result<(), ServiceError> {
+        let roots: Vec<_> = decoded
+            .iter()
+            .filter_map(|(id, record)| match record {
+                Object::Revision(revision) if revision.predecessors.is_empty() => {
+                    Some((*id, revision.change))
+                }
+                _ => None,
+            })
+            .collect();
+        if caller.principal().is_none() || roots.is_empty() {
+            return Ok(());
+        }
+        self.annotations_pushing(|annotations| {
+            for (id, change) in roots {
+                let index = annotations.index();
+                if !index.revisions(change).is_empty() && !self.store.contains(id)? {
+                    return Err(Forbidden::History(change).into());
                 }
             }
             Ok(())

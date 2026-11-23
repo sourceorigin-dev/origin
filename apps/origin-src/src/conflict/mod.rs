@@ -224,15 +224,30 @@ impl Conflicts {
         claims: &[Claim],
         revision: &Revision,
     ) -> Result<Self, StoreError> {
+        Self::latest(store, claims.iter().map(Claim::statement), revision)
+    }
+
+    /// Returns the unresolved conflicts of `revision`, like [`Conflicts::of`],
+    /// from `statements` about it in arrival order.
+    ///
+    /// # Errors
+    ///
+    /// Fails like [`Conflicts::of`].
+    pub fn latest<'s, P: Platform>(
+        store: &Store<P>,
+        statements: impl IntoIterator<Item = &'s Statement>,
+        revision: &Revision,
+    ) -> Result<Self, StoreError> {
         if matches!(revision.author, Principal::Node(_)) {
             return Ok(Self::default());
         }
-        let Some(claim) = claims.iter().rev().find(|claim| {
-            claim.statement().kind == Kind::CONFLICT && claim.statement().issuer == revision.author
-        }) else {
+        let latest = statements.into_iter().filter(|statement| {
+            statement.kind == Kind::CONFLICT && statement.issuer == revision.author
+        });
+        let Some(statement) = latest.last() else {
             return Ok(Self::default());
         };
-        Self::listed(store, claim.statement())?.remaining(store, revision.snapshot)
+        Self::listed(store, statement)?.remaining(store, revision.snapshot)
     }
 
     /// Returns the conflicts that `snapshot` still has: those whose path still
