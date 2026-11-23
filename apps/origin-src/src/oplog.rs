@@ -45,7 +45,8 @@
 //! nothing back. A crash can leave a write unpublished or partly published:
 //! some or none of a batch's records, an acceptance the target's head never
 //! moved to (the next landing on the target publishes it), a waiting landing
-//! that wasn't kept, or a working copy that didn't move.
+//! that wasn't kept, or a working copy that didn't move (see
+//! [`workspace`](crate::workspace) for how such a move is finished).
 //!
 //! **Damage.** A crash during an append leaves part of a frame at the end of
 //! the last segment. It never was an entry: readers skip it, and the next
@@ -238,6 +239,17 @@ pub enum Why {
     Command,
     /// `origin undo`, taking back the operation with this number.
     Undo(u64),
+}
+
+impl Why {
+    /// Parses what [`Why`]'s `Display` writes.
+    pub(crate) fn parse(text: &str) -> Option<Self> {
+        Some(match text {
+            "draft" => Self::Draft,
+            "command" => Self::Command,
+            _ => Self::Undo(text.strip_prefix("undo ")?.parse().ok()?),
+        })
+    }
 }
 
 impl fmt::Display for Why {
@@ -1022,6 +1034,9 @@ mod tests {
             let frame = entry.encode();
             let payload = &frame[4..frame.len() - Frames::FRAMING + 4];
             assert_eq!(Entry::decode(payload), Ok(entry));
+        }
+        for why in [Why::Draft, Why::Command, Why::Undo(12)] {
+            assert_eq!(Why::parse(&why.to_string()), Some(why));
         }
     }
 

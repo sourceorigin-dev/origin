@@ -77,6 +77,7 @@ impl Workspace {
             config: self.config.clone(),
             revision: id,
             unlogged: None,
+            unreadable_move: None,
         };
         let empty = Tree::default().encode().id().into();
         workspace.checkout(empty, revision.snapshot, None)?;
