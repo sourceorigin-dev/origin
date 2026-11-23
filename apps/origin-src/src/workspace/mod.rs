@@ -29,6 +29,13 @@
 //! since the snapshot, the checkout fails and puts back the files it changed.
 //! The working copy and its change stay where they were, so the command can run
 //! again.
+//!
+//! Another workspace can move the change on without this working copy: the
+//! change can land, or the landing queue can rebase it. The working copy is
+//! then behind its change. Only `origin pull` moves it to where the change
+//! went, merging the edits made since (see [`land`]). Until then, edits stay
+//! unrecorded so the change doesn't fork, commands that only read the working
+//! copy say where the change went, and commands that build on it fail.
 
 mod annotate;
 mod land;
@@ -75,7 +82,8 @@ struct WorkingCopy {
     /// The revision's record, if recording the draft made a new revision,
     /// which is not written yet.
     unsaved: Option<EncodedObject>,
-    /// The revision's unresolved conflicts that the files still have.
+    /// The revision's unresolved conflicts. The files still have them, unless the
+    /// working copy is behind its change.
     conflicts: Conflicts,
     /// The record index as of the snapshot. Once the draft is saved, it has the new
     /// revision.
@@ -85,9 +93,22 @@ struct WorkingCopy {
     files: TreeId,
     /// The stat cache of the snapshot, which tells whether files were edited since.
     cache: StatCache,
+    /// Where the change went, if it moved on without the working copy.
+    behind: Option<Behind>,
     /// Keeps garbage collection from removing the objects the snapshot found, until
     /// the command that saves the snapshot is done.
     _held: LockedFile,
+}
+
+/// Where the working copy's change went after it moved on without the working
+/// copy, such as from another workspace. `origin pull` follows it there.
+#[derive(Clone, Debug)]
+enum Behind {
+    /// The change's only head landed, at this position of the target.
+    Landed { target: TargetName, seq: u64 },
+    /// The landing queue rebased the working copy into this revision, which waits
+    /// to land.
+    Rebased(RevisionId),
 }
 
 impl WorkingCopy {
@@ -274,9 +295,11 @@ impl Workspace {
             None => loaded,
         };
         let index = Index::open(&self.store)?;
-        let conflicts = self
-            .conflicts(self.revision, &revision)?
-            .remaining(&self.store, files)?;
+        let behind = self.behind(&index, self.revision, &revision)?;
+        let mut conflicts = self.conflicts(self.revision, &revision)?;
+        if behind.is_none() {
+            conflicts = conflicts.remaining(&self.store, files)?;
+        }
         Ok(WorkingCopy {
             id: self.revision,
             revision,
@@ -285,15 +308,17 @@ impl Workspace {
             index,
             files,
             cache,
+            behind,
             _held: held,
         })
     }
 
-    /// Snapshots the working copy and records its draft: a new revision if
-    /// the files changed, which still has to be saved.
+    /// Snapshots the working copy and records its draft: a new revision if the
+    /// files changed, which the caller still has to save. If the working copy is
+    /// behind its change, the edits stay unrecorded.
     fn record(&mut self) -> Result<WorkingCopy, WorkspaceError> {
         let working_copy = self.snapshot()?;
-        if working_copy.files == working_copy.revision.snapshot {
+        if working_copy.files == working_copy.revision.snapshot || working_copy.behind.is_some() {
             return Ok(working_copy);
         }
         let revision = Revision {
@@ -313,6 +338,70 @@ impl Workspace {
             unsaved: Some(encoded),
             ..working_copy
         })
+    }
+
+    /// Returns where the working copy's change went without the working copy, whose
+    /// ID is `id`, if it did: either the change's only head landed, or the landing
+    /// queue made a rebase of the working copy. The queue's rebases are made by
+    /// nodes, and evolve from the working copy, each from the one before.
+    fn behind(
+        &self,
+        index: &Index,
+        id: RevisionId,
+        revision: &Revision,
+    ) -> Result<Option<Behind>, WorkspaceError> {
+        let [head] = index.heads(revision.change)[..] else {
+            return Ok(None);
+        };
+        let mut newest: Revision = self.store.get(head)?;
+        if let Some(landing) = self.store.landing(head, &newest)? {
+            let body = landing.body();
+            return Ok(Some(Behind::Landed {
+                target: self.target_name(body.target)?,
+                seq: body.seq,
+            }));
+        }
+        let mut at = head;
+        while at != id && matches!(newest.author, Principal::Node(_)) {
+            let [predecessor] = newest.predecessors[..] else {
+                break;
+            };
+            at = predecessor;
+            newest = self.store.get(at)?;
+        }
+        Ok((at == id && head != id).then_some(Behind::Rebased(head)))
+    }
+
+    /// Describes where the working copy's change went, in words.
+    fn describe_behind(&self, change: ChangeId, behind: &Behind) -> Result<String, WorkspaceError> {
+        Ok(match behind {
+            Behind::Landed { target, seq } => {
+                format!("change {} landed on {target} #{seq}", change.short())
+            }
+            Behind::Rebased(rebased) => format!(
+                "the landing queue rebased change {} onto {}, as revision {}",
+                change.short(),
+                self.describe_base(self.store.get(*rebased)?.base)?,
+                rebased.short()
+            ),
+        })
+    }
+
+    /// Prints where the change went, if the working copy is behind it, and how to
+    /// follow it.
+    fn print_behind(&self, working_copy: &WorkingCopy) -> Result<(), WorkspaceError> {
+        if let Some(behind) = &working_copy.behind {
+            let edits = if working_copy.files == working_copy.revision.snapshot {
+                ""
+            } else {
+                ", with the edits made since"
+            };
+            println!(
+                "Behind: {}. Run `origin pull` to follow it{edits}.",
+                self.describe_behind(working_copy.revision.change, behind)?
+            );
+        }
+        Ok(())
     }
 
     /// Returns the unresolved conflicts of `revision`, whose ID is `id`.
@@ -354,14 +443,33 @@ impl Workspace {
         vec![first, statements, vec![revision.clone()]]
     }
 
-    /// Snapshots the working copy and saves its draft as a new revision if
-    /// the files changed, for the commands that build on it.
-    fn refresh(&mut self) -> Result<WorkingCopy, WorkspaceError> {
+    /// Snapshots the working copy and saves its draft as a new revision, if the
+    /// files changed and the working copy isn't behind its change. For the commands
+    /// that build on the working copy even when it's behind, such as those that
+    /// follow the change.
+    fn save_draft(&mut self) -> Result<WorkingCopy, WorkspaceError> {
         let mut working_copy = self.record()?;
         if let Some(unsaved) = working_copy.unsaved.take() {
             self.save(&[vec![unsaved]], working_copy.id, &mut working_copy.index)?;
         }
         Ok(working_copy)
+    }
+
+    /// Snapshots the working copy like [`Workspace::save_draft`], for the commands
+    /// that build on it. Fails if the working copy is behind its change.
+    fn refresh(&mut self) -> Result<WorkingCopy, WorkspaceError> {
+        let working_copy = self.save_draft()?;
+        self.following(working_copy)
+    }
+
+    /// Returns `working_copy`, or fails if it's behind its change.
+    fn following(&self, working_copy: WorkingCopy) -> Result<WorkingCopy, WorkspaceError> {
+        match &working_copy.behind {
+            None => Ok(working_copy),
+            Some(behind) => Err(WorkspaceError::Behind(
+                self.describe_behind(working_copy.revision.change, behind)?,
+            )),
+        }
     }
 
     /// Writes `layers` of objects and adds them to `index`, then makes `revision`
@@ -481,6 +589,7 @@ impl Workspace {
             self.flags(index, revision.change)?
         );
         println!("On top of: {}", self.describe_base(revision.base)?);
+        self.print_behind(&working_copy)?;
         Self::print_divergence(index, revision.change);
         if !working_copy.conflicts.is_empty() {
             Self::print_conflicts(&working_copy.conflicts);
@@ -583,7 +692,8 @@ impl Workspace {
     /// Fails if the working copy cannot be snapshotted or the new change
     /// cannot be written.
     pub fn new_change(&mut self, description: &str) -> Result<(), WorkspaceError> {
-        let mut working_copy = self.record()?;
+        let working_copy = self.record()?;
+        let mut working_copy = self.following(working_copy)?;
         let description = EncodedObject::blob(description.as_bytes());
         let revision = Revision {
             change: ChangeId::random().map_err(WorkspaceError::Random)?,
@@ -619,7 +729,8 @@ impl Workspace {
     /// Fails if the working copy cannot be snapshotted or the revision
     /// cannot be written.
     pub fn describe(&mut self, description: &str) -> Result<(), WorkspaceError> {
-        let mut working_copy = self.record()?;
+        let working_copy = self.record()?;
+        let mut working_copy = self.following(working_copy)?;
         let description = EncodedObject::blob(description.as_bytes());
         let revision = Revision {
             predecessors: vec![working_copy.id],
@@ -760,7 +871,7 @@ impl Workspace {
     /// of the working copy if it is one of the heads, or else of the newest head.
     /// Where heads changed the same text file, the file holds each version between
     /// conflict markers, and a `core.conflict` statement lists those files, so the
-    /// revision can't land until a snapshot without the markers (see
+    /// revision can't land until a later revision changes those files (see
     /// [`conflict`](crate::conflict)).
     ///
     /// # Errors
@@ -933,7 +1044,7 @@ impl Workspace {
                 }
             }
         }
-        Ok(())
+        self.print_behind(&working_copy)
     }
 
     /// `origin evolog <change>`: prints every revision of a change, newest
@@ -1124,6 +1235,9 @@ pub enum WorkspaceError {
         /// Its heads.
         heads: Vec<RevisionId>,
     },
+    /// The working copy is behind its change, and the command would build on it.
+    #[error("{0}: run `origin pull` to follow it first")]
+    Behind(String),
     /// `converge` was given a change with a single head.
     #[error("change {} is not divergent", .0.short())]
     NotDivergent(ChangeId),
