@@ -503,15 +503,15 @@ pub struct Batch<'a, P> {
     /// log.
     entries: Mutex<Vec<Entry>>,
     /// Whether the batch has read the pack manifest. It reads it before it
-    /// first trusts a pack to hold an object (see [`Batch::packed`]).
+    /// first looks an object up in the packs (see [`Batch::packed`]).
     manifest_read: Mutex<bool>,
 }
 
 impl<P: Platform> Batch<'_, P> {
     /// Stages an object unless the store already has it, and returns whether it
     /// was new. Either way, the object is durable once the batch commits. An
-    /// object packed since the packs were last loaded is staged again; the next
-    /// compaction removes the extra copy.
+    /// object packed since the batch read the manifest is staged again; the
+    /// next compaction removes the extra copy.
     ///
     /// # Errors
     ///
@@ -520,17 +520,7 @@ impl<P: Platform> Batch<'_, P> {
     pub fn write(&self, object: &EncodedObject) -> Result<bool, StoreError> {
         let id = object.id();
         let path = self.store.path(id);
-        if path.exists() {
-            // Its writer may not have synced its directory yet, and the
-            // batch's objects may refer to it.
-            let mut shard = path;
-            shard.pop();
-            self.write.sync_dir_with(shard);
-            return Ok(false);
-        }
-        if self.packed(id)? {
-            // The manifest naming its pack may not be durable yet.
-            self.write.sync_dir_with(self.store.packs_dir());
+        if self.hold(&path, || self.packed(id))? {
             return Ok(false);
         }
         let entry = Entry::of(object).map_err(|source| StoreError::Decode { id, source })?;
@@ -546,15 +536,46 @@ impl<P: Platform> Batch<'_, P> {
         Ok(true)
     }
 
+    /// Returns whether the store has `id`, an object that an object of the
+    /// batch refers to. If it does, `id` becomes durable when the batch commits,
+    /// like the batch's own objects.
+    ///
+    /// # Errors
+    ///
+    /// Fails like [`Store::contains`].
+    pub fn depend(&self, id: ObjectId) -> Result<bool, StoreError> {
+        self.hold(&self.store.path(id), || {
+            Ok(self.packed(id)? || self.store.find_packed(id)?.is_some())
+        })
+    }
+
+    /// Returns whether the store has the object, either as the loose file
+    /// `path` or in a pack (`packed` checks). If it does, the batch also syncs
+    /// the directory holding it (its shard, or the packs directory) on commit,
+    /// since its writer may not have synced it yet.
+    fn hold(
+        &self,
+        path: &Path,
+        packed: impl FnOnce() -> Result<bool, StoreError>,
+    ) -> Result<bool, StoreError> {
+        if path.exists() {
+            let mut shard = path.to_owned();
+            shard.pop();
+            self.write.sync_dir_with(shard);
+            return Ok(true);
+        }
+        let packed = packed()?;
+        if packed {
+            self.write.sync_dir_with(self.store.packs_dir());
+        }
+        Ok(packed)
+    }
+
     /// Whether a pack holds `id`, according to a manifest read since the batch
-    /// started. It reloads the manifest the first time, since garbage
+    /// started. It reads the manifest the first time it is called, since garbage
     /// collection may have rewritten a pack without the object, and a writer
     /// must never skip an object that is gone.
     fn packed(&self, id: ObjectId) -> Result<bool, StoreError> {
-        // A miss only stages the object again, so it needs no fresh read.
-        if self.store.packs.find(id).is_none() {
-            return Ok(false);
-        }
         let mut read = self
             .manifest_read
             .lock()
@@ -563,6 +584,8 @@ impl<P: Platform> Batch<'_, P> {
             self.store.reload_packs()?;
             *read = true;
         }
+        // Lookups from every core needn't wait on each other.
+        drop(read);
         Ok(self.store.packs.find(id).is_some())
     }
 
@@ -759,6 +782,26 @@ pub(crate) mod tests {
 
         // Its writer may not have synced it yet, if another one wrote it.
         assert_eq!(store.write_all(slice::from_ref(&blob)).unwrap(), 0);
+        let shard = store.path(blob.id()).parent().unwrap().to_owned();
+        assert_eq!(
+            store.platform.0.into_inner().unwrap(),
+            [Synced::Batch(0), Synced::Dir(shard)]
+        );
+    }
+
+    #[test]
+    fn dependencies_are_durable_with_the_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join(".origin"), Recorder::default());
+        store.init().unwrap();
+        let blob = EncodedObject::blob(b"hello");
+        store.write_all(slice::from_ref(&blob)).unwrap();
+        store.platform.0.lock().unwrap().clear();
+
+        let batch = store.batch();
+        assert!(batch.depend(blob.id()).unwrap());
+        assert!(!batch.depend(EncodedObject::blob(b"absent").id()).unwrap());
+        batch.commit().unwrap();
         let shard = store.path(blob.id()).parent().unwrap().to_owned();
         assert_eq!(
             store.platform.0.into_inner().unwrap(),

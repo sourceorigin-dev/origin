@@ -13,18 +13,25 @@
 //! Every method takes the [`Caller`], but nothing checks it yet: every caller
 //! may read and write everything.
 
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
 use origin_platform::Native;
 use origin_shared::api::{
     Annotation, ErrorCode, LandRequest, Landings, LogEntry, NewTarget, RevisionEntry, Revisions,
-    TargetInfo,
+    Stored, TargetInfo,
 };
 use origin_shared::landing::{Pending, Proposal};
-use origin_shared::{Base, ChangeId, Head, NodeKey, PrincipalName, RecordId, TargetName};
+use origin_shared::object::DecodeError;
+use origin_shared::pack::Pack;
+use origin_shared::{
+    Base, ChangeId, Head, NodeKey, Object, ObjectId, ObjectKind, Principal, PrincipalName,
+    RecordId, Statement, StatementId, TargetName,
+};
 
-use crate::annotations::Annotations;
+use crate::annotations::{AnnotateError, Annotations};
 use crate::index::Index;
 use crate::policy::{Policy, PolicyError};
 use crate::queue::{LandError, Queue};
@@ -48,6 +55,13 @@ pub struct Node {
     pub name: PrincipalName,
     /// The node's signing key.
     pub key: Arc<NodeKey>,
+}
+
+impl Node {
+    /// Returns the node as a principal: the issuer of the statements it makes.
+    fn principal(&self) -> Principal {
+        Principal::Node(self.name.clone())
+    }
 }
 
 /// The API over one repository, served by its node.
@@ -142,6 +156,155 @@ impl OriginService {
         let result = call(&mut annotations);
         taken.index = Some(annotations.into_index());
         result
+    }
+
+    /// Returns the objects `ids` name, in that order, as a pack.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the repository doesn't have one, or cannot read it.
+    pub fn records(&self, _caller: &Caller, ids: &[ObjectId]) -> Result<Pack, ServiceError> {
+        let objects = ids
+            .iter()
+            .map(|&id| self.store.read(id))
+            .collect::<Result<_, _>>()?;
+        Ok(Pack { objects })
+    }
+
+    /// Writes the objects of `pack`: snapshots, revisions and statements.
+    ///
+    /// Each object must be well formed, and everything it needs must be in the
+    /// repository or the pack, of the right kind: a tree's entries (trees or blobs,
+    /// as each entry says), a revision's snapshot (a tree), description, base and
+    /// dependencies, and a statement's subject and the statements it supersedes or
+    /// promotes. So the repository never holds a record it cannot use. Acceptances
+    /// are refused: only a target's authority writes them, by landing.
+    ///
+    /// Blobs and trees are made durable before the records that refer to them, and
+    /// statements before the revisions they are about. Promotions come last: each
+    /// is checked against its original by [`Store::claim`], once the original and
+    /// both subjects are stored. Issues `core.divergent` for each change the new
+    /// revisions made diverge.
+    ///
+    /// # Errors
+    ///
+    /// Fails if an object is malformed or is an acceptance, if it needs an object
+    /// that neither the pack nor the repository has or that is of another kind, if
+    /// a promotion doesn't match its original (the other records stay stored), or
+    /// if the objects cannot be written.
+    pub fn put_records(&self, _caller: &Caller, pack: Pack) -> Result<Stored, ServiceError> {
+        // Objects this finds stored stay until what refers to them is.
+        let _held = self.store.hold_objects()?;
+        let held: HashMap<ObjectId, Option<ObjectKind>> = pack
+            .objects
+            .iter()
+            .map(|object| (object.id(), object.kind().ok()))
+            .collect();
+        // Makes what the repository has of the dependencies durable before
+        // anything refers to them: their writers may not have yet.
+        let dependencies = self.store.batch();
+        // The dependencies the repository has, whose kinds are read once
+        // every object is checked otherwise.
+        let mut stored: HashMap<ObjectId, (ObjectId, ObjectKind)> = HashMap::new();
+        let mut snapshots = Vec::new();
+        let mut statements = Vec::new();
+        let mut revisions = Vec::new();
+        let mut promotions = Vec::new();
+        let mut changes = HashSet::new();
+        for object in pack.objects {
+            let id = object.id();
+            let decoded = object
+                .decode()
+                .map_err(|source| ServiceError::Malformed { id, source })?;
+            for (needed, kind) in Dependencies::of(&decoded) {
+                match held.get(&needed) {
+                    Some(&held) if held != Some(kind) => {
+                        return Err(ServiceError::WrongKind { id, needed, kind });
+                    }
+                    Some(_) => {}
+                    // Two objects needing it as different kinds can't both
+                    // be right.
+                    None if dependencies.depend(needed)? => match stored.entry(needed) {
+                        Entry::Occupied(entry) if entry.get().1 != kind => {
+                            return Err(ServiceError::WrongKind { id, needed, kind });
+                        }
+                        Entry::Occupied(_) => {}
+                        Entry::Vacant(entry) => {
+                            entry.insert((id, kind));
+                        }
+                    },
+                    None => return Err(ServiceError::Missing { id, needed }),
+                }
+            }
+            match decoded {
+                Object::Acceptance(_) => return Err(ServiceError::Acceptance(id.into())),
+                Object::Blob(_) | Object::Tree(_) => snapshots.push(object),
+                Object::Revision(revision) => {
+                    if !revision.predecessors.is_empty() {
+                        changes.insert(revision.change);
+                    }
+                    revisions.push(object);
+                }
+                Object::Statement(statement) if statement.promoted_from.is_some() => {
+                    promotions.push((object, statement));
+                }
+                Object::Statement(_) => statements.push(object),
+            }
+        }
+        self.check_kinds(&stored)?;
+        dependencies.commit()?;
+        let mut new = 0;
+        // Each layer durable before the next, as a workspace writes them:
+        // statements before the revisions they're about, so a crash never
+        // publishes a revision without its `core.conflict`.
+        for layer in [snapshots, statements, revisions] {
+            if !layer.is_empty() {
+                new += self.store.write_all(&layer)?;
+            }
+        }
+        // An original is never a promotion, so it's stored by now.
+        let mut checked = Vec::new();
+        for (object, statement) in promotions {
+            let id = object.id().into();
+            self.store
+                .claim(id, statement)?
+                .map_err(|invalid| ServiceError::Statement {
+                    id,
+                    source: Box::new(invalid.into()),
+                })?;
+            checked.push(object);
+        }
+        if !checked.is_empty() {
+            new += self.store.write_all(&checked)?;
+        }
+        if !changes.is_empty() {
+            self.annotations(|annotations| {
+                for &change in &changes {
+                    annotations.flag_divergence(change, self.node.principal())?;
+                }
+                Ok(())
+            })?;
+        }
+        Ok(Stored { new: new as u64 })
+    }
+
+    /// Checks that each object of `stored`, which the repository has, is of the
+    /// kind the pack object needing it expects. Reads them on every core.
+    fn check_kinds(
+        &self,
+        stored: &HashMap<ObjectId, (ObjectId, ObjectKind)>,
+    ) -> Result<(), ServiceError> {
+        let stored: Vec<_> = stored.iter().collect();
+        let checked = Store::<Native>::on_every_core(&stored, |chunk| {
+            for &(&needed, &(id, kind)) in chunk {
+                let object = self.store.read(needed)?;
+                if object.kind().ok() != Some(kind) {
+                    return Err(ServiceError::WrongKind { id, needed, kind });
+                }
+            }
+            Ok(())
+        });
+        checked.into_iter().collect()
     }
 
     /// Returns the statements about `subject`, in the order the repository received
@@ -390,6 +553,57 @@ impl Drop for Taken<'_> {
     }
 }
 
+/// What an object needs the repository to have to be usable, as
+/// [`OriginService::put_records`] lists, and the kind each must be. A
+/// revision's predecessors and a statement's payload are not needed: they are
+/// history and detail, and retention may have dropped a payload.
+struct Dependencies;
+
+impl Dependencies {
+    fn of(object: &Object) -> Vec<(ObjectId, ObjectKind)> {
+        match object {
+            Object::Blob(_) | Object::Acceptance(_) => Vec::new(),
+            Object::Tree(tree) => tree
+                .iter()
+                .map(|(_, entry)| (entry.id, entry.kind.object_kind()))
+                .collect(),
+            Object::Revision(revision) => {
+                let base = match revision.base {
+                    Base::Acceptance(id) => (id.into(), ObjectKind::Acceptance),
+                    Base::Revision(id) => (id.into(), ObjectKind::Revision),
+                };
+                let mut needed = vec![
+                    (revision.snapshot.into(), ObjectKind::Tree),
+                    (revision.description.into(), ObjectKind::Blob),
+                    base,
+                ];
+                needed.extend(
+                    revision
+                        .deps
+                        .iter()
+                        .map(|&id| (id.into(), ObjectKind::Revision)),
+                );
+                needed
+            }
+            Object::Statement(statement) => Self::of_statement(statement),
+        }
+    }
+
+    /// Returns what a statement needs: its subject, and the statements it
+    /// supersedes or promotes.
+    fn of_statement(statement: &Statement) -> Vec<(ObjectId, ObjectKind)> {
+        let subject = (statement.subject.into(), statement.subject.kind());
+        [Some(subject)]
+            .into_iter()
+            .chain(
+                [statement.supersedes, statement.promoted_from]
+                    .map(|id| id.map(|id| (id.into(), ObjectKind::Statement))),
+            )
+            .flatten()
+            .collect()
+    }
+}
+
 /// A failed service call.
 #[derive(Debug, thiserror::Error)]
 pub enum ServiceError {
@@ -408,6 +622,47 @@ pub enum ServiceError {
     /// A target's tip was proposed for landing without a target to land on.
     #[error("landing a target needs a target to land on")]
     NoTarget,
+    /// A put object isn't well formed.
+    #[error("object {id} is malformed")]
+    Malformed {
+        /// The object.
+        id: ObjectId,
+        /// What is wrong.
+        source: DecodeError,
+    },
+    /// An acceptance was put.
+    #[error(
+        "acceptance {0} cannot be put: only a target's authority writes acceptances, by landing"
+    )]
+    Acceptance(origin_shared::AcceptanceId),
+    /// A put object needs one that neither the pack nor the repository has.
+    #[error("object {id} needs object {needed}, which neither the batch nor the repository has")]
+    Missing {
+        /// The object put.
+        id: ObjectId,
+        /// The object it needs.
+        needed: ObjectId,
+    },
+    /// A put object refers to another as the wrong kind: a snapshot that isn't a
+    /// tree, or a file that is one.
+    #[error("object {id} refers to {needed} as a {kind}, which it is not")]
+    WrongKind {
+        /// The object put.
+        id: ObjectId,
+        /// The object it refers to.
+        needed: ObjectId,
+        /// The kind it must be.
+        kind: ObjectKind,
+    },
+    /// A put statement the repository doesn't accept: a promotion that doesn't
+    /// match its original.
+    #[error("statement {} cannot be put", .id.short())]
+    Statement {
+        /// The statement.
+        id: StatementId,
+        /// Why it was refused, boxed because it is large and rare.
+        source: Box<AnnotateError>,
+    },
     /// A landing failed.
     #[error(transparent)]
     Land(#[from] LandError),
@@ -425,7 +680,15 @@ impl ServiceError {
     pub fn code(&self) -> ErrorCode {
         match self {
             Self::UnknownChange(_) | Self::UnknownTarget(_) => ErrorCode::NotFound,
-            Self::NoTarget => ErrorCode::BadRequest,
+            Self::NoTarget
+            | Self::Malformed { .. }
+            | Self::Acceptance(_)
+            | Self::Missing { .. }
+            | Self::WrongKind { .. } => ErrorCode::BadRequest,
+            Self::Statement { source, .. } => match &**source {
+                AnnotateError::Store(error) => Self::store_code(error),
+                _ => ErrorCode::BadRequest,
+            },
             Self::Land(error) => match error {
                 LandError::UnknownTarget(_) | LandError::UnknownChange(_) => ErrorCode::NotFound,
                 LandError::TargetExists(_)
@@ -457,7 +720,57 @@ impl ServiceError {
 
 #[cfg(test)]
 mod tests {
+    use origin_shared::{EncodedObject, Record, RepoPath};
+
     use super::*;
+
+    #[test]
+    fn pushes_publish_statements_before_the_revisions_they_are_about() {
+        let repo = crate::queue::tests::Repo::new("[targets.main]\nauthority = \"node:queue\"\n");
+        let node = Node {
+            name: "queue".parse().unwrap(),
+            key: Arc::new(NodeKey::from_bytes(&[7; 32])),
+        };
+        let service = OriginService::new(repo.store.clone(), node);
+        let description = EncodedObject::blob(b"");
+        let revision = origin_shared::Revision {
+            change: origin_shared::ChangeId::from_bytes([1; 16]),
+            predecessors: Vec::new(),
+            base: origin_shared::Base::Acceptance(repo.tip(&TargetName::MAIN).acceptance),
+            deps: Vec::new(),
+            snapshot: repo.files(&[("a", "<<<<<<<")]),
+            description: description.id().into(),
+            author: "user:ada".parse().unwrap(),
+        }
+        .encode();
+        let conflicts = crate::conflict::Conflicts::new(vec![crate::conflict::Conflicted {
+            path: RepoPath::new("a").unwrap(),
+            written: None,
+        }]);
+        let subject = RecordId::Revision(revision.id().into());
+        let (payload, conflict) = conflicts.statement(subject, "user:ada".parse().unwrap(), None);
+        let conflict = conflict.encode();
+        let oplog = repo.store.oplog();
+        let before = oplog.last_seq().unwrap();
+        let objects = vec![description, payload, revision, conflict.clone()];
+        service
+            .put_records(&Caller::Owner, Pack { objects })
+            .unwrap();
+        // A crash between the two finds the conflict alone, never the
+        // revision without it.
+        let entries = oplog.after(before).unwrap().entries;
+        let written = |record: RecordId| {
+            let written = |entry: &&crate::oplog::Entry| match &entry.effect {
+                crate::oplog::Effect::Wrote(written) => {
+                    written.iter().any(|entry| entry.record() == record)
+                }
+                _ => false,
+            };
+            entries.iter().find(written).unwrap().seq
+        };
+        let conflict = RecordId::Statement(conflict.id().into());
+        assert!(written(conflict) < written(subject));
+    }
 
     #[test]
     fn calls_using_the_index_do_not_wait_for_each_other() {
