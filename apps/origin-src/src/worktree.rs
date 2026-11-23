@@ -6,7 +6,8 @@
 //! blob id, so only files whose metadata changed are read and hashed. Every
 //! step runs in parallel.
 //!
-//! Checkouts write files from the store, in parallel. The files they write
+//! Checkouts write files from the store. They never overwrite an edit made
+//! since the working copy was last snapshotted, and the files they write
 //! are durable once they return.
 
 use std::collections::{BTreeSet, HashMap};
@@ -47,7 +48,15 @@ struct Stat {
 }
 
 impl Stat {
-    fn new(kind: EntryKind, metadata: &fs::Metadata) -> Self {
+    /// The metadata of a file, from `lstat`.
+    fn new(metadata: &fs::Metadata) -> Self {
+        let kind = if metadata.is_symlink() {
+            EntryKind::Symlink
+        } else if metadata.mode() & 0o111 != 0 {
+            EntryKind::Executable
+        } else {
+            EntryKind::File
+        };
         Self {
             kind,
             size: metadata.size(),
@@ -58,10 +67,51 @@ impl Stat {
     }
 }
 
+/// A file that a checkout changes, as it found it unedited since the
+/// snapshot the checkout starts from: its metadata, or `None` if there was
+/// no file. A directory where a file goes counts as none: the checkout first
+/// removes the files it holds, then the directory, unless it still holds
+/// something (see [`Worktree::remove`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Seen(Option<Stat>);
+
+impl Seen {
+    /// Returns what is at `path`.
+    fn at(path: &Path) -> Result<Self, SnapshotError> {
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.is_dir() => Ok(Self(None)),
+            Ok(metadata) => Ok(Self(Some(Stat::new(&metadata)))),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                Ok(Self(None))
+            }
+            Err(source) => Err(SnapshotError::Io {
+                path: path.to_owned(),
+                source,
+            }),
+        }
+    }
+
+    /// Fails with [`SnapshotError::Edited`] unless the file at `path` is still
+    /// as `seen`. Does nothing if `seen` is `None`.
+    fn check(seen: Option<Self>, path: &Path) -> Result<(), SnapshotError> {
+        match seen {
+            Some(seen) if Self::at(path)? != seen => Err(SnapshotError::Edited(path.to_owned())),
+            _ => Ok(()),
+        }
+    }
+}
+
 /// A file that a checkout writes.
 struct Write {
     path: PathBuf,
     entry: TreeEntry,
+    /// The file there as found unedited, if the checkout checks for edits.
+    seen: Option<Seen>,
 }
 
 /// The stat cache: what each file looked like when it was last hashed, and
@@ -94,11 +144,15 @@ impl StatCache {
     /// Files modified shortly before the previous scan started ("racy"
     /// files) are never trusted, since they may have changed again without
     /// their metadata changing. They are rehashed until they settle.
-    fn get(&self, path: &RepoPath, stat: &Stat) -> Option<ObjectId> {
-        let (cached, id) = self.files.get(path.as_str())?;
-        let settled =
-            stat.mtime.max(stat.ctime) < self.scanned_at.saturating_sub(Self::RACY_MARGIN);
-        (cached == stat && settled).then_some(*id)
+    fn get(&self, path: &str, stat: &Stat) -> Option<ObjectId> {
+        let (cached, id) = self.files.get(path)?;
+        (cached == stat && self.settled(stat)).then_some(*id)
+    }
+
+    /// Whether a file with this metadata last changed long enough before the
+    /// scan for its cache entry to be trusted.
+    fn settled(&self, stat: &Stat) -> bool {
+        stat.mtime.max(stat.ctime) < self.scanned_at.saturating_sub(Self::RACY_MARGIN)
     }
 
     /// Loads the cache, treating a missing or unreadable one as empty: the
@@ -213,14 +267,13 @@ enum Child {
 /// What listing a directory says an entry is.
 enum Listed {
     Dir,
-    File { symlink: bool },
+    File,
 }
 
 /// A file found by the walk, not yet examined.
 struct FoundFile {
     path: RepoPath,
     absolute: PathBuf,
-    symlink: bool,
 }
 
 /// What examining a file found.
@@ -351,12 +404,8 @@ impl<'a, P: Platform> Worktree<'a, P> {
                             });
                             Child::Dir(dirs.len() - 1)
                         }
-                        Listed::File { symlink } => {
-                            files.push(FoundFile {
-                                path,
-                                absolute,
-                                symlink,
-                            });
+                        Listed::File => {
+                            files.push(FoundFile { path, absolute });
                             Child::File(files.len() - 1)
                         }
                     };
@@ -396,9 +445,7 @@ impl<'a, P: Platform> Worktree<'a, P> {
             let listed = if file_type.is_dir() {
                 Listed::Dir
             } else if file_type.is_file() || file_type.is_symlink() {
-                Listed::File {
-                    symlink: file_type.is_symlink(),
-                }
+                Listed::File
             } else {
                 // Sockets, FIFOs and devices have no content to track.
                 continue;
@@ -414,23 +461,15 @@ impl<'a, P: Platform> Worktree<'a, P> {
             path: file.absolute.clone(),
             source,
         };
-        let metadata = fs::symlink_metadata(&file.absolute).map_err(io_error)?;
-        let kind = if file.symlink {
-            EntryKind::Symlink
-        } else if metadata.mode() & 0o111 != 0 {
-            EntryKind::Executable
-        } else {
-            EntryKind::File
-        };
-        let stat = Stat::new(kind, &metadata);
-        if let Some(id) = cache.get(&file.path, &stat) {
+        let stat = Stat::new(&fs::symlink_metadata(&file.absolute).map_err(io_error)?);
+        if let Some(id) = cache.get(file.path.as_str(), &stat) {
             return Ok(Examined {
                 stat,
                 id,
                 blob: None,
             });
         }
-        let blob = if file.symlink {
+        let blob = if stat.kind == EntryKind::Symlink {
             let target = fs::read_link(&file.absolute).map_err(io_error)?;
             EncodedObject::blob(target.as_os_str().as_bytes())
         } else {
@@ -478,18 +517,74 @@ impl<'a, P: Platform> Worktree<'a, P> {
     /// the files and directories it changed are durable, at the cost of one
     /// batch sync.
     ///
+    /// With `unchanged`, the stat cache of the snapshot `changes` starts from,
+    /// it first checks that no file it changes was edited since, and changes
+    /// nothing if one was. A file counts as edited if it was created where the
+    /// checkout writes one, or if it is removed or replaced and its metadata
+    /// changed (unless its content didn't). It checks each file again just
+    /// before replacing it, and stops at a file edited in between, or at a
+    /// directory, where it writes a file, that holds untracked files.
+    ///
     /// # Errors
     ///
-    /// Fails if a file's content cannot be read from the store, or a file
-    /// cannot be removed, written or synced.
-    pub fn checkout(&self, changes: &[FileChange]) -> Result<(), SnapshotError> {
+    /// Fails with [`SnapshotError::Edited`] if a file changed since the
+    /// snapshot. Also fails if a file's content cannot be read from the store,
+    /// or a file cannot be removed, written or synced.
+    pub fn checkout(
+        &self,
+        changes: &[FileChange],
+        unchanged: Option<&StatCache>,
+    ) -> Result<(), SnapshotError> {
         if changes.is_empty() {
             return Ok(());
         }
+        let seen = unchanged
+            .map(|cache| Self::par_map(changes, |change| self.check_unchanged(change, cache)))
+            .transpose()?;
+        self.apply(changes, seen.as_deref())
+    }
+
+    /// Makes the files match a snapshot like [`Worktree::checkout`], but only
+    /// the files whose content is still what `changes` starts from; it leaves
+    /// the others as they are. So after an interrupted move, each file ends up
+    /// on one side or the other, and no edit is lost.
+    ///
+    /// # Errors
+    ///
+    /// Fails like [`Worktree::checkout`].
+    pub fn restore(&self, changes: &[FileChange]) -> Result<(), SnapshotError> {
+        let cache = StatCache::default();
+        let seen = Self::par_map(changes, |change| {
+            match self.check_unchanged(change, &cache) {
+                Ok(seen) => Ok(Some(seen)),
+                Err(SnapshotError::Edited(_)) => Ok(None),
+                Err(error) => Err(error),
+            }
+        })?;
+        let (changes, seen): (Vec<_>, Vec<_>) = changes
+            .iter()
+            .zip(seen)
+            .filter_map(|(change, seen)| Some((change.clone(), seen?)))
+            .unzip();
+        if changes.is_empty() {
+            return Ok(());
+        }
+        self.apply(&changes, Some(&seen))
+    }
+
+    /// Checks `changes` out, as [`Worktree::checkout`] describes. With `seen`,
+    /// the files as found unedited (one per change), it stops at a file edited
+    /// since.
+    fn apply(&self, changes: &[FileChange], seen: Option<&[Seen]>) -> Result<(), SnapshotError> {
+        let seen = |index: usize| seen.map(|seen| seen[index]);
         // Removing first frees the paths of files that become directories,
         // and of directories that become files.
-        for change in changes.iter().filter(|change| change.new.is_none()) {
+        for (index, change) in changes.iter().enumerate() {
+            if change.new.is_some() {
+                continue;
+            }
             let path = self.absolute(&change.path);
+            Seen::check(seen(index), &path)?;
             Self::remove(&path)?;
             for dir in path.ancestors().skip(1) {
                 // Stops at the first directory that isn't empty, or the root.
@@ -500,10 +595,12 @@ impl<'a, P: Platform> Worktree<'a, P> {
         }
         let writes: Vec<_> = changes
             .iter()
-            .filter_map(|change| {
+            .enumerate()
+            .filter_map(|(index, change)| {
                 Some(Write {
                     path: self.absolute(&change.path),
                     entry: change.new?,
+                    seen: seen(index),
                 })
             })
             .collect();
@@ -566,6 +663,49 @@ impl<'a, P: Platform> Worktree<'a, P> {
         .collect()
     }
 
+    /// Fails with [`SnapshotError::Edited`] if the file `change` changes was
+    /// edited since the snapshot `cache` describes, which `change` starts from.
+    /// Returns the file as it found it.
+    fn check_unchanged(
+        &self,
+        change: &FileChange,
+        cache: &StatCache,
+    ) -> Result<Seen, SnapshotError> {
+        let path = self.absolute(&change.path);
+        let seen = Seen::at(&path)?;
+        let unchanged = match (seen.0, change.old) {
+            (None, None) => true,
+            (Some(stat), Some(old)) => {
+                cache.get(change.path.as_str(), &stat) == Some(old.id)
+                    || Self::holds(&change.path, &path, old)?
+            }
+            _ => false,
+        };
+        if unchanged {
+            Ok(seen)
+        } else {
+            Err(SnapshotError::Edited(path))
+        }
+    }
+
+    /// Reads and hashes the file at `absolute` (`path` in the working copy) and
+    /// returns whether it has the content and kind of `entry`. Used for files
+    /// the cache can't vouch for, such as those edited just before the
+    /// snapshot. A socket, FIFO or device never matches.
+    fn holds(path: &RepoPath, absolute: &Path, entry: TreeEntry) -> Result<bool, SnapshotError> {
+        let tracked = fs::symlink_metadata(absolute)
+            .is_ok_and(|metadata| metadata.is_file() || metadata.is_symlink());
+        if !tracked {
+            return Ok(false);
+        }
+        let file = FoundFile {
+            path: path.clone(),
+            absolute: absolute.to_owned(),
+        };
+        let examined = Self::examine(&file, &StatCache::default())?;
+        Ok(examined.id == entry.id && examined.stat.kind == entry.kind)
+    }
+
     /// Makes what a checkout of `changes` wrote, `writes`, durable: syncs the
     /// files (except symlinks, which their directory holds) and every directory
     /// up to the root whose entries may have changed.
@@ -597,26 +737,40 @@ impl<'a, P: Platform> Worktree<'a, P> {
         self.root.join(path.as_str())
     }
 
-    /// Removes a file, if it's there.
+    /// Removes a file, if there is one. A directory where a checkout writes a
+    /// file is removed if it is empty, since the checkout already removed the
+    /// files it held. A directory that still holds something holds files no
+    /// snapshot tracks, such as a `.git`, a FIFO or a newly created file; that
+    /// counts as an edit.
     fn remove(path: &Path) -> Result<(), SnapshotError> {
+        let io_error = |source| SnapshotError::Io {
+            path: path.to_owned(),
+            source,
+        };
         match fs::remove_file(path) {
-            Err(error) if error.kind() != io::ErrorKind::NotFound => Err(SnapshotError::Io {
-                path: path.to_owned(),
-                source: error,
-            }),
-            _ => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(_) if path.symlink_metadata().is_ok_and(|found| found.is_dir()) => {
+                match fs::remove_dir(path) {
+                    Err(error) if error.kind() == io::ErrorKind::DirectoryNotEmpty => {
+                        Err(SnapshotError::Edited(path.to_owned()))
+                    }
+                    removed => removed.map_err(io_error),
+                }
+            }
+            removed => removed.map_err(io_error),
         }
     }
 
-    /// Writes the file `write` describes, replacing any file there. Its
-    /// directory must exist.
+    /// Writes the file `write` describes, replacing any file there, unless that
+    /// file was edited since it was seen. Its directory must exist.
     fn write_file(&self, write: &Write) -> Result<(), SnapshotError> {
-        let Write { path, entry } = write;
+        let Write { path, entry, seen } = write;
         let (path, entry) = (path.as_path(), *entry);
         let io_error = |source| SnapshotError::Io {
             path: path.to_owned(),
             source,
         };
+        Seen::check(*seen, path)?;
         // Never write through a symlink, or keep the old file's mode.
         Self::remove(path)?;
         let blob = self.store.read(entry.id)?;
@@ -702,6 +856,13 @@ pub enum SnapshotError {
     /// A file name cannot appear in a tree.
     #[error("cannot track {}: invalid file name", .0.display())]
     UntrackableName(PathBuf),
+    /// A checkout found a file edited since the snapshot it starts from, and
+    /// changed nothing.
+    #[error(
+        "{} changed while origin was moving the working copy, which stays where it was: run the command again",
+        .0.display()
+    )]
+    Edited(PathBuf),
     /// Objects cannot be read or stored.
     #[error(transparent)]
     Store(#[from] StoreError),
@@ -916,15 +1077,128 @@ mod tests {
         // Back to the old snapshot, then forward to the new one.
         let worktree = fixture.worktree();
         worktree
-            .checkout(&fixture.store.diff(new, old).unwrap())
+            .checkout(&fixture.store.diff(new, old).unwrap(), None)
             .unwrap();
         assert!(!fixture.dir.path().join("swap/inner").exists());
         let (back, cache) = fixture.snapshot(&cache);
         assert_eq!(back, old);
         worktree
-            .checkout(&fixture.store.diff(old, new).unwrap())
+            .checkout(&fixture.store.diff(old, new).unwrap(), None)
             .unwrap();
         assert!(!fixture.dir.path().join("gone").exists(), "emptied dirs go");
         assert_eq!(fixture.snapshot(&cache).0, new);
+    }
+
+    #[test]
+    fn checkouts_never_overwrite_edits_made_since_the_snapshot() {
+        let fixture = Fixture::new();
+        fixture.write("kept", "kept");
+        fixture.write("changed", "before");
+        let (old, _) = fixture.snapshot(&StatCache::default());
+        fixture.write("changed", "after");
+        fixture.write("added", "added");
+        let (new, _) = fixture.snapshot(&StatCache::default());
+        let back = fixture.store.diff(new, old).unwrap();
+        let worktree = fixture.worktree();
+
+        // Snapshotted, then edited again before the checkout.
+        let (_, cache) = fixture.snapshot(&StatCache::default());
+        fixture.write("changed", "edited since");
+        let error = worktree.checkout(&back, Some(&cache)).unwrap_err();
+        assert!(
+            matches!(&error, SnapshotError::Edited(path) if path.ends_with("changed")),
+            "{error}"
+        );
+        assert_eq!(
+            fs::read_to_string(fixture.dir.path().join("added")).unwrap(),
+            "added",
+            "nothing changed"
+        );
+
+        // Edited back, it is as snapshotted: its content tells.
+        fixture.write("changed", "after");
+        worktree.checkout(&back, Some(&cache)).unwrap();
+        assert_eq!(fixture.snapshot(&StatCache::default()).0, old);
+
+        // A file created where the checkout writes one.
+        let (_, cache) = fixture.snapshot(&StatCache::default());
+        fixture.write("added", "created since");
+        let forward = fixture.store.diff(old, new).unwrap();
+        assert!(matches!(
+            worktree.checkout(&forward, Some(&cache)),
+            Err(SnapshotError::Edited(_))
+        ));
+        assert_eq!(
+            fs::read_to_string(fixture.dir.path().join("added")).unwrap(),
+            "created since"
+        );
+    }
+
+    #[test]
+    fn checkouts_stop_at_a_file_edited_while_they_run() {
+        let fixture = Fixture::new();
+        fixture.write("file", "before");
+        let (old, _) = fixture.snapshot(&StatCache::default());
+        fixture.write("file", "after");
+        let (new, cache) = fixture.snapshot(&StatCache::default());
+        let back = fixture.store.diff(new, old).unwrap();
+        let worktree = fixture.worktree();
+
+        // Found unedited, then edited before the checkout replaces it.
+        let seen: Vec<_> = back
+            .iter()
+            .map(|change| worktree.check_unchanged(change, &cache).unwrap())
+            .collect();
+        fixture.write("file", "edited meanwhile");
+        let error = worktree.apply(&back, Some(&seen)).unwrap_err();
+        assert!(matches!(error, SnapshotError::Edited(_)), "{error}");
+        assert_eq!(
+            fs::read_to_string(fixture.dir.path().join("file")).unwrap(),
+            "edited meanwhile"
+        );
+    }
+
+    #[test]
+    fn checkouts_turn_files_into_directories_and_back() {
+        let fixture = Fixture::new();
+        fixture.write("a", "file");
+        let (file, _) = fixture.snapshot(&StatCache::default());
+        fs::remove_file(fixture.dir.path().join("a")).unwrap();
+        fixture.write("a/b", "in a directory");
+        let (dir, cache) = fixture.snapshot(&StatCache::default());
+        let worktree = fixture.worktree();
+
+        let back = fixture.store.diff(dir, file).unwrap();
+        worktree.checkout(&back, Some(&cache)).unwrap();
+        let (found, cache) = fixture.snapshot(&StatCache::default());
+        assert_eq!(found, file);
+        let forth = fixture.store.diff(file, dir).unwrap();
+        worktree.checkout(&forth, Some(&cache)).unwrap();
+        assert_eq!(fixture.snapshot(&StatCache::default()).0, dir);
+    }
+
+    #[test]
+    fn restoring_keeps_files_edited_since() {
+        let fixture = Fixture::new();
+        for path in ["unmoved", "moved", "edited"] {
+            fixture.write(path, "old");
+        }
+        let (old, _) = fixture.snapshot(&StatCache::default());
+        for path in ["unmoved", "moved", "edited", "added"] {
+            fixture.write(path, "new");
+        }
+        let (new, _) = fixture.snapshot(&StatCache::default());
+        let changes = fixture.store.diff(old, new).unwrap();
+
+        // A move cut short, then edits.
+        fixture.write("unmoved", "old");
+        fixture.write("edited", "edited");
+        fixture.write("added", "created");
+        fixture.worktree().restore(&changes).unwrap();
+        let read = |path| fs::read_to_string(fixture.dir.path().join(path)).unwrap();
+        assert_eq!(read("unmoved"), "new");
+        assert_eq!(read("moved"), "new");
+        assert_eq!(read("edited"), "edited");
+        assert_eq!(read("added"), "created");
     }
 }
