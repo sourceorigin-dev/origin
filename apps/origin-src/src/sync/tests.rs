@@ -753,7 +753,7 @@ fn a_push_in_parts_never_lands_an_abandoned_revision() {
             let wire = |objects: Vec<EncodedObject>| Pack { objects }.encode().len();
             let content = client
                 .store
-                .added(revision.snapshot, &[], &[])
+                .added(revision.snapshot, &[], &[], None)
                 .unwrap()
                 .iter()
                 .map(|placed| client.store.read(placed.entry.id).unwrap())

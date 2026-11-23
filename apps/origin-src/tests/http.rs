@@ -39,6 +39,8 @@ struct Server {
     /// `demo` and `strict`, accessed as `user:ada`.
     demo: Repo,
     strict: Repo,
+    /// `strict`, accessed as `user:ci`.
+    ci: Repo,
     /// `strict`, accessed anonymously.
     anonymous: Repo,
 }
@@ -76,11 +78,13 @@ impl Server {
         tokio::spawn(async move { axum::serve(listener, Api::router(repositories)).await });
         let anonymous = Client::new(&format!("http://{address}"));
         let client = anonymous.clone().with_token("ada-token");
+        let ci = anonymous.clone().with_token("ci-token");
         Self {
             _dir: dir,
             base: format!("http://{address}"),
             demo: client.repo("demo".parse().unwrap()),
             strict: client.repo("strict".parse().unwrap()),
+            ci: ci.repo("strict".parse().unwrap()),
             anonymous: anonymous.repo("strict".parse().unwrap()),
             client,
         }
@@ -202,12 +206,12 @@ async fn main_tip(repo: &Repo) -> Base {
     Base::Acceptance(main.head.acceptance)
 }
 
-fn ci_test(subject: RevisionId) -> EncodedObject {
+fn ci_test(subject: RevisionId, issuer: &str) -> EncodedObject {
     Statement {
         subject: RecordId::Revision(subject),
         kind: Kind::new("ci.test").unwrap(),
         verdict: Some(Verdict::Pass),
-        issuer: "user:ci".parse().unwrap(),
+        issuer: issuer.parse().unwrap(),
         inputs: None,
         payload: None,
         supersedes: None,
@@ -563,7 +567,7 @@ async fn reads_statements_and_revisions() {
     let repo = &server.demo;
     let base = main_tip(repo).await;
     let first = Made::revision(change(1), base, vec![], &[("a.txt", "1")]);
-    let statement = ci_test(first.id);
+    let statement = ci_test(first.id, "user:ada");
     let mut pack = first.pack();
     pack.objects.push(statement.clone());
     repo.put_records(&pack).await.unwrap();
@@ -734,7 +738,7 @@ async fn landings_wait_for_evidence() {
     );
 
     repo.put_records(&Pack {
-        objects: vec![ci_test(made.id)],
+        objects: vec![ci_test(made.id, "user:ci")],
     })
     .await
     .unwrap();
@@ -790,6 +794,30 @@ async fn events_long_poll() {
     );
 }
 
+/// Lands a change by `user:ada` with `files` on `strict`'s `main`, with the
+/// `ci.test` result it requires.
+async fn land_on_strict(server: &Server, seed: u8, files: &[(&str, &str)]) -> Made {
+    let made = Made::nested(change(seed), main_tip(&server.strict).await, files);
+    server.strict.put_records(&made.pack()).await.unwrap();
+    server
+        .ci
+        .put_records(&Pack {
+            objects: vec![ci_test(made.id, "user:ci")],
+        })
+        .await
+        .unwrap();
+    let land = LandRequest {
+        proposal: Proposal::Change(change(seed)),
+        onto: None,
+    };
+    let landed = server.strict.land(&land).await.unwrap();
+    assert!(
+        matches!(landed.landings[..], [Landing::Landed { .. }]),
+        "{landed:?}"
+    );
+    made
+}
+
 #[tokio::test]
 async fn tells_callers_what_they_may_do_and_issues_narrower_tokens() {
     let server = Server::start().await;
@@ -838,6 +866,103 @@ async fn tells_callers_what_they_may_do_and_issues_narrower_tokens() {
         .await
         .unwrap_err();
     assert_eq!(code(error), ErrorCode::Forbidden);
+}
+
+#[tokio::test]
+async fn reads_only_what_the_caller_may() {
+    let server = Server::start().await;
+    let public = land_on_strict(
+        &server,
+        1,
+        &[("README.md", "hello"), ("secrets/key", "hunter2")],
+    )
+    .await;
+    let secret = Made::nested(
+        change(2),
+        main_tip(&server.strict).await,
+        &[("README.md", "hello"), ("secrets/key", "rotated")],
+    );
+    server.strict.put_records(&secret.pack()).await.unwrap();
+    let anonymous = &server.anonymous;
+
+    let walked = anonymous
+        .fetch_snapshot(&FetchSnapshot {
+            of: RecordId::Revision(public.id),
+            have: Vec::new(),
+            paths: Vec::new(),
+            skip: 0,
+        })
+        .await
+        .unwrap();
+    let ids: Vec<_> = walked.pack.objects.iter().map(EncodedObject::id).collect();
+    let hunter2 = EncodedObject::blob(b"hunter2").id();
+    assert!(!ids.contains(&hunter2), "the secret's content is withheld");
+    assert_eq!(ids.len(), 2, "the root and README.md, not `secrets`'s tree");
+    let root: Tree = walked.pack.objects[0].decode_as().unwrap();
+    assert!(root.get("secrets").is_some());
+
+    let records = anonymous
+        .fetch_records(&FetchRecords {
+            ids: vec![public.id.into(), secret.id.into()],
+        })
+        .await
+        .unwrap();
+    assert_eq!(records.pack.objects[0].id(), public.id.into());
+    assert!(
+        records
+            .pack
+            .objects
+            .iter()
+            .all(|object| object.id() != secret.id.into())
+    );
+    let error = anonymous.revisions(change(2)).await.unwrap_err();
+    assert_eq!(code(error), ErrorCode::NotFound);
+    let query = StatementsQuery {
+        subject: RecordId::Revision(secret.id),
+    };
+    server
+        .strict
+        .put_records(&Pack {
+            objects: vec![review(secret.id)],
+        })
+        .await
+        .unwrap();
+    assert_eq!(server.strict.statements(&query).await.unwrap().len(), 1);
+    assert_eq!(anonymous.statements(&query).await.unwrap(), []);
+    let error = anonymous
+        .fetch_snapshot(&FetchSnapshot {
+            of: RecordId::Revision(secret.id),
+            have: Vec::new(),
+            paths: Vec::new(),
+            skip: 0,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(code(error), ErrorCode::NotFound);
+    let everything = EventsQuery {
+        cursor: Some(0),
+        ..EventsQuery::default()
+    };
+    let hidden = |page: &origin_shared::event::Page| {
+        page.events.iter().any(|event| {
+            matches!(event.kind,
+                EventKind::RevisionCreated { revision, .. } if revision == secret.id)
+                || matches!(event.kind,
+                    EventKind::StatementIssued { subject, .. } if subject == RecordId::Revision(secret.id))
+        })
+    };
+    assert!(hidden(&server.strict.events(&everything).await.unwrap()));
+    assert!(!hidden(&anonymous.events(&everything).await.unwrap()));
+}
+
+/// Creates a passing review by `user:ada` about `subject`.
+fn review(subject: RevisionId) -> EncodedObject {
+    Statement {
+        kind: Kind::new("review").unwrap(),
+        issuer: "user:ada".parse().unwrap(),
+        ..ci_test(subject, "user:ada").decode_as().unwrap()
+    }
+    .encode()
 }
 
 /// Checks that requests axum's extractors refuse, for a malformed query or

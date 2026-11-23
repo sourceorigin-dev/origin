@@ -992,7 +992,7 @@ impl<'a> Sync<'a> {
             let have = self.store.held_whole(have)?;
             for placed in self
                 .store
-                .added(revision.snapshot, &have, &[])?
+                .added(revision.snapshot, &have, &[], None)?
                 .into_iter()
                 .rev()
             {

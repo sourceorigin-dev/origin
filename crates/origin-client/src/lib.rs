@@ -67,16 +67,16 @@ endpoints! {
     }
 
     impl Repo {
-        /// Fetches records by id, in the order requested. Each record is followed
-        /// by its attachment if the server has it: a revision's description or a
-        /// statement's payload. A part that stops short holds the records up to the
-        /// last one it includes.
+        /// Fetches the records the caller may see by id, in the order requested.
+        /// Each record is followed by its attachment if the server has it: a
+        /// revision's description or a statement's payload. A part that stops short
+        /// holds the records up to the last one it includes.
         fn fetch_records(request: &FetchRecords) -> Part =
             POST "records/fetch", json(request) => part;
         /// Fetches the trees and blobs of a record's snapshot, parents first,
         /// skipping those that one of the request's `have` snapshots holds at the
-        /// same path. If a part stops short, ask again, skipping the objects already
-        /// received.
+        /// same path, and withholding content the caller may not read. If a part
+        /// stops short, ask again, skipping the objects already received.
         fn fetch_snapshot(request: &FetchSnapshot) -> Part =
             POST "snapshots/fetch", json(request) => part;
         /// Stores a batch of objects: snapshots, revisions and statements. Each

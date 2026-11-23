@@ -7,6 +7,7 @@ use std::io;
 use std::path::PathBuf;
 
 use origin_platform::Platform;
+use origin_shared::access::{Level, PathAccess};
 use origin_shared::{
     Base, Digest, EncodedObject, EntryKind, EntryName, Inputs, ObjectId, Record, RecordId,
     RepoPath, Tree, TreeEntry, TreeId,
@@ -27,6 +28,13 @@ pub struct FileChange {
 }
 
 impl<P: Platform> Store<P> {
+    /// Whether a tree operation may read the entry at `path`, in a directory
+    /// whose withheld paths are `withheld`: a file it may read, or a directory
+    /// it may read something under.
+    fn readable(withheld: Option<&PathAccess>, path: &RepoPath, entry: &TreeEntry) -> bool {
+        withheld.is_none_or(|access| access.reads_entry(path, entry))
+    }
+
     /// Lists the files that differ between two trees, sorted by path.
     /// Subtrees with equal ids are skipped without being read, so the cost
     /// follows the size of the change.
@@ -542,7 +550,9 @@ impl<P: Platform> Store<P> {
     /// Returns the objects of `snapshot` that none of the snapshots `have` holds
     /// at the same path, parents before children: what someone holding `have`
     /// lacks. With `paths`, only the objects under them, and the trees leading
-    /// to them. Subtrees that a `have` holds unchanged are skipped without being
+    /// to them. With `access`, only what it allows reading, and the trees
+    /// leading to it; the rest keeps its tree entries, but its content is left
+    /// out. Subtrees that a `have` holds unchanged are skipped without being
     /// read, so the cost follows the size of the change. Each object appears
     /// once, at its first path.
     ///
@@ -554,34 +564,48 @@ impl<P: Platform> Store<P> {
         snapshot: TreeId,
         have: &[TreeId],
         paths: &[RepoPath],
+        access: Option<&PathAccess>,
     ) -> Result<Vec<Placed>, StoreError> {
         let mut added = Vec::new();
         let mut seen = HashSet::new();
-        self.add_dir(
-            &RepoPath::root(),
-            snapshot,
-            have,
-            &Scope(paths),
-            &mut seen,
-            &mut added,
-        )?;
+        let walk = Walk {
+            scope: Scope(paths),
+            seen: &mut seen,
+            added: &mut added,
+        };
+        let root = RepoPath::root();
+        walk.dir(self, &root, snapshot, have, Self::unsettled(access, &root))?;
         Ok(added)
     }
 
-    fn add_dir(
-        &self,
+    /// Returns `access` if reading isn't fully allowed at and under `path`, or
+    /// `None` if it is. Walks only check paths while this is some.
+    fn unsettled<'a>(access: Option<&'a PathAccess>, path: &RepoPath) -> Option<&'a PathAccess> {
+        access.filter(|access| access.settled(path).is_none_or(|level| level < Level::Read))
+    }
+}
+
+/// A walk of [`Store::added`].
+struct Walk<'w> {
+    scope: Scope<'w>,
+    seen: &'w mut HashSet<ObjectId>,
+    added: &'w mut Vec<Placed>,
+}
+
+impl Walk<'_> {
+    fn dir<P: Platform>(
+        mut self,
+        store: &Store<P>,
         dir: &RepoPath,
         tree: TreeId,
         have: &[TreeId],
-        scope: &Scope<'_>,
-        seen: &mut HashSet<ObjectId>,
-        added: &mut Vec<Placed>,
-    ) -> Result<(), StoreError> {
+        access: Option<&PathAccess>,
+    ) -> Result<Self, StoreError> {
         if have.contains(&tree) {
-            return Ok(());
+            return Ok(self);
         }
-        if seen.insert(tree.into()) {
-            added.push(Placed {
+        if self.seen.insert(tree.into()) {
+            self.added.push(Placed {
                 path: dir.clone(),
                 entry: TreeEntry {
                     kind: EntryKind::Tree,
@@ -591,12 +615,15 @@ impl<P: Platform> Store<P> {
         }
         let have: Vec<Tree> = have
             .iter()
-            .map(|&id| self.get(id))
+            .map(|&id| store.get(id))
             .collect::<Result<_, _>>()?;
-        for (name, &entry) in &self.get(tree)? {
+        for (name, &entry) in &store.get(tree)? {
             let path = dir.join(name);
-            let covered = scope.covers(&path);
-            if !(covered || entry.kind.is_tree() && scope.leads_in(&path)) {
+            let covered = self.scope.covers(&path);
+            if !(covered || entry.kind.is_tree() && self.scope.leads_in(&path)) {
+                continue;
+            }
+            if !Store::<P>::readable(access, &path, &entry) {
                 continue;
             }
             let held = have.iter().filter_map(|tree| tree.get(name.as_str()));
@@ -606,13 +633,14 @@ impl<P: Platform> Store<P> {
             match entry.subtree() {
                 Some(subtree) => {
                     let held: Vec<_> = held.filter_map(|held| held.subtree()).collect();
-                    self.add_dir(&path, subtree, &held, scope, seen, added)?;
+                    let access = Store::<P>::unsettled(access, &path);
+                    self = self.dir(store, &path, subtree, &held, access)?;
                 }
-                None if seen.insert(entry.id) => added.push(Placed { path, entry }),
+                None if self.seen.insert(entry.id) => self.added.push(Placed { path, entry }),
                 None => {}
             }
         }
-        Ok(())
+        Ok(self)
     }
 }
 
