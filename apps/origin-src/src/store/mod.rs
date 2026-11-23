@@ -19,6 +19,7 @@
 //! Committing a batch also indexes its new records (see
 //! [`index`](crate::index)).
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::num::NonZero;
@@ -26,9 +27,9 @@ use std::panic;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
-use origin_platform::{DurableWrite, Native, Platform, WritableError};
+use origin_platform::{DurableWrite, LockMode, LockedFile, Native, Platform, WritableError};
 use origin_shared::object::{DecodeError, IdMismatch};
 use origin_shared::{EncodedObject, ObjectId, TargetName, TypedId};
 
@@ -199,6 +200,7 @@ impl<P: Platform> Store<P> {
             store: self,
             write: self.durable_write(),
             entries: Mutex::default(),
+            manifest_read: Mutex::default(),
         }
     }
 
@@ -297,6 +299,90 @@ impl<P: Platform> Store<P> {
         Ok(self.path(id).exists() || self.find_packed(id)?.is_some())
     }
 
+    /// Returns when this node stored the object: when its loose file was
+    /// written. Packing keeps that time.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the store doesn't have the object or its file cannot be
+    /// inspected.
+    pub fn stored_at(&self, id: ObjectId) -> Result<SystemTime, StoreError> {
+        let path = self.path(id);
+        match fs::metadata(&path).and_then(|metadata| metadata.modified()) {
+            // Compaction may have moved it into a pack.
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let (_, location) = self.find_packed(id)?.ok_or(StoreError::NotFound(id))?;
+                Ok(location.stored())
+            }
+            result => result.map_err(|source| StoreError::io(&path, source)),
+        }
+    }
+
+    /// The lock file that keeps garbage collection and writers apart.
+    const COLLECTION_LOCK: &str = "objects/collection";
+
+    /// Takes a shared lock that stops garbage collection from deleting objects
+    /// while it is held. Any number of writers can hold it at once. A writer
+    /// that may skip writing an object because it is already stored must hold
+    /// it until the records referring to that object are written.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the lock file cannot be opened.
+    pub fn hold_objects(&self) -> Result<LockedFile, StoreError> {
+        let path = self.root.join(Self::COLLECTION_LOCK);
+        Ok(LockedFile::open(&self.platform, &path, LockMode::Shared)?)
+    }
+
+    /// Takes the exclusive lock for garbage collection: waits for the writers
+    /// holding [`Store::hold_objects`], and blocks new ones while held. Garbage
+    /// collection holds it while it finds unreferenced objects and deletes
+    /// them.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the lock file cannot be opened.
+    pub fn lock_for_collection(&self) -> Result<LockedFile, StoreError> {
+        let path = self.root.join(Self::COLLECTION_LOCK);
+        Ok(LockedFile::open(
+            &self.platform,
+            &path,
+            LockMode::Exclusive,
+        )?)
+    }
+
+    /// Deletes objects durably, loose and packed, and returns how many bytes
+    /// that freed. Only garbage collection calls it, for objects nothing refers
+    /// to, while holding [`Store::lock_for_collection`].
+    ///
+    /// # Errors
+    ///
+    /// Fails if an object cannot be removed, its directory synced, or its pack
+    /// rewritten.
+    pub fn remove(&self, ids: &[ObjectId]) -> Result<u64, StoreError> {
+        let mut freed = self.remove_packed(&ids.iter().copied().collect())?;
+        let mut dirs = BTreeSet::new();
+        for &id in ids {
+            let path = self.path(id);
+            let removed = fs::symlink_metadata(&path).and_then(|metadata| {
+                fs::remove_file(&path)?;
+                Ok(metadata.len())
+            });
+            match removed {
+                Ok(len) => freed += len,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(source) => return Err(StoreError::io(&path, source)),
+            }
+            let mut shard = path;
+            shard.pop();
+            dirs.insert(shard);
+        }
+        for dir in dirs {
+            self.sync_dir(&dir)?;
+        }
+        Ok(freed)
+    }
+
     /// Reads an object, or `None` if the store does not have it.
     ///
     /// # Errors
@@ -393,18 +479,21 @@ pub struct Batch<'a, P> {
     write: DurableWrite<'a, P>,
     /// What the index keeps of each new record staged.
     entries: Mutex<Vec<Entry>>,
+    /// Whether the batch has read the pack manifest. It reads it before it
+    /// first trusts a pack to hold an object (see [`Batch::packed`]).
+    manifest_read: Mutex<bool>,
 }
 
 impl<P: Platform> Batch<'_, P> {
-    /// Stages an object, unless the store already has it, returning whether
-    /// it was new. Either way, it is durable once the batch commits. Packs
-    /// are only checked as last loaded: an object packed since is staged
-    /// again, and the next compaction removes the copy.
+    /// Stages an object unless the store already has it, and returns whether it
+    /// was new. Either way, the object is durable once the batch commits. An
+    /// object packed since the packs were last loaded is staged again; the next
+    /// compaction removes the extra copy.
     ///
     /// # Errors
     ///
-    /// Fails if the object is a record that doesn't decode, or if it cannot
-    /// be compressed or written.
+    /// Fails if the object is a record that doesn't decode, or if it cannot be
+    /// compressed or written.
     pub fn write(&self, object: &EncodedObject) -> Result<bool, StoreError> {
         let id = object.id();
         let path = self.store.path(id);
@@ -416,7 +505,7 @@ impl<P: Platform> Batch<'_, P> {
             self.write.sync_dir_with(shard);
             return Ok(false);
         }
-        if self.store.packs.find(id).is_some() {
+        if self.packed(id)? {
             // The manifest naming its pack may not be durable yet.
             self.write.sync_dir_with(self.store.packs_dir());
             return Ok(false);
@@ -432,6 +521,26 @@ impl<P: Platform> Batch<'_, P> {
                 .push(entry);
         }
         Ok(true)
+    }
+
+    /// Whether a pack holds `id`, according to a manifest read since the batch
+    /// started. It reloads the manifest the first time, since garbage
+    /// collection may have rewritten a pack without the object, and a writer
+    /// must never skip an object that is gone.
+    fn packed(&self, id: ObjectId) -> Result<bool, StoreError> {
+        // A miss only stages the object again, so it needs no fresh read.
+        if self.store.packs.find(id).is_none() {
+            return Ok(false);
+        }
+        let mut read = self
+            .manifest_read
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if !*read {
+            self.store.reload_packs()?;
+            *read = true;
+        }
+        Ok(self.store.packs.find(id).is_some())
     }
 
     /// Stages each of `objects` in turn, returning how many were new.
@@ -537,7 +646,6 @@ pub(crate) mod tests {
     use std::fs::File;
     use std::slice;
     use std::sync::Mutex;
-    use std::time::SystemTime;
 
     use origin_platform::{CloneFile, Durability, Error, FileLock, FileSystem, FsKind, ReadAt};
 

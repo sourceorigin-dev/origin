@@ -27,7 +27,7 @@ use std::fs;
 use std::io;
 use std::path::{self, Path, PathBuf};
 
-use origin_platform::Native;
+use origin_platform::{LockedFile, Native};
 use origin_shared::{
     AcceptanceId, Base, BlobId, ChangeId, EncodedObject, Kind, NodePublicKey, Principal, Record,
     RecordId, RepoPath, Revision, RevisionId, Source, Statement, StatementId, TargetId, TargetName,
@@ -67,6 +67,9 @@ struct WorkingCopy {
     unsaved: Option<EncodedObject>,
     /// The revision's unresolved conflicts that the files still have.
     conflicts: Conflicts,
+    /// Keeps garbage collection from removing the objects the snapshot found, until
+    /// the command that saves the snapshot is done.
+    _held: LockedFile,
 }
 
 impl WorkingCopy {
@@ -202,6 +205,7 @@ impl Workspace {
     /// Snapshots the working copy into a draft, recording nothing, for the
     /// commands that only read it.
     fn snapshot(&self) -> Result<WorkingCopy, WorkspaceError> {
+        let held = self.store.hold_objects()?;
         let revision: Revision = self.store.get(self.revision)?;
         let path = self.meta("state");
         let (files, cache) =
@@ -220,6 +224,7 @@ impl Workspace {
             files,
             unsaved: None,
             conflicts,
+            _held: held,
         })
     }
 
