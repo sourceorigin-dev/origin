@@ -42,6 +42,7 @@ End-to-end tests run the `origin` binary with `ORIGIN_CONFIG_DIR` set to a
 temporary directory, which holds the user's `config.toml` and node key.
 The HTTP tests drive every SDK method against a real server. One fails
 while `docs/openapi.json` is stale: `just openapi` rewrites it.
+`tests/common` holds the helpers every end-to-end test shares.
 
 ## Validation
 
