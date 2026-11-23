@@ -2,8 +2,7 @@ use std::sync::Arc;
 
 use origin_platform::Native;
 use origin_shared::event::Filter;
-use origin_shared::pack::Pack;
-use origin_shared::{AcceptanceBody, Base, NodeKey, RepoPath, Statement};
+use origin_shared::{AcceptanceBody, NodeKey, RepoPath, Verdict};
 
 use super::*;
 use crate::events::Events;
@@ -47,6 +46,35 @@ impl Client {
 
     fn sync(&self) -> Sync<'_> {
         Sync::new(&self.store, &self.remote, "laptop".parse().unwrap())
+    }
+
+    /// Writes a revision of `change` with `files` on `base`, with every object
+    /// it needs.
+    fn revision(
+        &self,
+        change: u8,
+        predecessors: &[RevisionId],
+        base: Base,
+        files: &[(&str, &str)],
+    ) -> RevisionId {
+        let mut objects: Vec<_> = files
+            .iter()
+            .map(|(_, content)| EncodedObject::blob(content.as_bytes()))
+            .collect();
+        let description = EncodedObject::blob(b"work");
+        let revision = Revision {
+            change: ChangeId::from_bytes([change; 16]),
+            predecessors: predecessors.to_vec(),
+            base,
+            deps: Vec::new(),
+            snapshot: build(&self.store, files),
+            description: description.id().into(),
+            author: "user:ada".parse().unwrap(),
+        }
+        .encode();
+        objects.extend([description, revision.clone()]);
+        self.store.write_all(&objects).unwrap();
+        revision.id().into()
     }
 }
 
@@ -328,6 +356,129 @@ fn fetches_the_records_of_changes() {
 }
 
 #[test]
+fn pushes_revisions_snapshots_and_statements() {
+    let server = Repo::new(MAIN_RULES);
+    let client = Client::new(&server);
+    client.sync().fetch_chains(&[TargetName::MAIN]).unwrap();
+    let base = main_tip(&client.store);
+    let first = client.revision(1, &[], base, &[("a", "1"), ("b", "1")]);
+    let second = client.revision(1, &[first], base, &[("a", "2"), ("b", "1")]);
+    let statement = ci_test(second, "user:ada").encode();
+    client
+        .store
+        .write_all(std::slice::from_ref(&statement))
+        .unwrap();
+
+    let change = ChangeId::from_bytes([1; 16]);
+    let pushed = client.sync().push(&[change]).unwrap();
+    assert_eq!((pushed.revisions, pushed.statements), (2, 1), "{pushed:?}");
+    assert_eq!(
+        pushed.objects,
+        2 + 1 + 1 + 2 + 2,
+        "the revisions, their description, the statement, two trees and two blobs"
+    );
+    for id in [first.into(), second.into(), statement.id()] {
+        assert!(server.store.contains(id).unwrap());
+    }
+    assert_eq!(client.sync().push(&[change]).unwrap(), Pushed::default());
+}
+
+#[test]
+fn pushes_statements_after_those_they_need() {
+    let server = Repo::new(MAIN_RULES);
+    let client = Client::new(&server);
+    client.sync().fetch_chains(&[TargetName::MAIN]).unwrap();
+    let base = main_tip(&client.store);
+    let first = client.revision(1, &[], base, &[("a", "1")]);
+    let second = client.revision(1, &[first], base, &[("a", "2")]);
+    let pass = ci_test(first, "user:ada");
+    let fail = Statement {
+        subject: RecordId::Revision(second),
+        verdict: Some(Verdict::Fail),
+        supersedes: Some(pass.encode().id().into()),
+        ..pass.clone()
+    };
+    client
+        .store
+        .write_all(&[fail.encode(), pass.encode()])
+        .unwrap();
+
+    let change = ChangeId::from_bytes([1; 16]);
+    let pushed = client.sync().push(&[change]).unwrap();
+    assert_eq!((pushed.statements, &pushed.unsent[..]), (2, &[][..]));
+    for statement in [&pass, &fail] {
+        assert!(server.store.contains(statement.encode().id()).unwrap());
+    }
+
+    let other = client.revision(2, &[], base, &[("b", "1")]);
+    let old = ci_test(other, "user:ada");
+    let newer = Statement {
+        supersedes: Some(old.encode().id().into()),
+        ..fail.clone()
+    };
+    client
+        .store
+        .write_all(&[old.encode(), newer.encode()])
+        .unwrap();
+    let pushed = client.sync().push(&[change]).unwrap();
+    assert_eq!(pushed.statements, 0);
+    assert_eq!(pushed.unsent, [StatementId::from(newer.encode().id())]);
+}
+
+#[test]
+fn transfers_go_in_parts_in_dependency_order() {
+    let server = Repo::new(MAIN_RULES);
+    let limit = 200;
+    let client = Client::answered_in_parts(&server, limit);
+    client.sync().fetch_chains(&[TargetName::MAIN]).unwrap();
+    let base = main_tip(&client.store);
+    let files: Vec<(String, String)> = (0..20)
+        .map(|i| (format!("src/{}/{i}", i % 3), format!("content {i}")))
+        .collect();
+    let files: Vec<_> = files
+        .iter()
+        .map(|(p, c)| (p.as_str(), c.as_str()))
+        .collect();
+    let first = client.revision(1, &[], base, &files);
+    let second = client.revision(1, &[first], base, &files[1..]);
+    let statement = ci_test(second, "user:ada").encode();
+    client
+        .store
+        .write_all(std::slice::from_ref(&statement))
+        .unwrap();
+    let change = ChangeId::from_bytes([1; 16]);
+    let pushed = client
+        .sync()
+        .with_pack_limit(limit)
+        .push(&[change])
+        .unwrap();
+    assert_eq!((pushed.revisions, pushed.statements), (2, 1));
+
+    let other = Client::answered_in_parts(&server, limit);
+    other.sync().fetch_chains(&[TargetName::MAIN]).unwrap();
+    let fetched = other.sync().fetch_changes(&[change]).unwrap();
+    assert_eq!(
+        fetched,
+        Fetched {
+            revisions: 2,
+            statements: 1
+        }
+    );
+    let snapshot = other.store.get(first).unwrap().snapshot;
+    let request = FetchSnapshot {
+        snapshot,
+        have: Vec::new(),
+        paths: Vec::new(),
+        skip: 0,
+    };
+    let part = other.remote.snapshot(&request).unwrap();
+    assert!(part.more && part.pack.objects.len() < 10, "{part:?}");
+    assert!(other.sync().need(snapshot, &[]).unwrap());
+    let empty = build(&other.store, &[]);
+    assert_eq!(other.store.diff(empty, snapshot).unwrap().len(), 20);
+}
+
+#[test]
 fn fetched_revisions_are_written_after_what_they_need() {
     let server = Repo::new(MAIN_RULES);
     let first = server.change_on_main(1, &[("a", "a")]);
@@ -409,6 +560,109 @@ fn the_remote_events_say_which_changes_moved() {
     let moved = client.sync().moved(Some(&cursor)).unwrap();
     assert_eq!(moved.changes, Some(HashSet::from(both)));
     assert!(moved.cursor.next > cursor.next);
+}
+
+#[test]
+fn pushes_refuse_stale_changes_and_bases_the_remote_lacks() {
+    let server = Repo::new(MAIN_RULES);
+    let shared = server.change_on_main(1, &[("a", "a")]);
+    let client = Client::new(&server);
+    client.sync().fetch_chains(&[TargetName::MAIN]).unwrap();
+    let change = ChangeId::from_bytes([1; 16]);
+    client.sync().fetch_changes(&[change]).unwrap();
+
+    let base = main_tip(&client.store);
+    let ours = client.revision(1, &[shared], base, &[("a", "ours")]);
+    let theirs = server.revision(1, &[shared], base, &[("a", "theirs")]);
+    let error = client.sync().push(&[change]).unwrap_err();
+    assert!(
+        matches!(error, SyncError::Stale { change: c, head } if c == change && head == theirs),
+        "{error}"
+    );
+    assert!(
+        !server.store.contains(ours.into()).unwrap(),
+        "nothing was sent"
+    );
+
+    let local = TargetName::new("local").unwrap();
+    let key = NodeKey::from_bytes(&[9; 32]);
+    let genesis = AcceptanceBody {
+        target: local.id(),
+        seq: 0,
+        prev: None,
+        state: build(&client.store, &[]),
+        landed: Vec::new(),
+        evidence: Vec::new(),
+        policy: None,
+    }
+    .sign(&key);
+    client.store.append(&local, &genesis).unwrap();
+    let on_local = Base::Acceptance(genesis.encode().id().into());
+    client.revision(2, &[], on_local, &[("b", "b")]);
+    let error = client
+        .sync()
+        .push(&[ChangeId::from_bytes([2; 16])])
+        .unwrap_err();
+    assert!(
+        matches!(&error, SyncError::Unshared { target: Some(target), .. } if *target == local),
+        "{error}"
+    );
+}
+
+#[test]
+fn each_part_of_a_push_expects_the_heads_the_parts_before_left() {
+    let change = ChangeId::from_bytes([1; 16]);
+    let [r0, r1, r2] = [1, 2, 3].map(|n| RevisionId::from(ObjectId::from_bytes([n; 32])));
+    let mut transfer = Transfer {
+        heads: HashMap::from([(change, vec![r0])]),
+        revisions: HashMap::from([
+            (r1.into(), (change, vec![r0])),
+            (r2.into(), (change, vec![r1])),
+        ]),
+        ..Transfer::default()
+    };
+    let expected = |heads: Vec<RevisionId>| vec![Expected { change, heads }];
+    assert_eq!(transfer.expect(&[r1.into()]), expected(vec![r0]));
+    assert_eq!(transfer.expect(&[r2.into()]), expected(vec![r1]));
+    assert_eq!(transfer.expect(&[]), []);
+}
+
+#[test]
+fn queue_rebases_and_pushes_never_make_a_change_diverge() {
+    let server = Repo::new(MAIN_RULES);
+    server.change_on_main(1, &[("a", "a")]);
+    let original = server.change_on_main(2, &[("b", "b")]);
+    server.land(1);
+    let change = ChangeId::from_bytes([2; 16]);
+    let pushing = server.store.lock_pushes().unwrap();
+    let description = EncodedObject::blob(b"concurrent edit");
+    let successor = Revision {
+        predecessors: vec![original],
+        description: description.id().into(),
+        ..server.store.get(original).unwrap()
+    }
+    .encode();
+    let landed = std::thread::scope(|scope| {
+        let landing = scope.spawn(|| {
+            server
+                .queue()
+                .land_change(&mut server.annotations(), change, &TargetName::MAIN)
+        });
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        server
+            .store
+            .write_all(&[description, successor.clone()])
+            .unwrap();
+        drop(pushing);
+        landing.join().unwrap()
+    });
+    let heads = Index::open(&server.store).unwrap().heads(change);
+    assert_eq!(heads.len(), 1, "{landed:?}");
+    assert!(
+        matches!(landed, Err(crate::queue::LandError::Moved(moved)) if moved == change)
+            || landed.is_ok(),
+        "{landed:?}"
+    );
 }
 
 #[test]

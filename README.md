@@ -122,7 +122,7 @@ demo = "repos/demo"
 The HTTP API, under `/api/v1`, puts records in batches, if the changes
 they revise are where the client saw them, and fetches them by id, walks
 snapshots for the trees and blobs a client lacks (the only way files leave
-a server), in parts of at most 64 MiB, compares the records of changes,
+a server), in parts of at most 64 MiB each way, compares the records of changes,
 lists statements, revisions, targets and their logs, lands changes and
 targets, and streams events by long-poll: `GET
 /api/v1/repos/<repo>/events?cursor=<n>&wait=30s` answers as soon as there

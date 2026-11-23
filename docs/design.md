@@ -642,6 +642,23 @@ fetch (`Sync::moved`), so a fetch that brings nothing costs the same however
 long the history. Only without a cursor, or once it expired, does it compare
 every change this node knows.
 
+### Pushing
+
+A push shares revisions, with their snapshots, and statements. It never lands
+anything. Before uploading anything, it compares each change's heads with the
+remote's, and refuses a stale change: one that has a revision on the remote
+that this node lacks. The remote checks the heads again as it publishes the
+revisions, so a push racing another is refused too. Revisions only go to a
+remote that has the acceptance they are based on. Each object is sent after
+the objects it needs: snapshots and attachments, then revisions, then
+statements. A statement that needs a record the remote neither has nor
+receives stays here, and the push reports it.
+
+Transfers are bounded both ways: a push is split into requests of at most
+`Pack::LIMIT` bytes, and a fetch's answers stop at that size, with the rest
+asked for again (`Part`). Each request of a push expects the heads that the
+requests before it left.
+
 ## Workspaces and platform code
 
 `origin workspace new [--change X] [path]` creates a workspace that shares
