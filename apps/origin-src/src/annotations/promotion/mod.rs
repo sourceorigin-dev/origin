@@ -1,24 +1,21 @@
-//! Promotion: carrying results over to the records with the same input
-//! digest.
+//! Promotion: carrying results over to records with the same input digest.
 //!
-//! A promotion claims what its original does, so it counts only once
-//! checked against it: [`Store::claim`] checks it, and only that makes a
-//! [`Claim`]. Whatever reads results, such as the landing queue, reads
-//! claims, through [`Annotations::claims`].
+//! A promotion claims what its original claims, but counts only once
+//! [`Store::claim`] has checked it against the original; only that check
+//! makes a [`Claim`]. Results carry over within a target, never from one
+//! target to another, since their checks may differ. Readers, such as the
+//! landing queue, read claims through [`Annotations::claims`].
 //!
-//! Promotion runs on demand, never as a side effect of reading: `origin
-//! promote`, and the landing queue when it checks evidence, call
-//! [`Annotations::promote`]. The index groups promotable statements by
-//! kind, issuer and declared inputs, so the search costs one lookup per
-//! input path for each group, then a comparison per statement against
-//! digests the index caches. A statement's digest is computed from its
-//! subject's trees the first time a search meets it.
+//! Promotion runs only when asked: `origin promote`, and the landing queue
+//! when it checks evidence, call [`Annotations::promote`].
 
 use std::collections::HashSet;
 
 use origin_platform::Platform;
 use origin_shared::api::Annotation;
-use origin_shared::{Principal, Record, RecordId, Statement, StatementId};
+use origin_shared::{
+    Acceptance, Base, Principal, Record, RecordId, Statement, StatementId, TargetId,
+};
 
 use super::Annotations;
 use crate::store::{Store, StoreError};
@@ -155,11 +152,11 @@ impl<P: Platform> Annotations<'_, P> {
     }
 
     /// Returns the statements that would promote results to `subject`, as
-    /// `issuer` would issue them, without writing them, sorted by kind. For each
-    /// [promotion group](Statement::promotion_group) it picks the latest result
-    /// about another record that `sees` says the caller reads, whose input digest
-    /// equals the subject's. It skips a group the subject has a result in from
-    /// that issuer: a result that ran there wins.
+    /// `issuer` would issue them, without writing them, sorted by kind. For
+    /// each [promotion group](Statement::promotion_group) the subject has no
+    /// result of, it picks the latest unsuperseded statement with the subject's
+    /// input digest, about another record on the same target that `sees`
+    /// says the caller can read.
     ///
     /// # Errors
     ///
@@ -170,7 +167,10 @@ impl<P: Platform> Annotations<'_, P> {
         issuer: &Principal,
         mut sees: impl FnMut(RecordId) -> Result<bool, StoreError>,
     ) -> Result<Vec<Statement>, StoreError> {
-        let Some(snapshot) = self.store.snapshot_of(subject)? else {
+        let (Some(snapshot), Some(target)) = (
+            self.store.snapshot_of(subject)?,
+            self.store.target_of(subject)?,
+        ) else {
             return Ok(Vec::new());
         };
         self.compute_digests()?;
@@ -200,7 +200,10 @@ impl<P: Platform> Annotations<'_, P> {
                     continue;
                 }
                 let statement = self.store.get(id)?;
-                if self.superseded_by(id, &statement)?.is_none() && sees(statement.subject)? {
+                if self.superseded_by(id, &statement)?.is_none()
+                    && self.store.target_of(statement.subject)? == Some(target)
+                    && sees(statement.subject)?
+                {
                     promotions.push(Statement {
                         subject,
                         issuer: issuer.clone(),
@@ -246,14 +249,12 @@ impl<P: Platform> Annotations<'_, P> {
 }
 
 impl<P: Platform> Store<P> {
-    /// Checks the claim `statement`, `id`, makes. A statement that promotes
-    /// none makes its own. A promotion must name an original the store has
-    /// that is [promotable](Statement::is_promotable), match its kind,
-    /// verdict, inputs and payload, and be about a record whose input
-    /// digest equals the original's subject's: then it makes the
-    /// original's claim, or else the claim is invalid, which is the inner
-    /// error. Whether anyone superseded either is left to the reader, see
-    /// [`Annotations::claims`].
+    /// Checks the claim that `statement`, with id `id`, makes: its own, unless
+    /// it promotes another. A promotion makes its original's claim if the
+    /// original is stored and [promotable](Statement::is_promotable), their
+    /// kind, verdict, inputs and payload match, and the subjects share a
+    /// [target](Store::target_of) and an input digest. Otherwise the inner
+    /// error says why. Readers check supersession, see [`Annotations::claims`].
     ///
     /// # Errors
     ///
@@ -289,6 +290,10 @@ impl<P: Platform> Store<P> {
         if let Some(&(field, _)) = differs.iter().find(|(_, differs)| *differs) {
             return Ok(Err(InvalidPromotion::Differs(field)));
         }
+        let target = self.target_of(statement.subject)?;
+        if target.is_none() || target != self.target_of(original.subject)? {
+            return Ok(Err(InvalidPromotion::OtherTarget));
+        }
         let (Some(here), Some(there), Some(inputs)) = (
             self.snapshot_of(statement.subject)?,
             self.snapshot_of(original.subject)?,
@@ -305,6 +310,43 @@ impl<P: Platform> Store<P> {
             statement,
             original: Some((original_id, original)),
         }))
+    }
+
+    /// Returns the target `record` is on, for promotion: an acceptance's own
+    /// target, or for a revision, the target of the acceptance it is based on,
+    /// following the revisions below it. Returns `None` for a snapshot, a
+    /// statement, or a record whose base this store lacks.
+    ///
+    /// # Errors
+    ///
+    /// Fails if a record cannot be read.
+    pub fn target_of(&self, record: RecordId) -> Result<Option<TargetId>, StoreError> {
+        let base = match record {
+            RecordId::Acceptance(id) => Base::Acceptance(id),
+            RecordId::Revision(id) => Base::Revision(id),
+            RecordId::Snapshot(_) | RecordId::Statement(_) => return Ok(None),
+        };
+        Ok(self
+            .base_acceptance(base)?
+            .map(|acceptance| acceptance.body().target))
+    }
+
+    /// Returns the acceptance `base` leads to, following the revisions below
+    /// it, or `None` if the store lacks a record on the way.
+    fn base_acceptance(&self, mut base: Base) -> Result<Option<Acceptance>, StoreError> {
+        let missing = |error| match error {
+            StoreError::NotFound(_) => Ok(None),
+            error => Err(error),
+        };
+        loop {
+            base = match base {
+                Base::Acceptance(id) => return self.get(id).map(Some).or_else(missing),
+                Base::Revision(below) => match self.get(below) {
+                    Ok(below) => below.base,
+                    Err(error) => return missing(error),
+                },
+            };
+        }
     }
 }
 
@@ -327,6 +369,9 @@ pub enum InvalidPromotion {
     /// Its subject's input digest differs from the original's subject's.
     #[error("its subject's inputs differ from its original's")]
     InputsDiffer,
+    /// Its subject is not on the same target as its original's subject.
+    #[error("its subject isn't on the target its original's is on")]
+    OtherTarget,
 }
 
 #[cfg(test)]

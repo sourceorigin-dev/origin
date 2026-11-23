@@ -1,9 +1,41 @@
-use origin_shared::{EncodedObject, Kind, Verdict};
+use origin_shared::{EncodedObject, Kind, TargetName, Verdict};
 
 use super::*;
 use crate::annotations::AnnotateError;
-use crate::annotations::tests::{FILES, check, issue, principal, promote, revision, store};
+use crate::annotations::tests::{
+    FILES, check, issue, principal, promote, revision, revision_on, store,
+};
 use crate::index::Index;
+
+#[test]
+fn results_promote_within_their_target_only() {
+    let (_dir, store) = store();
+    let feature = TargetName::new("feature").unwrap();
+    let result = check(
+        revision_on(&store, &feature, 1, &[], FILES),
+        "lint",
+        Verdict::Pass,
+        "node:ci",
+        Some((&["src"], false)),
+    );
+    let original = issue(&store, &result);
+
+    let on_main = revision(&store, 2, &[], FILES);
+    assert_eq!(promote(&store, on_main).len(), 0);
+    let forged = Statement {
+        subject: RecordId::Revision(on_main),
+        issuer: principal("node:queue"),
+        promoted_from: Some(original),
+        ..result
+    };
+    let id = forged.encode().id().into();
+    assert!(matches!(
+        store.claim(id, forged).unwrap(),
+        Err(InvalidPromotion::OtherTarget)
+    ));
+    let on_feature = revision_on(&store, &feature, 3, &[], FILES);
+    assert_eq!(promote(&store, on_feature).len(), 1);
+}
 
 #[test]
 fn promotes_results_whose_inputs_are_unchanged() {

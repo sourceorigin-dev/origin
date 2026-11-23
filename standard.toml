@@ -96,7 +96,6 @@ paths = [
 reason = "32 files of findings, fixed in follow-ups"
 paths = [
     "apps/origin-src/src/annotations/mod.rs",
-    "apps/origin-src/src/annotations/promotion/mod.rs",
     "apps/origin-src/src/conflict/mod.rs",
     "apps/origin-src/src/events/mod.rs",
     "apps/origin-src/src/frames.rs",

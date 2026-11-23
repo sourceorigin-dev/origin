@@ -1,13 +1,12 @@
 //! The landing queue: how a target's authority lands changes and other
 //! targets on the target, one acceptance at a time.
 //!
-//! Landing a change lands its stack, bottom up, one acceptance per change
-//! whose head the target lacks, and a change that waits keeps the whole stack
-//! waiting. Each revision is refused, rebased onto the tip ([`Store::merge`]),
-//! held on conflict ([`conflict`](crate::conflict)), checked against the policy
-//! ([`Policy::governing`]) and its [claims](crate::annotations::Claim), and
-//! otherwise signed as an acceptance. Waiting landings live in
-//! `queue/<target id>/`. See `docs/design.md`.
+//! Landing a change lands its stack, bottom up, one acceptance per revision
+//! the target lacks. Each revision is rebased or merged onto the target's tip
+//! and checked against the target's policy and evidence, then signed into an
+//! acceptance, or left waiting. Each target's queue lives in
+//! `queue/<target id>/`: a `lock`, and a file per waiting landing,
+//! `change-<id>` or `target-<target id>`.
 
 mod pending;
 mod session;
@@ -20,8 +19,9 @@ use origin_platform::{DurableWrite, LockMode, LockedFile, Native, Platform};
 use origin_shared::access::{Level, PathAccess};
 use origin_shared::landing::{Blocked, Landing, Pending, Proposal};
 use origin_shared::{
-    AcceptanceBody, AcceptanceId, ChangeId, EncodedObject, Head, NodeKey, Principal, PrincipalName,
-    Record, RecordId, RepoPath, RevisionId, Source, TargetId, TargetName, Tree, TreeId,
+    AcceptanceBody, AcceptanceId, Base, ChangeId, Digest, EncodedObject, Head, NodeKey, Principal,
+    PrincipalName, Record, RecordId, RepoPath, Revision, RevisionId, Source, TargetId, TargetName,
+    Tree, TreeId,
 };
 
 use crate::annotations::{AnnotateError, Annotations};
@@ -190,14 +190,36 @@ impl<'a, P: Platform> Queue<'a, P> {
         }
         // Even a merge that changes nothing lands, so that the tip is in
         // the target's history, and later merges start from it.
+        //
+        // Checked as a revision on `onto`'s tip, as a rebase is, so results
+        // about it count on `onto` alone (see `Store::target_of`): the same
+        // merge on another target is checked with that target's checks. The
+        // same tips make the same revision, which a retry checks again.
+        let onto_tip = session.tip.acceptance;
+        let digest = Digest::of(&[*onto_tip.as_bytes(), *tip.acceptance.as_bytes()].concat());
+        let mut change = [0; ChangeId::LEN];
+        change.copy_from_slice(&digest.as_bytes()[..ChangeId::LEN]);
+        let description = EncodedObject::attachment(b"");
+        let merged = Revision {
+            change: ChangeId::from_bytes(change),
+            predecessors: Vec::new(),
+            base: Base::Acceptance(onto_tip),
+            deps: Vec::new(),
+            snapshot: merge.tree,
+            description: description.id().into(),
+            author: self.principal(),
+        }
+        .encode();
+        let mut trees = merge.trees;
+        trees.push(description);
         session.submit(Candidate {
             kept_as: proposal.clone(),
             proposal,
             source: Source::Target(tip.acceptance),
-            subject: RecordId::Snapshot(merge.tree),
+            subject: RecordId::Revision(merged.id().into()),
             state: merge.tree,
-            trees: merge.trees,
-            revision: None,
+            trees,
+            revision: Some(merged),
         })
     }
 

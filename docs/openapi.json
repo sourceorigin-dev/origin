@@ -1972,7 +1972,7 @@
           },
           "subject": {
             "$ref": "#/components/schemas/RecordId",
-            "description": "What the evidence must be about: the revision that would land, or the\nmerged snapshot when landing a target. For a conflict, the revision or\nacceptance that did not merge."
+            "description": "The record the evidence must be about: the revision that would land, or\nfor a target, the revision of the merge on the tip it lands on. For a\nconflict, the revision or acceptance that didn't merge."
           }
         }
       },
@@ -2270,7 +2270,7 @@
       },
       "Statement": {
         "type": "object",
-        "description": "An attributable claim about another record: a check result, a review, a\nconflict, an abandonment.\n\nStatements are permanent. An issuer revises one by issuing another that\nsupersedes it. A promoted statement carries another one over to a record\nwith the same input digest, pointing at it instead of copying its issuer.",
+        "description": "A claim about another record, attributed to its issuer, such as a check\nresult, a review, a conflict or an abandonment.\n\nStatements are permanent. An issuer revises a statement by issuing\nanother that supersedes it. A promoted statement carries another\nstatement over to a record on the same target with the same input\ndigest. It points at the original instead of copying its issuer.",
         "required": [
           "subject",
           "kind",

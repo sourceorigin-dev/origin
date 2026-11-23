@@ -41,9 +41,9 @@ pub struct Pending {
     pub onto: TargetName,
     /// What lands.
     pub proposal: Proposal,
-    /// What the evidence must be about: the revision that would land, or the
-    /// merged snapshot when landing a target. For a conflict, the revision or
-    /// acceptance that did not merge.
+    /// The record the evidence must be about: the revision that would land, or
+    /// for a target, the revision of the merge on the tip it lands on. For a
+    /// conflict, the revision or acceptance that didn't merge.
     pub subject: RecordId,
     /// Why it waits.
     pub blocked: Blocked,

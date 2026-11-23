@@ -370,7 +370,7 @@ impl OriginService {
             RecordId::Acceptance(id) => {
                 self.store.get(id).map(|acceptance| acceptance.body().state)
             }
-            RecordId::Statement(_) | RecordId::Snapshot(_) => {
+            RecordId::Snapshot(_) | RecordId::Statement(_) => {
                 return Err(ServiceError::NotASnapshot(record));
             }
         };
