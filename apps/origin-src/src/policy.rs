@@ -33,8 +33,8 @@ use std::str::FromStr;
 
 use origin_platform::Platform;
 use origin_shared::{
-    AcceptanceId, EncodedObject, EntryKind, EntryName, Kind, NodePublicKey, Principal,
-    PrincipalName, Record, RepoPath, TargetName, Tree, TreeEntry, TreeId, Verdict,
+    AcceptanceBody, AcceptanceId, EncodedObject, EntryKind, EntryName, Kind, NodePublicKey,
+    Principal, PrincipalName, Record, RepoPath, TargetName, Tree, TreeEntry, TreeId, Verdict,
 };
 use serde::Deserialize;
 
@@ -111,6 +111,34 @@ pub enum Access {
 impl Policy {
     /// The file holding the policy, at the root of the `policy` target.
     pub const FILE: &str = "policy.toml";
+
+    /// Returns the acceptance of `policy` whose `policy.toml` governs the
+    /// acceptance `id`, with body `body`: the policy that says who must have
+    /// signed it and what it had to meet.
+    ///
+    /// - An acceptance of `policy` is governed by the one before it, which it
+    ///   must name, so a policy never authorizes its own landing. The first
+    ///   one, with none before it, governs itself.
+    /// - Any other acceptance is governed by the policy it names. The caller
+    ///   must check that this policy is on `policy`'s chain.
+    ///
+    /// The landing queue checks what it signs against this policy, and so must
+    /// anything that verifies a chain.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the acceptance names a different policy than these rules
+    /// require, or names none.
+    pub fn governing(id: AcceptanceId, body: &AcceptanceBody) -> Result<AcceptanceId, PolicyError> {
+        if body.target != TargetName::POLICY.id() {
+            return body.policy.ok_or(PolicyError::Unnamed(body.seq));
+        }
+        match (body.prev, body.policy) {
+            (None, None) => Ok(id),
+            (Some(prev), Some(policy)) if policy == prev => Ok(prev),
+            _ => Err(PolicyError::NotPredecessor(body.seq)),
+        }
+    }
 
     /// The policy in force, at the head of the `policy` target, and the
     /// acceptance holding it.
@@ -478,6 +506,14 @@ pub enum PolicyError {
         /// What is wrong, boxed: it's large, and rare.
         source: Box<toml::de::Error>,
     },
+    /// An acceptance of `policy`, at this sequence number, names a policy other
+    /// than the acceptance before it.
+    #[error("acceptance #{0} of `policy` names another policy than the one before it")]
+    NotPredecessor(u64),
+    /// An acceptance of another target, at this sequence number, names no
+    /// policy.
+    #[error("acceptance #{0} names no policy")]
+    Unnamed(u64),
 }
 
 #[cfg(test)]
