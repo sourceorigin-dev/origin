@@ -110,7 +110,6 @@ paths = [
     "apps/origin-src/src/store/mod.rs",
     "apps/origin-src/src/store/packs/mod.rs",
     "apps/origin-src/src/targets/mod.rs",
-    "apps/origin-src/src/workspace/land.rs",
     "apps/origin-src/src/workspace/mod.rs",
     "apps/origin-src/src/workspace/ops.rs",
     "apps/origin-src/src/workspace/registry.rs",

@@ -216,7 +216,8 @@ enum WorkspaceCommand {
         changes: Vec<String>,
     },
     /// Print events as they happen, one per line. The first line is the cursor
-    /// to resume from. Runs until interrupted.
+    /// to resume from. Watches the remote's events if the repository has a
+    /// remote. Runs until interrupted.
     Watch {
         /// Only show events with this name, such as `check.requested`, or events
         /// about statements of this kind, such as `core.conflict` or `ci.*`.
@@ -230,6 +231,9 @@ enum WorkspaceCommand {
         /// event kept.
         #[arg(long)]
         since: Option<u64>,
+        /// Watch this node's events instead of the remote's.
+        #[arg(long)]
+        local: bool,
     },
 }
 
@@ -571,7 +575,8 @@ impl WorkspaceCommand {
                 kind,
                 subject,
                 since,
-            } => workspace.watch(kind, subject, since)?,
+                local,
+            } => workspace.watch(kind, subject, since, local)?,
         }
         Ok(())
     }
