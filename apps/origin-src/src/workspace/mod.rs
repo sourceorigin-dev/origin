@@ -48,6 +48,7 @@
 
 mod annotate;
 mod land;
+mod ops;
 mod registry;
 
 pub use annotate::{Annotated, Payload};
@@ -626,9 +627,9 @@ impl Workspace {
         }
     }
 
-    /// Notes the draft a command saves with its own records as a move of its own.
-    /// The draft's move is logged together with the command's move, which starts
-    /// from the draft.
+    /// Notes the draft a command saves with its own records as a move of its own,
+    /// so `undo` takes the command back to the edits it recorded. The draft's move
+    /// is logged together with the command's move, which starts from the draft.
     fn log_draft(&mut self, working_copy: &WorkingCopy) {
         if working_copy.unsaved.is_some() {
             self.unlogged = Some(Move {
@@ -1452,9 +1453,7 @@ impl Workspace {
 
     fn target_name(&self, id: TargetId) -> Result<TargetName, WorkspaceError> {
         self.store
-            .targets()?
-            .into_iter()
-            .find(|target| target.id() == id)
+            .target_name(id)?
             .ok_or(WorkspaceError::UnknownTargetId(id))
     }
 }
@@ -1600,6 +1599,15 @@ pub enum WorkspaceError {
     /// A landing failed.
     #[error(transparent)]
     Land(#[from] LandError),
+    /// `undo` found no operation of this workspace to take back.
+    #[error("nothing to undo: no operation moved this workspace's working copy")]
+    NothingToUndo,
+    /// `undo` reached the operation that created the workspace.
+    #[error(
+        "nothing to undo but the creation of {}: remove it with `origin workspace rm`",
+        .0.display()
+    )]
+    UndoCreation(PathBuf),
 }
 
 impl WorkspaceError {

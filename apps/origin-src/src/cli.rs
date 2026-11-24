@@ -149,6 +149,22 @@ enum WorkspaceCommand {
     /// Manage workspaces: working copies that share this repository.
     #[command(subcommand)]
     Workspace(WorkspacesCommand),
+    /// Show the op log: the operations this node ran, in every workspace.
+    #[command(subcommand)]
+    Op(OpCommand),
+    /// Move this workspace's working copy back to where it was before its
+    /// latest operation. Records and targets are not changed.
+    Undo,
+}
+
+#[derive(Debug, Subcommand)]
+enum OpCommand {
+    /// List the latest operations, newest first.
+    Log {
+        /// Show at most this many operations.
+        #[arg(short = 'n', long)]
+        limit: Option<usize>,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -458,6 +474,8 @@ impl WorkspaceCommand {
             }
             Self::Workspace(WorkspacesCommand::List) => workspace.list_workspaces()?,
             Self::Workspace(WorkspacesCommand::Rm { path }) => workspace.remove_workspace(&path)?,
+            Self::Op(OpCommand::Log { limit }) => workspace.op_log(limit)?,
+            Self::Undo => workspace.undo()?,
         }
         Ok(())
     }

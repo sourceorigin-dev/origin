@@ -919,6 +919,29 @@ fn an_argument_that_is_not_utf8_is_no_panic() {
 }
 
 #[test]
+fn a_repository_is_one_working_copy_however_init_spells_it() {
+    let repo = Repo::new();
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir(dir.path().join("real")).unwrap();
+    std::os::unix::fs::symlink("real", dir.path().join("link")).unwrap();
+    // Into a directory that exists, or one whose parents don't yet.
+    for path in ["repo", "a/b/repo"] {
+        let init = repo
+            .command(dir.path(), &["init", &format!("link/{path}")])
+            .output()
+            .unwrap();
+        assert!(init.status.success(), "{init:?}");
+        let real = fs::canonicalize(dir.path().join("real").join(path)).unwrap();
+        let undo = repo.command(&real, &["undo"]).output().unwrap();
+        let error = String::from_utf8_lossy(&undo.stderr);
+        assert!(
+            error.contains("nothing to undo but the creation of"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
 fn a_move_marker_that_cannot_be_read_is_kept_and_stops_moves() {
     let repo = Repo::new();
     repo.write("a", "a\n");
@@ -1706,6 +1729,98 @@ fn a_refused_pull_writes_nothing() {
     assert!(pulled.contains("On top of: main #1\n"), "{pulled}");
     let status = repo.ok_in(&other, &["status"]);
     assert!(!status.contains("divergent"), "{status}");
+}
+
+#[test]
+fn undo_moves_the_working_copy_back_one_operation_at_a_time() {
+    let repo = Repo::new();
+    let first = repo.change();
+    repo.write("a", "a\n");
+    repo.ok(&["describe", "Add a"]);
+    repo.ok(&["new", "Second"]);
+    assert_ne!(repo.change(), first);
+
+    let undone = repo.ok(&["undo"]);
+    assert!(undone.starts_with("Undid #"), "{undone}");
+    assert!(undone.contains(": origin new Second\n"), "{undone}");
+    assert_eq!(repo.change(), first);
+
+    // Describing makes a newer revision of the change: undoing it restores
+    // the description in another one, so the change keeps a single head.
+    repo.ok(&["describe", "Renamed"]);
+    repo.ok(&["undo"]);
+    let status = repo.ok(&["status"]);
+    assert!(
+        status.starts_with(&format!("Working copy: {first} Add a\n")),
+        "{status}"
+    );
+    assert!(!repo.ok(&["evolog", &first]).contains("divergent"));
+
+    // Then the first description, back to the edits it was made on, and
+    // then nothing is left but creating the repository.
+    repo.ok(&["undo"]);
+    let status = repo.ok(&["status"]);
+    assert!(status.starts_with(&format!("Working copy: {first} (no description)\n")));
+    assert!(status.ends_with("A a\n"), "the edits stay: {status}");
+    assert!(
+        repo.fails(&["undo"])
+            .contains("nothing to undo but the creation")
+    );
+}
+
+#[test]
+fn undoing_a_resolution_restores_the_conflict() {
+    let repo = Repo::new();
+    repo.write("image", "base\0");
+    repo.ok(&["describe", "Shared work"]);
+    let change = repo.change();
+    let pointer = repo.path(".origin/workspace");
+    let started = fs::read_to_string(&pointer).unwrap();
+    repo.write("image", "left\0");
+    repo.ok(&["describe", "Shared work"]);
+    fs::write(&pointer, started).unwrap();
+    repo.write("image", "right\0");
+    repo.ok(&["converge", &change]);
+    repo.ok(&["resolve", "image"]);
+    assert!(!repo.ok(&["status"]).contains("Conflicts"));
+
+    repo.ok(&["undo"]);
+    assert!(repo.ok(&["status"]).contains("Conflicts: image hold"));
+    assert!(repo.fails(&["land"]).contains("unresolved conflicts"));
+}
+
+#[test]
+fn undo_moves_only_its_own_workspace() {
+    let repo = Repo::new();
+    let others = tempfile::tempdir().unwrap();
+    let ws = others.path().join("ws");
+    repo.workspace(&ws, &[]);
+    repo.ok_in(&ws, &["new", "Agent work"]);
+    repo.ok(&["new", "Main work"]);
+    let main = repo.change();
+
+    // The latest operation is main's, but the workspace undoes its own.
+    let agent = repo.ok_in(&ws, &["undo"]);
+    assert!(agent.contains(": origin new Agent work\n"), "{agent}");
+    assert_eq!(repo.change(), main);
+
+    let log = repo.ok(&["op", "log"]);
+    let headers: Vec<_> = log
+        .lines()
+        .filter(|line| !line.starts_with("    "))
+        .collect();
+    assert!(
+        headers[0].starts_with("○ #") && headers[0].ends_with(": origin undo"),
+        "{log}"
+    );
+    assert!(headers[1].starts_with("@ #") && headers[1].ends_with(": origin new Main work"));
+    assert!(headers[1].contains(&repo.dir.path().display().to_string()));
+    assert!(log.contains("    undid #"), "{log}");
+    assert_eq!(
+        repo.ok(&["op", "log", "-n", "1"]).lines().count(),
+        2,
+        "the undo, and its move"
+    );
 }
 
 impl Repo {
