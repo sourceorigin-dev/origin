@@ -56,6 +56,7 @@ pub use annotate::{Annotated, Payload};
 use std::fmt;
 use std::fs;
 use std::io;
+use std::mem;
 use std::path::{Path, PathBuf};
 
 use origin_platform::{LockedFile, Native};
@@ -442,9 +443,9 @@ impl Workspace {
             }
             None => loaded,
         };
-        let index = Index::open(&self.store)?;
+        let mut index = Index::open(&self.store)?;
         let behind = self.behind(&index, self.revision, &revision)?;
-        let mut conflicts = self.conflicts(self.revision, &revision)?;
+        let mut conflicts = self.conflicts(&mut index, self.revision, &revision)?;
         if behind.is_none() {
             conflicts = conflicts.remaining(&self.store, files)?;
         }
@@ -554,18 +555,25 @@ impl Workspace {
         Ok(())
     }
 
-    /// Returns the unresolved conflicts of `revision`, whose ID is `id`.
-    fn conflicts(&self, id: RevisionId, revision: &Revision) -> Result<Conflicts, WorkspaceError> {
-        let annotations = Annotations::open(&self.store)?;
-        let claims = annotations.claims(RecordId::Revision(id))?;
-        Ok(Conflicts::of(&self.store, &claims, revision)?)
+    /// Returns the unresolved conflicts of `revision`, whose ID is `id`, found
+    /// through `index`.
+    fn conflicts(
+        &self,
+        index: &mut Index,
+        id: RevisionId,
+        revision: &Revision,
+    ) -> Result<Conflicts, WorkspaceError> {
+        let annotations = Annotations::new(&self.store, mem::take(index));
+        let claims = annotations.claims(RecordId::Revision(id));
+        *index = annotations.into_index();
+        Ok(Conflicts::of(&self.store, &claims?, revision)?)
     }
 
     /// Returns the unresolved conflicts a new change on `base` starts with: those
     /// of the revision `base` is, or none if `base` is an acceptance.
-    fn base_conflicts(&self, base: Base) -> Result<Conflicts, WorkspaceError> {
+    fn base_conflicts(&self, index: &mut Index, base: Base) -> Result<Conflicts, WorkspaceError> {
         match base {
-            Base::Revision(id) => self.conflicts(id, &self.store.get(id)?),
+            Base::Revision(id) => self.conflicts(index, id, &self.store.get(id)?),
             Base::Acceptance(_) => Ok(Conflicts::default()),
         }
     }
@@ -1056,7 +1064,7 @@ impl Workspace {
     /// cannot be written. Then no abandonment is written and nothing is
     /// checked out.
     pub fn abandon(&mut self, change: Option<&str>, reason: &str) -> Result<(), WorkspaceError> {
-        let working_copy = self.refresh()?;
+        let mut working_copy = self.refresh()?;
         let index = &working_copy.index;
         let change = match change {
             Some(change) => working_copy.find_change(change)?,
@@ -1100,7 +1108,7 @@ impl Workspace {
             author: self.config.user(),
         };
         let encoded = revision.encode();
-        let conflicts = self.base_conflicts(revision.base)?;
+        let conflicts = self.base_conflicts(&mut working_copy.index, revision.base)?;
         let mut layers = self.revision_layers(vec![reason, empty], &encoded, &conflicts);
         // Published before the revision that replaces the change.
         layers[1].push(statement);
@@ -1126,10 +1134,9 @@ impl Workspace {
     /// Fails if the change cannot be found or hasn't diverged, or the revision
     /// cannot be written.
     pub fn converge(&mut self, change: &str) -> Result<(), WorkspaceError> {
-        let working_copy = self.refresh()?;
-        let index = &working_copy.index;
+        let mut working_copy = self.refresh()?;
         let change = working_copy.find_change(change)?;
-        let heads = index.heads(change);
+        let heads = working_copy.index.heads(change);
         if heads.len() < 2 {
             return Err(WorkspaceError::NotDivergent(change));
         }
@@ -1163,7 +1170,8 @@ impl Workspace {
         // The heads' own, where the merge kept their side.
         let mut conflicts = Conflicts::default();
         for &head in &heads {
-            let unresolved = self.conflicts(head, &self.store.get(head)?)?;
+            let revision = self.store.get(head)?;
+            let unresolved = self.conflicts(&mut working_copy.index, head, &revision)?;
             conflicts = conflicts.with(unresolved.remaining(&self.store, snapshot)?);
         }
         let conflicts = conflicts.with(merged);

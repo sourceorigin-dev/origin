@@ -128,6 +128,8 @@ impl<'a, P: Platform> Queue<'a, P> {
     /// from the bottom of the stack up, and returns the outcome of each. Stops
     /// at the first one that waits, which the queue keeps as a landing of
     /// `change`, so retrying it lands the rest of the stack once that one can.
+    /// Statements are read through `annotations`, whose index is brought up to
+    /// date first, so a caller that keeps one open avoids reading it again.
     ///
     /// # Errors
     ///
@@ -136,10 +138,11 @@ impl<'a, P: Platform> Queue<'a, P> {
     /// cannot be read or written.
     pub fn land_change(
         &self,
+        annotations: &mut Annotations<'a, P>,
         change: ChangeId,
         onto: &TargetName,
     ) -> Result<Vec<Landing>, LandError> {
-        let mut session = self.session(onto)?;
+        let mut session = self.session(annotations, onto)?;
         let stack = session.stack(change)?;
         if stack.is_empty() {
             session.forget(&Proposal::Change(change))?;
@@ -158,7 +161,8 @@ impl<'a, P: Platform> Queue<'a, P> {
         Ok(landings)
     }
 
-    /// Lands the tip of `source` on `onto`.
+    /// Lands the tip of `source` on `onto`, reading statements through
+    /// `annotations` as [`Queue::land_change`] does.
     ///
     /// # Errors
     ///
@@ -167,13 +171,14 @@ impl<'a, P: Platform> Queue<'a, P> {
     /// written.
     pub fn land_target(
         &self,
+        annotations: &mut Annotations<'a, P>,
         source: &TargetName,
         onto: &TargetName,
     ) -> Result<Landing, LandError> {
         if source == onto {
             return Err(LandError::SameTarget(onto.clone()));
         }
-        let mut session = self.session(onto)?;
+        let mut session = self.session(annotations, onto)?;
         let tip = self
             .store
             .head(source)?
@@ -343,10 +348,15 @@ impl<'a, P: Platform> Queue<'a, P> {
         Ok(())
     }
 
-    /// Starts landing on `onto`: locks its queue, then reads the policy in
-    /// force and the target's tip.
-    fn session(&self, onto: &TargetName) -> Result<Session<'_, 'a, P>, LandError> {
+    /// Starts landing on `onto`: locks its queue, reads the policy in force and
+    /// the target's tip, and brings `annotations` up to date.
+    fn session<'q>(
+        &'q self,
+        annotations: &'q mut Annotations<'a, P>,
+        onto: &TargetName,
+    ) -> Result<Session<'q, 'a, P>, LandError> {
         let lock = self.lock(onto)?;
+        annotations.refresh()?;
         let tip = self
             .store
             .head(onto)?
@@ -367,7 +377,7 @@ impl<'a, P: Platform> Queue<'a, P> {
             policy_head,
             state: self.store.get(tip.acceptance)?.body().state,
             tip,
-            annotations: Annotations::open(self.store)?,
+            annotations,
             _lock: lock,
         })
     }

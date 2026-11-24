@@ -141,8 +141,16 @@ impl Repo {
 
     pub(crate) fn land(&self, change: u8) -> Vec<Landing> {
         self.queue()
-            .land_change(ChangeId::from_bytes([change; 16]), &TargetName::MAIN)
+            .land_change(
+                &mut self.annotations(),
+                ChangeId::from_bytes([change; 16]),
+                &TargetName::MAIN,
+            )
             .unwrap()
+    }
+
+    pub(crate) fn annotations(&self) -> Annotations<'_> {
+        Annotations::open(&self.store).unwrap()
     }
 }
 
