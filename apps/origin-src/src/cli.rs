@@ -9,12 +9,12 @@ use std::str::FromStr;
 use anyhow::{Context, Result};
 use clap::error::ErrorKind;
 use clap::{Args, CommandFactory, Parser, Subcommand};
+use origin_shared::policy::KindPattern;
 use origin_shared::{Digest, Inputs, Kind, RepoPath, TargetName, Verdict};
 
 use crate::config::UserConfig;
 use crate::events::Filter;
 use crate::oplog::Actor;
-use crate::policy::KindPattern;
 use crate::workspace::{Annotated, Payload, Workspace};
 
 /// A modern, git-compatible source control system.

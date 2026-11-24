@@ -5,8 +5,10 @@ mod id;
 mod name;
 pub mod object;
 mod path;
+pub mod policy;
 mod principal;
 mod target;
+mod text;
 
 pub use id::{
     AcceptanceId, BlobId, ChangeId, Digest, ObjectId, ParseIdError, RevisionId, StatementId,
@@ -21,3 +23,4 @@ pub use object::{
 pub use path::RepoPath;
 pub use principal::{Principal, PrincipalName};
 pub use target::TargetName;
+pub use text::{InvalidPeriod, Period};

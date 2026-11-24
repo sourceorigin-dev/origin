@@ -2,8 +2,7 @@
 //! the landing can continue.
 
 use origin_shared::RecordId;
-
-use crate::policy::Requirement;
+use origin_shared::policy::Requirement;
 
 use super::{Blocked, Pending, Proposal};
 

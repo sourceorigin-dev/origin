@@ -51,6 +51,7 @@ use std::io;
 use std::path::PathBuf;
 
 use origin_platform::{DurableWrite, LockMode, LockedFile, Native, Platform};
+use origin_shared::policy::Requirement;
 use origin_shared::{
     AcceptanceBody, AcceptanceId, ChangeId, EncodedObject, NodeKey, Principal, PrincipalName,
     Record, RecordId, RepoPath, RevisionId, Source, StatementId, TargetId, TargetName, Tree,
@@ -59,7 +60,7 @@ use origin_shared::{
 
 use crate::annotations::{AnnotateError, Annotations};
 use crate::conflict::Conflicts;
-use crate::policy::{Policy, PolicyError, Requirement};
+use crate::policy::{Policy, PolicyError};
 use crate::store::{Store, StoreError};
 use crate::targets::Head;
 
