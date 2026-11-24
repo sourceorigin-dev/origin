@@ -46,9 +46,15 @@
 //! moved to (the next landing on the target publishes it), or a waiting
 //! landing that wasn't kept.
 //!
-//! **Partial appends.** A crash during an append leaves part of a frame at the
-//! end of the last segment. It never was an entry: readers skip it, and the
-//! next append cuts it off.
+//! **Damage.** A crash during an append leaves part of a frame at the end of
+//! the last segment. It never was an entry: readers skip it, and the next
+//! append cuts it off. Other damage loses the entries it covers. Readers read
+//! past it from both ends of the segment and report how many entries were
+//! lost, and the index rebuilds itself from the store, since those entries may
+//! have named records. The first reader to find damage in the last segment
+//! starts a new segment, so appends continue past it. When the damage is at
+//! the end of the last segment, the next append skips as many sequence numbers
+//! as the damaged bytes could hold, so none is reused.
 
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
@@ -62,7 +68,7 @@ use origin_platform::{DurableWrite, LockMode, LockedFile, Platform};
 use origin_shared::object::{DecodeError, Reader};
 use origin_shared::{AcceptanceId, ChangeId, ObjectId, TargetName};
 
-use crate::frames::{Frames, Writer};
+use crate::frames::{Frames, Tail, Writer};
 use crate::index;
 use crate::queue::Proposal;
 use crate::store::{Store, StoreError};
@@ -145,11 +151,26 @@ enum WriterState {
     Crashed,
 }
 
+/// Entries hidden by damage in a segment, as the module docs describe.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("the op log segment {segment:016x} is damaged: {lost} entries after #{after} are lost")]
+pub struct Damage {
+    /// The segment's first sequence number.
+    pub segment: u64,
+    /// The last entry before the damage.
+    pub after: u64,
+    /// How many entries the damage hid. If no entry follows it, the most it
+    /// could hold.
+    pub lost: u64,
+}
+
 /// Entries read from the op log, oldest first.
 #[derive(Debug, Default)]
 pub struct Read {
     /// The entries.
     pub entries: Vec<Entry>,
+    /// The damage the read went past, if any.
+    pub damage: Option<Damage>,
 }
 
 /// An entry of the op log.
@@ -323,6 +344,11 @@ impl<'a, P: Platform> OpLog<'a, P> {
     /// The most segments kept: 16 MiB of entries, about 100,000.
     const SEGMENTS: usize = if cfg!(test) { 4 } else { 64 };
 
+    /// The size of the smallest frame an entry makes: sequence number,
+    /// operation and writer, no workspace, an empty command, and a tag with an
+    /// empty list.
+    const SMALLEST_FRAME: u64 = (Frames::FRAMING + 8 + 8 + 8 + 1 + 4 + 1 + 4) as u64;
+
     /// The lock held while appending.
     const APPENDING: &str = "lock";
 
@@ -394,7 +420,8 @@ impl<'a, P: Platform> OpLog<'a, P> {
     /// Reads the entries of the segment starting at `first`, or returns `None`
     /// if retention deleted it. Returns at least the entries after `after`.
     /// When those are at the end of the segment, as usual, only they are read,
-    /// backwards from the end.
+    /// backwards from the end. Reads past damage from both ends, as the module
+    /// docs describe.
     fn read_segment(&self, first: u64, after: u64) -> Result<Option<Read>, StoreError> {
         let path = self.segment(first);
         let bytes = match fs::read(&path) {
@@ -405,11 +432,64 @@ impl<'a, P: Platform> OpLog<'a, P> {
         if let Some(entries) =
             Self::FRAMES.parse_back(&bytes, Entry::decode, |entry| entry.seq > after)
         {
-            return Ok(Some(Read { entries }));
+            return Ok(Some(Read {
+                entries,
+                damage: None,
+            }));
         }
-        let (frames, _) = Self::FRAMES.parse(&bytes, Entry::decode);
-        let entries = frames.into_iter().map(|(_, entry)| entry).collect();
-        Ok(Some(Read { entries }))
+        let (frames, tail) = Self::FRAMES.parse(&bytes, Entry::decode);
+        let end = frames
+            .last()
+            .map_or(Self::FRAMES.header().len() as u64, |(offset, entry)| {
+                offset + entry.encode().len() as u64
+            });
+        let mut entries: Vec<Entry> = frames.into_iter().map(|(_, entry)| entry).collect();
+        if tail != Tail::Damaged {
+            return Ok(Some(Read {
+                entries,
+                damage: None,
+            }));
+        }
+        let before = entries.last().map_or(first - 1, |entry| entry.seq);
+        let after_damage: Vec<Entry> = Self::FRAMES
+            .parse_tail(&bytes, Entry::decode)
+            .into_iter()
+            .filter(|entry| entry.seq > before)
+            .collect();
+        let lost = match after_damage.first() {
+            Some(next) => next.seq - before - 1,
+            // A file shorter than its header, which no append makes: no
+            // entry fits in what's past it.
+            None => (bytes.len() as u64).saturating_sub(end) / Self::SMALLEST_FRAME,
+        };
+        entries.extend(after_damage);
+        let damage = Damage {
+            segment: first,
+            after: before,
+            lost,
+        };
+        if self.segments()?.last() == Some(&first) {
+            self.rotate(first)?;
+        }
+        Ok(Some(Read {
+            entries,
+            damage: Some(damage),
+        }))
+    }
+
+    /// Starts a new segment after the damaged one starting at `first`, if it
+    /// is still the last, so appends continue past the damage.
+    fn rotate(&self, first: u64) -> Result<(), StoreError> {
+        let _lock = self.lock(Self::APPENDING, LockMode::Exclusive)?;
+        let segments = self.segments()?;
+        if segments.last() != Some(&first) {
+            return Ok(());
+        }
+        let (next, open) = self.tail(first)?;
+        if open.is_some() {
+            self.start_segment(next, &segments)?;
+        }
+        Ok(())
     }
 
     /// The sequence number of the latest entry, or 0 if there's none.
@@ -442,7 +522,8 @@ impl<'a, P: Platform> OpLog<'a, P> {
             .unwrap_or(first - 1))
     }
 
-    /// Returns the entries after the sequence number `after`, oldest first.
+    /// Returns the entries after the sequence number `after`, oldest first,
+    /// and any damage it read past, which is also reported on stderr.
     ///
     /// # Errors
     ///
@@ -473,6 +554,10 @@ impl<'a, P: Platform> OpLog<'a, P> {
                     .into_iter()
                     .filter(|entry| entry.seq > after),
             );
+            if let Some(damage) = segment.damage.filter(|damage| damage.after >= after) {
+                eprintln!("warning: {damage}");
+                read.damage = Some(damage);
+            }
         }
         Ok(read)
     }
@@ -637,6 +722,23 @@ impl<'a, P: Platform> OpLog<'a, P> {
         Ok((seq, writer))
     }
 
+    /// Damages `part` of the frame of the entry `seq`, as a bad disk would.
+    #[cfg(test)]
+    pub(crate) fn damage(&self, seq: u64, part: FramePart) {
+        let segments = self.segments().unwrap();
+        let first = segments[segments.partition_point(|&first| first <= seq) - 1];
+        let path = self.segment(first);
+        let mut bytes = fs::read(&path).unwrap();
+        let (frames, _) = Self::FRAMES.parse(&bytes, Entry::decode);
+        let (offset, entry) = frames.iter().find(|(_, entry)| entry.seq == seq).unwrap();
+        let offset = usize::try_from(*offset).unwrap();
+        match part {
+            FramePart::Check => bytes[offset + entry.encode().len() - 6] ^= 1,
+            FramePart::Length => bytes[offset..offset + 3].fill(0xff),
+        }
+        fs::write(&path, &bytes).unwrap();
+    }
+
     /// Creates and locks the lock file of a writer whose first entry, `first`,
     /// is about to be appended. The file may already exist, left unlocked by a
     /// writer that crashed before appending.
@@ -655,8 +757,8 @@ impl<'a, P: Platform> OpLog<'a, P> {
     }
 
     /// Opens the last segment, which starts at `first`, for appending. Returns
-    /// the next sequence number, and the segment, or `None` if it is full and
-    /// the next entry must start a new one.
+    /// the next sequence number, and the segment, or `None` if it is full or
+    /// damaged and the next entry must start a new one.
     fn tail(&self, first: u64) -> Result<(u64, Option<Segment>), StoreError> {
         let path = self.segment(first);
         let io_error = |source| StoreError::io(&path, source);
@@ -675,6 +777,22 @@ impl<'a, P: Platform> OpLog<'a, P> {
                     })?
             }
             Ok(None) => first - 1,
+            Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+                // Damage hides the entries after it. Skip as many sequence
+                // numbers as the damaged bytes could hold, so none is
+                // reused, and continue in a new segment.
+                let bytes = fs::read(&path).map_err(io_error)?;
+                let (entries, _) = Self::FRAMES.parse(&bytes, Entry::decode);
+                let (end, last) = entries.last().map_or(
+                    (Self::FRAMES.header().len() as u64, first - 1),
+                    |(offset, entry)| (offset + entry.encode().len() as u64, entry.seq),
+                );
+                // Shorter than its header, which no append makes, the file
+                // hides no entry.
+                let hidden = (bytes.len() as u64).saturating_sub(end) / Self::SMALLEST_FRAME;
+                // Past the segment's own number, even if it held no entry.
+                return Ok(((last + hidden + 1).max(first + 1), None));
+            }
             Err(source) => return Err(io_error(source)),
         };
         let full = file.metadata().map_err(io_error)?.len() >= Self::SEGMENT_BYTES;
@@ -713,6 +831,15 @@ impl<'a, P: Platform> OpLog<'a, P> {
         }
         Ok(Segment { path, file })
     }
+}
+
+/// A part of a frame that [`OpLog::damage`] damages.
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub(crate) enum FramePart {
+    Check,
+    /// Its leading length, which then runs past the end of the segment.
+    Length,
 }
 
 /// A segment open for appending.
@@ -866,7 +993,7 @@ mod tests {
     }
 
     #[test]
-    fn partial_appends_are_cut() {
+    fn partial_appends_are_cut_and_damage_never_reuses_numbers() {
         let (_dir, store) = store();
         let oplog = store.oplog();
         log(&store, &wrote(1));
@@ -886,6 +1013,79 @@ mod tests {
         assert_eq!(oplog.last_seq().unwrap(), 1, "readers skip it");
         assert_eq!(log(&store, &wrote(3)), 2, "the next append cuts it off");
         assert_eq!(oplog.after(0).unwrap().entries.len(), 2);
+
+        // Damage at the end of the segment, rather than a partial frame.
+        let mut bytes = fs::read(&segment).unwrap();
+        let len = bytes.len();
+        bytes[len - 6] ^= 1;
+        fs::write(&segment, &bytes).unwrap();
+        assert_eq!(oplog.last_seq().unwrap(), 1, "readers stop at it");
+        let next = log(&store, &wrote(4));
+        assert!(next > 2, "{next} reuses a hidden number");
+        assert_eq!(oplog.segments().unwrap(), [1, next], "in a new segment");
+        assert_eq!(oplog.after(next - 1).unwrap().entries[0].effect, wrote(4));
+    }
+
+    #[test]
+    fn damage_in_the_middle_is_read_past_counted_and_rotated() {
+        let (_dir, store) = store();
+        let oplog = store.oplog();
+        for i in 1..=4 {
+            log(&store, &wrote(i));
+        }
+        oplog.damage(2, FramePart::Check);
+
+        let read = oplog.after(0).unwrap();
+        let seqs: Vec<_> = read.entries.iter().map(|entry| entry.seq).collect();
+        assert_eq!(seqs, [1, 3, 4], "the entries after it are read");
+        assert_eq!(
+            read.damage,
+            Some(Damage {
+                segment: 1,
+                after: 1,
+                lost: 1
+            })
+        );
+        assert_eq!(
+            oplog.segments().unwrap(),
+            [1, 5],
+            "appends continue past it"
+        );
+        assert_eq!(log(&store, &wrote(5)), 5);
+        assert_eq!(
+            oplog.after(3).unwrap().damage,
+            None,
+            "only readers crossing it"
+        );
+    }
+
+    #[test]
+    fn damaged_lengths_are_damage_rather_than_partial_appends() {
+        let (_dir, store) = store();
+        let oplog = store.oplog();
+        for i in 1..=4 {
+            log(&store, &wrote(i));
+        }
+        oplog.damage(2, FramePart::Length);
+        let read = oplog.after(0).unwrap();
+        let seqs: Vec<_> = read.entries.iter().map(|entry| entry.seq).collect();
+        assert_eq!(seqs, [1, 3, 4], "the entries after it are read");
+        assert_eq!(read.damage.map(|damage| damage.lost), Some(1));
+        assert_eq!(
+            oplog.segments().unwrap(),
+            [1, 5],
+            "appends continue past it"
+        );
+
+        // The last entry is never cut off, nor its number reused.
+        assert_eq!(log(&store, &wrote(5)), 5);
+        assert_eq!(log(&store, &wrote(6)), 6);
+        oplog.damage(6, FramePart::Length);
+        let segment = fs::read(oplog.segment(5)).unwrap();
+        let next = log(&store, &wrote(7));
+        assert!(next > 6, "{next} reuses a number");
+        assert_eq!(fs::read(oplog.segment(5)).unwrap(), segment, "kept");
+        assert_eq!(oplog.segments().unwrap(), [1, 5, next], "in a new segment");
     }
 
     #[test]
@@ -939,7 +1139,8 @@ mod tests {
                             // Tests keep few small segments, so retention may
                             // delete one mid-read: that read is skipped.
                             match oplog.after(oplog.last_seq().unwrap().saturating_sub(1)) {
-                                Ok(_) | Err(StoreError::Expired { .. }) => {}
+                                Ok(read) => assert!(read.damage.is_none()),
+                                Err(StoreError::Expired { .. }) => {}
                                 Err(error) => panic!("{error}"),
                             }
                         }
@@ -955,5 +1156,26 @@ mod tests {
                 reader.join().unwrap();
             }
         });
+    }
+
+    /// A segment cut inside its header, which no append does, is read past,
+    /// and appends continue after it.
+    #[test]
+    fn segments_shorter_than_their_header_are_damage() {
+        let (_dir, store) = store();
+        let oplog = store.oplog();
+        fs::write(oplog.segment(1), &OpLog::<Native>::FRAMES.header()[..2]).unwrap();
+        assert_eq!(log(&store, &wrote(1)), 2, "in a new segment");
+        let read = oplog.after(0).unwrap();
+        let seqs: Vec<_> = read.entries.iter().map(|entry| entry.seq).collect();
+        assert_eq!(seqs, [2]);
+        assert_eq!(
+            read.damage,
+            Some(Damage {
+                segment: 1,
+                after: 0,
+                lost: 0
+            })
+        );
     }
 }
