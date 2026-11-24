@@ -1,5 +1,5 @@
-//! Append-only files of checked frames. The [record index](crate::index) is
-//! made of them.
+//! Append-only files of checked frames. The [record index](crate::index) and
+//! the [op log](crate::oplog) are made of them.
 //!
 //! A file is a header naming its format and version, followed by frames. A
 //! frame is its payload's length as a `u32`, the payload, the first 8 bytes of
@@ -116,6 +116,63 @@ impl Frames {
             }
         }
         (frames, Tail::Clean)
+    }
+
+    /// Decodes the frames at the end of a file with `decode`, reading backwards
+    /// from the end while `wanted` is true of them. Once it reaches a frame
+    /// `wanted` is false of, returns the frames after it, oldest first. Returns
+    /// `None` if it reaches a broken frame or the header first: then only
+    /// [`Frames::parse`] can read the file.
+    pub(crate) fn parse_back<T>(
+        self,
+        bytes: &[u8],
+        decode: impl FnMut(&[u8]) -> Result<T, DecodeError>,
+        wanted: impl FnMut(&T) -> bool,
+    ) -> Option<Vec<T>> {
+        let (frames, unwanted) = self.back(bytes, decode, wanted);
+        unwanted.then_some(frames)
+    }
+
+    /// Reads frames backwards from the end of `bytes` while `wanted` is true of
+    /// them, stopping at a broken frame or the header. Returns them oldest
+    /// first, and whether it stopped at a frame `wanted` is false of.
+    fn back<T>(
+        self,
+        bytes: &[u8],
+        mut decode: impl FnMut(&[u8]) -> Result<T, DecodeError>,
+        mut wanted: impl FnMut(&T) -> bool,
+    ) -> (Vec<T>, bool) {
+        let mut end = bytes.len();
+        let mut frames = Vec::new();
+        let unwanted = loop {
+            let Some((start, frame)) = self.frame_before(bytes, end, &mut decode) else {
+                break false;
+            };
+            if !wanted(&frame) {
+                break true;
+            }
+            frames.push(frame);
+            end = start;
+        };
+        frames.reverse();
+        (frames, unwanted)
+    }
+
+    /// Decodes the frame of `bytes` that ends at `end`. Returns where it starts
+    /// and its value, or `None` if it is broken or overlaps the header.
+    fn frame_before<T>(
+        self,
+        bytes: &[u8],
+        end: usize,
+        decode: &mut impl FnMut(&[u8]) -> Result<T, DecodeError>,
+    ) -> Option<(usize, T)> {
+        let (_, len) = bytes[..end].split_last_chunk::<4>()?;
+        let start = end.checked_sub(u32::from_le_bytes(*len) as usize + Self::FRAMING)?;
+        if start < self.header.len() {
+            return None;
+        }
+        let (payload, _) = Self::payload(&bytes[start..end]).ok()?;
+        Some((start, decode(payload).ok()?))
     }
 
     /// Whether `bytes` end with a complete frame that starts at or after
@@ -265,6 +322,12 @@ impl Writer {
     /// Writes a `u32` count, of items or bytes.
     pub(crate) fn len(&mut self, len: usize) {
         self.bytes(&u32::try_from(len).expect("fewer than 2^32").to_le_bytes());
+    }
+
+    /// Writes `bytes` preceded by their length.
+    pub(crate) fn prefixed(&mut self, bytes: &[u8]) {
+        self.len(bytes.len());
+        self.bytes(bytes);
     }
 
     /// Writes a 0 byte for `None`, or a 1 byte followed by the id.

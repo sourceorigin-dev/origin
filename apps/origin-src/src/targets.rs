@@ -29,6 +29,7 @@ use origin_shared::{
     Acceptance, AcceptanceId, Base, Record, Revision, RevisionId, Source, TargetId, TargetName,
 };
 
+use crate::oplog::Effect;
 use crate::store::{Store, StoreError};
 
 /// The latest acceptance of a target.
@@ -338,9 +339,9 @@ impl<P: Platform> Store<P> {
         Ok(id)
     }
 
-    /// Durably replaces the head of a target. Publishing the first
-    /// acceptance creates the target: its name is written too, and its
-    /// directory made durable.
+    /// Durably replaces the head of a target, and logs that it advanced.
+    /// Publishing the first acceptance creates the target: its name is written
+    /// too, and its directory made durable.
     fn publish(
         &self,
         files: &TargetFiles,
@@ -354,7 +355,12 @@ impl<P: Platform> Store<P> {
         if created {
             write.stage(files.name(), target.as_str().as_bytes())?;
         }
-        write.commit()?;
+        let advanced = Effect::Advanced {
+            target: target.clone(),
+            seq: head.seq,
+            acceptance: head.acceptance,
+        };
+        self.commit_logged(write, &[advanced])?;
         if created {
             self.sync_dir(&self.targets_dir())?;
         }
@@ -582,11 +588,12 @@ mod tests {
                 Synced::Batch(0),
                 Synced::Dir(dir.path().join(".origin/objects/loose").join(shard)),
                 Synced::File,
-                Synced::Batch(1),
+                // The head, and the op log entry saying it advanced.
+                Synced::Batch(2),
                 Synced::Dir(targets),
                 Synced::Dir(target),
             ],
-            "the log, then the head"
+            "the log, then the head, with its op log entry"
         );
     }
 
@@ -612,7 +619,8 @@ mod tests {
                 Synced::Dir(dir.path().join(".origin/objects/loose")),
                 Synced::Dir(dir.path().join(".origin/objects/loose").join(&hex[..2])),
                 Synced::File,
-                Synced::Batch(1),
+                // The head, and the op log entry saying it advanced.
+                Synced::Batch(2),
                 Synced::Dir(targets),
                 Synced::Dir(target),
             ],

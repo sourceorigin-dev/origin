@@ -10,6 +10,7 @@ pub mod conflict;
 pub mod fixture;
 mod frames;
 pub mod index;
+pub mod oplog;
 pub mod output;
 pub mod policy;
 pub mod queue;

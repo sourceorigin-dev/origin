@@ -16,6 +16,7 @@ use origin_shared::{
 use crate::ancestry::Ancestry;
 use crate::annotations::{AnnotateError, Annotations, Claim};
 use crate::conflict::Conflicts;
+use crate::oplog::Effect;
 use crate::policy::{Policy, PolicyError, Requirement};
 use crate::store::{Store, StoreError};
 use crate::targets::Head;
@@ -322,14 +323,19 @@ impl<P: Platform> Session<'_, '_, P> {
     }
 
     /// Durably writes a waiting landing to its file, replacing the last
-    /// attempt's.
+    /// attempt's, and logs that it waits.
     fn keep(&self, pending: &Pending) -> Result<(), StoreError> {
         let write = self.store().durable_write();
         write.stage(
             self.pending_path(&pending.proposal)?,
             pending.encode().as_bytes(),
         )?;
-        Ok(write.commit()?)
+        let waiting = Effect::Waiting {
+            onto: pending.onto.clone(),
+            proposal: pending.proposal.clone(),
+        };
+        self.store().commit_logged(write, &[waiting])?;
+        Ok(())
     }
 
     /// Durably deletes the file of a landing that waited, if there is one.
