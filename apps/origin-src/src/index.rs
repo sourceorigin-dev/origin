@@ -1,49 +1,43 @@
 //! The record index: what reading every record would tell, without reading
-//! them. It knows each change's revisions and heads (more than one head is
-//! divergence), the statements about each record and those they claim to
-//! supersede, the promotable statements by kind, issuer and declared
-//! inputs, and the order this node received its records in. It also caches the input
-//! digests of promotable statements, which take reading their subjects'
-//! trees to compute.
+//! them. It knows each change's revisions and heads (more than one head means
+//! the change diverged), the statements about each record and the statements
+//! they claim to supersede, the promotable statements by kind, issuer and
+//! declared inputs, and the order this node received its records in. It also
+//! caches the input digests of promotable statements, which take reading their
+//! subjects' trees to compute.
 //!
-//! The index is derived from the store, so it is never trusted over it: a
-//! missing or corrupt index is rebuilt from the store's records
-//! ([`Index::rebuild`]), never fatal. A rebuild skips the objects that are
-//! corrupt or don't decode, which readers can't use either, and reports
+//! The index is derived from the store and never trusted over it. A missing or
+//! corrupt index is rebuilt from the store's records ([`Index::rebuild`]). A
+//! rebuild skips the objects that are corrupt or don't decode, and reports
 //! them ([`Skipped`]).
 //!
-//! On disk it is one append-only file, `index/log`: a header, then frames.
-//! A frame is its payload's `u32` length, the payload, the first 8 bytes of
-//! the payload's BLAKE3 hash, and the length again, so the last frame can be
-//! checked from the end. A payload is what the index keeps of each record
-//! of a batch, the mark that the batch at some offset was published, or
-//! input digests computed since.
+//! On disk it is one append-only file of [frames](crate::frames), `index/log`.
+//! A frame holds the entries of one batch's records, a mark that the batch at
+//! some offset was published, or input digests.
 //!
 //! [`Batch::commit`](crate::store::Batch::commit) appends a batch's entries
-//! before publishing its records, and the batch sync makes them durable
-//! with the records, so indexing costs no sync of its own. Once the records
-//! are published, it marks the batch, without syncing. Opening the index
-//! trusts the marked batches, and checks that the records of the others are
-//! in the store: those belong to batches that crashed, failed, or are being
-//! published. A partial last frame is an append in progress, or one a crash
-//! cut short, and is skipped. Any other damage rebuilds the index.
+//! before it publishes the records, and syncs them with the records, so
+//! indexing costs no extra sync. Once the records are published, it marks the
+//! batch, without syncing. Opening the index trusts marked batches. For the
+//! others it checks which records are in the store, since the batch may have
+//! crashed, failed, or still be publishing. A partial last frame is skipped.
+//! Any other damage rebuilds the index.
 //!
-//! Batches append under a shared lock on `index/lock`, held from appending
-//! their entries to marking them, and appends serialize on an exclusive
-//! lock of the log itself. A rebuild holds `index/lock` exclusively, so it
-//! never misses a batch: it sees every batch's records published, or none
-//! of them appended yet. Rebuilding keeps the arrival order the old log
-//! still knows, and puts the records it didn't after them.
+//! A batch holds a shared lock on `index/lock` from appending its entries to
+//! marking them, and each append takes an exclusive lock on the log itself. A
+//! rebuild holds `index/lock` exclusively, so it sees each batch either fully
+//! published or not yet appended. It keeps the arrival order the old log knew,
+//! and puts other records after them.
 //!
-//! The directory also holds `index/supersession`, which isn't an index
-//! lock: [`Annotations::supersede`](crate::annotations::Annotations::supersede)
+//! The directory also holds `index/supersession`, a separate lock:
+//! [`Annotations::supersede`](crate::annotations::Annotations::supersede)
 //! holds it to read an issuer's current statement and issue the next.
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::fs::{self, OpenOptions};
+use std::io;
 use std::path::PathBuf;
 
 use origin_platform::{DurableWrite, LockMode, LockedFile, Platform};
@@ -53,6 +47,7 @@ use origin_shared::{
     RevisionId, Statement, StatementId, TreeId,
 };
 
+use crate::frames::{Frames, Tail, Writer};
 use crate::store::{Store, StoreError};
 
 /// The records of a store, by the fields they're looked up by.
@@ -532,14 +527,14 @@ impl Entry {
     }
 
     fn id(&self) -> ObjectId {
-        Log::split(self.record()).1
+        ObjectId::from(self.record())
     }
 
     /// Appends the entry: its record's kind and id, then for a revision its
     /// change and a `u32` count of predecessors and their ids, and for a
     /// statement its subject's kind and id, and the statement it supersedes
     /// and its promotion group, each a 0 byte, or a 1 byte and the id.
-    fn write(&self, out: &mut Vec<u8>) {
+    fn write(&self, out: &mut Writer) {
         Log::write_record(self.record(), out);
         match self {
             Self::Revision {
@@ -547,11 +542,10 @@ impl Entry {
                 predecessors,
                 ..
             } => {
-                out.extend_from_slice(change.as_bytes());
-                let count = u32::try_from(predecessors.len()).expect("fewer than 2^32");
-                out.extend_from_slice(&count.to_le_bytes());
+                out.bytes(change.as_bytes());
+                out.len(predecessors.len());
                 for predecessor in predecessors {
-                    out.extend_from_slice(predecessor.as_bytes());
+                    out.bytes(predecessor.as_bytes());
                 }
             }
             Self::Statement {
@@ -561,8 +555,8 @@ impl Entry {
                 ..
             } => {
                 Log::write_record(*subject, out);
-                Log::write_option(supersedes.as_ref().map(StatementId::as_bytes), out);
-                Log::write_option(group.as_ref().map(Digest::as_bytes), out);
+                out.option(supersedes.as_ref().map(StatementId::as_bytes));
+                out.option(group.as_ref().map(Digest::as_bytes));
             }
             Self::Acceptance(_) => {}
         }
@@ -617,41 +611,30 @@ impl Frame<'_> {
     const PUBLISHED: u8 = 2;
     const DIGESTS: u8 = 3;
 
-    /// Encodes the frame: its payload's length, the payload (a tag and the
-    /// contents), a check, and the length again, so the last frame of a log
-    /// can be read backwards.
+    /// Encodes the frame: a tag, then its contents.
     fn encode(&self) -> Vec<u8> {
-        let mut out = vec![0; 4];
-        match self {
+        Frames::frame(|out| match self {
             Self::Records(entries) => {
-                out.push(Self::RECORDS);
+                out.u8(Self::RECORDS);
                 for entry in entries.iter() {
-                    entry.write(&mut out);
+                    entry.write(out);
                 }
             }
             Self::Published(offset) => {
-                out.push(Self::PUBLISHED);
-                out.extend_from_slice(&offset.to_le_bytes());
+                out.u8(Self::PUBLISHED);
+                out.u64(*offset);
             }
             Self::Digests(digests) => {
-                out.push(Self::DIGESTS);
+                out.u8(Self::DIGESTS);
                 for (statement, digest) in digests.iter() {
-                    out.extend_from_slice(statement.as_bytes());
-                    out.extend_from_slice(digest.as_bytes());
+                    out.bytes(statement.as_bytes());
+                    out.bytes(digest.as_bytes());
                 }
             }
-        }
-        let len = u32::try_from(out.len() - 4)
-            .expect("index frames are under 4 GiB")
-            .to_le_bytes();
-        out[..4].copy_from_slice(&len);
-        let check = Log::check(&out[4..]);
-        out.extend_from_slice(&check);
-        out.extend_from_slice(&len);
-        out
+        })
     }
 
-    fn decode(payload: &[u8]) -> Result<Self, DecodeError> {
+    fn decode(payload: &[u8]) -> Result<Frame<'static>, DecodeError> {
         let mut reader = Reader::new(payload);
         let frame = match reader.u8()? {
             Self::RECORDS => {
@@ -659,16 +642,16 @@ impl Frame<'_> {
                 while reader.remaining() > 0 {
                     entries.push(Entry::read(&mut reader)?);
                 }
-                Self::Records(Cow::Owned(entries))
+                Frame::Records(Cow::Owned(entries))
             }
-            Self::PUBLISHED => Self::Published(reader.u64()?),
+            Self::PUBLISHED => Frame::Published(reader.u64()?),
             Self::DIGESTS => {
                 let mut digests = Vec::new();
                 while reader.remaining() > 0 {
                     let statement = ObjectId::from_bytes(reader.array()?).into();
                     digests.push((statement, Digest::from_bytes(reader.array()?)));
                 }
-                Self::Digests(Cow::Owned(digests))
+                Frame::Digests(Cow::Owned(digests))
             }
             tag => {
                 return Err(DecodeError::UnknownTag {
@@ -686,24 +669,12 @@ impl Frame<'_> {
 struct Log;
 
 impl Log {
-    /// The start of every log, with the format's version.
-    const HEADER: &[u8] = b"origin index 2\n";
-
-    /// The length of a frame's check.
-    const CHECK: usize = 8;
-
-    /// The bytes a frame adds to its payload: two lengths and a check.
-    const FRAMING: usize = 4 + Self::CHECK + 4;
-
-    fn check(payload: &[u8]) -> [u8; Self::CHECK] {
-        Digest::of(payload).as_bytes()[..Self::CHECK]
-            .try_into()
-            .expect("a digest is longer than a check")
-    }
+    /// The format of `index/log`, whose header names its version.
+    const FRAMES: Frames = Frames::new(b"origin index 2\n");
 
     /// Encodes a log holding `entries`, all published, and `digests`.
     fn encode(entries: &[Entry], digests: &[(StatementId, Digest)]) -> Vec<u8> {
-        let mut log = Self::HEADER.to_vec();
+        let mut log = Self::FRAMES.header().to_vec();
         let offset = log.len() as u64;
         log.extend(Frame::Records(Cow::Borrowed(entries)).encode());
         log.extend(Frame::Published(offset).encode());
@@ -716,84 +687,16 @@ impl Log {
     /// The frames of a log and their offsets, up to the first broken one,
     /// and how it ends after them.
     fn parse(bytes: &[u8]) -> (Vec<(u64, Frame<'static>)>, Tail) {
-        let mut frames = Vec::new();
-        let Some(mut rest) = bytes.strip_prefix(Self::HEADER) else {
-            return (frames, Tail::Damaged);
-        };
-        while !rest.is_empty() {
-            let offset = (bytes.len() - rest.len()) as u64;
-            let frame = Self::payload(rest).and_then(|(payload, len)| {
-                let frame = Frame::decode(payload).map_err(|_| Broken::Damaged)?;
-                Ok((frame, len))
-            });
-            match frame {
-                Ok((frame, len)) => {
-                    frames.push((offset, frame));
-                    rest = &rest[len..];
-                }
-                Err(Broken::Partial) => return (frames, Tail::Partial(offset)),
-                Err(Broken::Damaged) => return (frames, Tail::Damaged),
-            }
-        }
-        (frames, Tail::Clean)
-    }
-
-    /// Checks the frame `bytes` start with, returning its payload and its
-    /// length.
-    fn payload(bytes: &[u8]) -> Result<(&[u8], usize), Broken> {
-        let (len, rest) = bytes.split_first_chunk::<4>().ok_or(Broken::Partial)?;
-        let (payload, rest) = rest
-            .split_at_checked(u32::from_le_bytes(*len) as usize)
-            .ok_or(Broken::Partial)?;
-        let (check, rest) = rest
-            .split_first_chunk::<{ Self::CHECK }>()
-            .ok_or(Broken::Partial)?;
-        let (end, _) = rest.split_first_chunk::<4>().ok_or(Broken::Partial)?;
-        if end != len || *check != Self::check(payload) {
-            return Err(Broken::Damaged);
-        }
-        Ok((payload, payload.len() + Self::FRAMING))
-    }
-
-    /// Whether the locked `log` ends with an intact frame, or the header.
-    /// Reads only the last frame, backwards from its trailing length.
-    fn ends_cleanly(mut log: &File) -> io::Result<bool> {
-        let len = log.metadata()?.len();
-        let header = Self::HEADER.len() as u64;
-        if len <= header {
-            return Ok(len == header);
-        }
-        let mut end = [0; 4];
-        log.seek(SeekFrom::Start(len.saturating_sub(4)))?;
-        log.read_exact(&mut end)?;
-        let frame = u64::from(u32::from_le_bytes(end)) + Self::FRAMING as u64;
-        if frame > len - header {
-            return Ok(false);
-        }
-        let mut bytes = vec![0; usize::try_from(frame).map_err(io::Error::other)?];
-        log.seek(SeekFrom::Start(len - frame))?;
-        log.read_exact(&mut bytes)?;
-        Ok(Self::payload(&bytes).is_ok())
-    }
-
-    /// Appends a 0 byte for `None`, or a 1 byte and the id.
-    fn write_option(id: Option<&[u8; 32]>, out: &mut Vec<u8>) {
-        match id {
-            None => out.push(0),
-            Some(id) => {
-                out.push(1);
-                out.extend_from_slice(id);
-            }
-        }
+        Self::FRAMES.parse(bytes, Frame::decode)
     }
 
     /// Appends a record's kind and id.
-    fn write_record(record: RecordId, out: &mut Vec<u8>) {
-        let (kind, id) = Self::split(record);
-        out.push(kind as u8);
-        out.extend_from_slice(id.as_bytes());
+    fn write_record(record: RecordId, out: &mut Writer) {
+        out.u8(record.kind() as u8);
+        out.bytes(ObjectId::from(record).as_bytes());
     }
 
+    /// Reads what [`Log::write_record`] wrote.
     fn read_record(reader: &mut Reader<'_>) -> Result<RecordId, DecodeError> {
         let kind = reader.u8()?;
         let id = ObjectId::from_bytes(reader.array()?);
@@ -810,40 +713,6 @@ impl Log {
             }
         })
     }
-
-    /// A record's kind and id.
-    fn split(record: RecordId) -> (ObjectKind, ObjectId) {
-        match record {
-            RecordId::Snapshot(id) => (ObjectKind::Tree, id.into()),
-            RecordId::Revision(id) => (ObjectKind::Revision, id.into()),
-            RecordId::Statement(id) => (ObjectKind::Statement, id.into()),
-            RecordId::Acceptance(id) => (ObjectKind::Acceptance, id.into()),
-        }
-    }
-}
-
-/// How a log ends after its last intact frame.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Tail {
-    /// It ends there.
-    Clean,
-    /// With part of a frame, at this offset: an append in progress, or one a
-    /// crash cut short. Appenders cut such a leftover off before appending,
-    /// so it is always last.
-    Partial(u64),
-    /// With damage, or a header from another version: the index must be
-    /// rebuilt.
-    Damaged,
-}
-
-/// Why a frame cannot be decoded.
-enum Broken {
-    /// The bytes end before it does.
-    Partial,
-    /// It is not what was appended: it fails its check, or its payload
-    /// doesn't decode. Either way the index is rebuilt, so why doesn't
-    /// matter.
-    Damaged,
 }
 
 impl<P: Platform> Store<P> {
@@ -927,30 +796,10 @@ impl<P: Platform> Store<P> {
         self.platform
             .lock(&log, LockMode::Exclusive)
             .map_err(io_error)?;
-        if !Log::ends_cleanly(&log).map_err(io_error)? {
-            self.cut_partial_frame(&log).map_err(io_error)?;
-        }
-        let offset = log.metadata().map_err(io_error)?.len();
-        if let Err(source) = (&log).write_all(&frame.encode()) {
-            // Best effort: the next append cuts it off otherwise.
-            let _ = log.set_len(offset);
-            return Err(io_error(source));
-        }
+        let offset = Log::FRAMES
+            .append(&self.platform, &log, &frame.encode())
+            .map_err(io_error)?;
         Ok(Some(offset))
-    }
-
-    /// Cuts off the partial frame a crash left at the end of the locked
-    /// `log`, durably, so appends never follow one. Damage is left for
-    /// readers to find, so they rebuild the index.
-    fn cut_partial_frame(&self, mut log: &File) -> io::Result<()> {
-        let mut bytes = Vec::new();
-        log.seek(SeekFrom::Start(0))?;
-        log.read_to_end(&mut bytes)?;
-        if let (_, Tail::Partial(offset)) = Log::parse(&bytes) {
-            log.set_len(offset)?;
-            self.platform.sync_file(log)?;
-        }
-        Ok(())
     }
 
     /// The entry of every record in the store, read from every core, and
@@ -983,6 +832,7 @@ impl<P: Platform> Store<P> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
     use std::slice;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;
@@ -1197,9 +1047,9 @@ mod tests {
         );
 
         let mut early = bytes.clone();
-        early[Log::HEADER.len() + 10] ^= 1;
+        early[Log::FRAMES.header().len() + 10] ^= 1;
         let mut versioned = bytes;
-        versioned[Log::HEADER.len() - 2] = b'9';
+        versioned[Log::FRAMES.header().len() - 2] = b'9';
         for damaged in [early, versioned, Vec::new()] {
             fs::write(&log, damaged).unwrap();
             assert_eq!(sorted(Index::open(&store).unwrap()), sorted(index.clone()));
