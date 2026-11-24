@@ -31,6 +31,9 @@
 //! where `n` is that entry's sequence number; every entry names its writer.
 //! Once the write is published, the writer removes the file.
 //!
+//! The [index] catches up from the entries, so writers don't
+//! update it.
+//!
 //! **Reading.** Readers stop before the first entry whose writer still holds
 //! its lock ([`OpLog::settled`]). Every entry before it is durable, and its
 //! write is as published as it will ever be. Otherwise a power loss could drop
