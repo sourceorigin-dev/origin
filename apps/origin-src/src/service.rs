@@ -16,7 +16,7 @@
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::Arc;
 
 use origin_platform::Native;
 use origin_shared::api::{
@@ -30,6 +30,7 @@ use origin_shared::{
     Base, ChangeId, Head, NodeKey, Object, ObjectId, ObjectKind, Principal, PrincipalName,
     RecordId, Statement, StatementId, TargetName,
 };
+use parking_lot::{Condvar, Mutex, MutexGuard};
 
 use crate::annotations::{AnnotateError, Annotations};
 use crate::index::Index;
@@ -519,10 +520,7 @@ impl Indexes {
     fn take(&self, most: usize) -> Taken<'_> {
         let mut state = self.state();
         while state.kept.is_empty() && state.taken >= most {
-            state = self
-                .returned
-                .wait(state)
-                .unwrap_or_else(PoisonError::into_inner);
+            self.returned.wait(&mut state);
         }
         state.taken += 1;
         Taken {
@@ -532,7 +530,7 @@ impl Indexes {
     }
 
     fn state(&self) -> MutexGuard<'_, IndexesState> {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+        self.state.lock()
     }
 }
 

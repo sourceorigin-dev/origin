@@ -1,10 +1,10 @@
 //! Tests for landing changes: rebasing, stacks, who may land, and keeping a
 //! landing that waits.
 
-use std::sync::Mutex;
 use std::thread;
 
 use origin_shared::{Statement, Verdict};
+use parking_lot::Mutex;
 
 use super::*;
 
@@ -145,12 +145,12 @@ fn concurrent_landings_serialize() {
             scope.spawn(move || {
                 for &change in chunk {
                     assert!(matches!(repo.land(change)[..], [Landing::Landed { .. }]));
-                    *landed.lock().unwrap() += 1;
+                    *landed.lock() += 1;
                 }
             });
         }
     });
-    assert_eq!(*landed.lock().unwrap(), changes.len());
+    assert_eq!(*landed.lock(), changes.len());
     let log = repo.store.log(&TargetName::MAIN).unwrap();
     assert_eq!(log.len(), changes.len() + 1);
     for pair in log.windows(2) {

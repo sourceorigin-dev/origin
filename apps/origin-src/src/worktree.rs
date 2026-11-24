@@ -20,8 +20,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::panic;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -30,6 +30,7 @@ use origin_shared::object::{DecodeError, Reader};
 use origin_shared::{
     EncodedObject, EntryKind, EntryName, ObjectId, Record, RepoPath, Tree, TreeEntry, TreeId,
 };
+use parking_lot::Mutex;
 
 use crate::store::{Store, StoreError};
 use crate::tree::FileChange;
@@ -860,10 +861,7 @@ impl<'a, P: Platform> Worktree<'a, P> {
                             };
                             local.push((index, map(item)?));
                         }
-                        results
-                            .lock()
-                            .expect("no worker panics holding the lock")
-                            .extend(local);
+                        results.lock().extend(local);
                         Ok(())
                     })
                 })
@@ -872,9 +870,7 @@ impl<'a, P: Platform> Worktree<'a, P> {
                 .into_iter()
                 .try_for_each(|handle| handle.join().expect("snapshot threads do not panic"))
         })?;
-        let mut results = results
-            .into_inner()
-            .expect("no worker panics holding the lock");
+        let mut results = results.into_inner();
         results.sort_unstable_by_key(|(index, _)| *index);
         Ok(results.into_iter().map(|(_, result)| result).collect())
     }

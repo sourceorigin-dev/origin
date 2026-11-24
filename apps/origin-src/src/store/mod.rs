@@ -25,13 +25,14 @@ use std::io;
 use std::num::NonZero;
 use std::panic;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, SystemTime};
 
 use origin_platform::{DurableWrite, LockMode, LockedFile, Native, Platform, WritableError};
 use origin_shared::object::{DecodeError, IdMismatch};
 use origin_shared::{EncodedObject, Head, ObjectId, TargetName, TypedId};
+use parking_lot::Mutex;
 
 use crate::index::Entry;
 use crate::oplog::{Actor, Effect};
@@ -528,10 +529,7 @@ impl<P: Platform> Batch<'_, P> {
             .map_err(|source| StoreError::io(&path, source))?;
         self.write.stage(path, &compressed)?;
         if let Some(entry) = entry {
-            self.entries
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .push(entry);
+            self.entries.lock().push(entry);
         }
         Ok(true)
     }
@@ -576,10 +574,7 @@ impl<P: Platform> Batch<'_, P> {
     /// collection may have rewritten a pack without the object, and a writer
     /// must never skip an object that is gone.
     fn packed(&self, id: ObjectId) -> Result<bool, StoreError> {
-        let mut read = self
-            .manifest_read
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let mut read = self.manifest_read.lock();
         if !*read {
             self.store.reload_packs()?;
             *read = true;
@@ -605,10 +600,7 @@ impl<P: Platform> Batch<'_, P> {
     /// Fails if an object cannot be renamed into place, a directory cannot be
     /// synced, or the op log cannot be appended to.
     pub fn commit(self) -> Result<(), StoreError> {
-        let entries = self
-            .entries
-            .into_inner()
-            .unwrap_or_else(PoisonError::into_inner);
+        let entries = self.entries.into_inner();
         if entries.is_empty() {
             return Ok(self.write.commit()?);
         }
@@ -711,9 +703,9 @@ impl StoreError {
 pub(crate) mod tests {
     use std::fs::File;
     use std::slice;
-    use std::sync::Mutex;
 
     use origin_platform::{CloneFile, Durability, Error, FileLock, FileSystem, FsKind, ReadAt};
+    use parking_lot::Mutex;
 
     use origin_shared::{Record, Tree, TreeId};
 
@@ -739,18 +731,18 @@ pub(crate) mod tests {
 
     impl Durability for Recorder {
         fn sync_file(&self, file: &File) -> io::Result<()> {
-            self.0.lock().unwrap().push(Synced::File);
+            self.0.lock().push(Synced::File);
             Native::default().sync_file(file)
         }
 
         fn sync_dir(&self, dir: &Path) -> io::Result<()> {
-            self.0.lock().unwrap().push(Synced::Dir(dir.to_owned()));
+            self.0.lock().push(Synced::Dir(dir.to_owned()));
             Native::default().sync_dir(dir)
         }
 
         fn sync_batch<'f>(&self, files: impl IntoIterator<Item = &'f Path>) -> Result<(), Error> {
             let files: Vec<_> = files.into_iter().collect();
-            self.0.lock().unwrap().push(Synced::Batch(files.len()));
+            self.0.lock().push(Synced::Batch(files.len()));
             Native::default().sync_batch(files)
         }
     }
@@ -778,13 +770,13 @@ pub(crate) mod tests {
         store.init().unwrap();
         let blob = EncodedObject::blob(b"hello");
         store.write_all(slice::from_ref(&blob)).unwrap();
-        store.platform.0.lock().unwrap().clear();
+        store.platform.0.lock().clear();
 
         // Its writer may not have synced it yet, if another one wrote it.
         assert_eq!(store.write_all(slice::from_ref(&blob)).unwrap(), 0);
         let shard = store.path(blob.id()).parent().unwrap().to_owned();
         assert_eq!(
-            store.platform.0.into_inner().unwrap(),
+            store.platform.0.into_inner(),
             [Synced::Batch(0), Synced::Dir(shard)]
         );
     }
@@ -796,7 +788,7 @@ pub(crate) mod tests {
         store.init().unwrap();
         let blob = EncodedObject::blob(b"hello");
         store.write_all(slice::from_ref(&blob)).unwrap();
-        store.platform.0.lock().unwrap().clear();
+        store.platform.0.lock().clear();
 
         let batch = store.batch();
         assert!(batch.depend(blob.id()).unwrap());
@@ -804,7 +796,7 @@ pub(crate) mod tests {
         batch.commit().unwrap();
         let shard = store.path(blob.id()).parent().unwrap().to_owned();
         assert_eq!(
-            store.platform.0.into_inner().unwrap(),
+            store.platform.0.into_inner(),
             [Synced::Batch(0), Synced::Dir(shard)]
         );
     }
