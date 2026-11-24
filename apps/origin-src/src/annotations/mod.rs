@@ -16,6 +16,7 @@ mod retention;
 use std::collections::HashSet;
 
 use origin_platform::{Native, Platform};
+use origin_shared::api::Annotation;
 use origin_shared::{
     ChangeId, EncodedObject, Kind, Principal, Record, RecordId, RevisionId, Statement, StatementId,
 };
@@ -31,17 +32,6 @@ pub use retention::Dropped;
 pub struct Annotations<'a, P = Native> {
     store: &'a Store<P>,
     index: Index,
-}
-
-/// A statement, and whether its issuer superseded it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Annotation {
-    /// The statement's id.
-    pub id: StatementId,
-    /// The statement.
-    pub statement: Statement,
-    /// The first statement from the same issuer that supersedes it.
-    pub superseded_by: Option<StatementId>,
 }
 
 impl<'a, P: Platform> Annotations<'a, P> {
@@ -192,12 +182,32 @@ impl<'a, P: Platform> Annotations<'a, P> {
         Ok(None)
     }
 
-    /// The statements about `subject`, in arrival order.
+    /// Returns the statements about `subject`, in arrival order, each marked
+    /// with whether its claim holds, as [`Annotations::claims`] decides. This
+    /// lets readers such as CI runners count results the same way the landing
+    /// queue does.
+    ///
+    /// # Errors
+    ///
+    /// Fails if a statement, or a record or tree needed to check the claims,
+    /// cannot be read.
+    pub fn about(&self, subject: RecordId) -> Result<Vec<Annotation>, StoreError> {
+        let mut listed = self.listed(subject)?;
+        let holding: HashSet<StatementId> =
+            self.claims_of(&listed)?.iter().map(Claim::id).collect();
+        for annotation in &mut listed {
+            annotation.holds = holding.contains(&annotation.id);
+        }
+        Ok(listed)
+    }
+
+    /// Returns the statements about `subject`, in arrival order, without
+    /// checking which ones hold.
     ///
     /// # Errors
     ///
     /// Fails if a statement cannot be read.
-    pub fn about(&self, subject: RecordId) -> Result<Vec<Annotation>, StoreError> {
+    fn listed(&self, subject: RecordId) -> Result<Vec<Annotation>, StoreError> {
         self.index
             .statements(subject)
             .iter()
@@ -207,6 +217,7 @@ impl<'a, P: Platform> Annotations<'a, P> {
                     id,
                     superseded_by: self.superseded_by(id, &statement)?,
                     statement,
+                    holds: false,
                 })
             })
             .collect()
@@ -225,7 +236,7 @@ impl<'a, P: Platform> Annotations<'a, P> {
         issuer: &Principal,
     ) -> Result<Option<StatementId>, StoreError> {
         Ok(self
-            .about(subject)?
+            .listed(subject)?
             .into_iter()
             .rev()
             .find(|annotation| {
