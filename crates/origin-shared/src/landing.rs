@@ -1,0 +1,72 @@
+//! Landings: what a target's queue is asked to land, and the outcome.
+
+use std::fmt;
+
+use crate::policy::Requirement;
+use crate::{ChangeId, Head, RecordId, RepoPath, Source, StatementId, TargetName};
+
+/// What a landing lands.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Proposal {
+    /// A change, as of its head.
+    Change(ChangeId),
+    /// Another target, as of its tip.
+    Target(TargetName),
+}
+
+/// The outcome of a landing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Landing {
+    /// It landed.
+    Landed {
+        /// What landed.
+        proposal: Proposal,
+        /// The revision or acceptance the acceptance names.
+        source: Source,
+        /// The acceptance.
+        acceptance: Head,
+    },
+    /// The target already has it, so nothing landed.
+    Unchanged(Proposal),
+    /// It waits, and the queue keeps it.
+    Pending(Pending),
+}
+
+/// A landing that waits, kept in the queue to be listed and retried.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pending {
+    /// The target it lands on.
+    pub onto: TargetName,
+    /// What lands.
+    pub proposal: Proposal,
+    /// What the evidence must be about: the revision that would land, or the
+    /// merged snapshot when landing a target. For a conflict, the revision or
+    /// acceptance that did not merge.
+    pub subject: RecordId,
+    /// Why it waits.
+    pub blocked: Blocked,
+}
+
+/// Why a landing waits.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Blocked {
+    /// The subject lacks these statements, which the target requires.
+    Evidence(Vec<Requirement>),
+    /// Both sides changed these paths. The `core.conflict` statement lists
+    /// them too.
+    Conflict {
+        /// The statement.
+        statement: StatementId,
+        /// The paths, sorted.
+        paths: Vec<RepoPath>,
+    },
+}
+
+impl fmt::Display for Proposal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Change(change) => write!(f, "change {}", change.short()),
+            Self::Target(target) => write!(f, "`{target}`"),
+        }
+    }
+}

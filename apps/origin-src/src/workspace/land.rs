@@ -16,6 +16,7 @@
 //! those files change or `origin resolve` accepts them (see
 //! [`conflict`](crate::conflict)).
 
+use origin_shared::landing::{Blocked, Landing, Pending, Proposal};
 use origin_shared::{
     Base, ChangeId, EncodedObject, Record, Revision, RevisionId, Source, TargetName, TreeId,
 };
@@ -25,7 +26,7 @@ use crate::conflict::Conflicts;
 use crate::index::Index;
 use crate::oplog::Why;
 use crate::policy::Policy;
-use crate::queue::{Blocked, Landing, Pending, Proposal, Queue};
+use crate::queue::Queue;
 use crate::tree::Merge;
 
 impl Workspace {

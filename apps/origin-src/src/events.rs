@@ -25,253 +25,18 @@
 //! Entries lost to damage deliver nothing, and the damage is reported on
 //! stderr.
 
-use std::fmt;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use origin_platform::{Native, Platform};
-use origin_shared::policy::{KindPattern, Requirement};
-use origin_shared::{
-    AcceptanceId, ChangeId, Kind, Object, ObjectId, Principal, RecordId, RevisionId, StatementId,
-    TargetName, Verdict,
-};
+use origin_shared::event::{Event, EventKind, Filter, Page};
+use origin_shared::landing::{Blocked, Pending};
+use origin_shared::{Object, ObjectId};
 
 use crate::index;
 use crate::oplog::{Effect, Entry};
-use crate::queue::{Blocked, Pending, Queue};
+use crate::queue::Queue;
 use crate::store::{Store, StoreError};
-
-/// An event, with its position in the op log.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Event {
-    /// The sequence number of the op log entry the event comes from. Reading
-    /// from this cursor delivers the events of later entries.
-    pub cursor: u64,
-    /// What happened.
-    pub kind: EventKind,
-}
-
-/// What happened. Consumers deduplicate events by it.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum EventKind {
-    /// A statement was issued.
-    StatementIssued {
-        /// The statement.
-        statement: StatementId,
-        /// The record it is about.
-        subject: RecordId,
-        /// The statement's kind.
-        kind: Kind,
-        /// Its verdict.
-        verdict: Option<Verdict>,
-        /// Who issued it.
-        issuer: Principal,
-    },
-    /// A revision was created.
-    RevisionCreated {
-        /// The revision.
-        revision: RevisionId,
-        /// The revision's change.
-        change: ChangeId,
-        /// The revision's author.
-        author: Principal,
-    },
-    /// A target advanced.
-    TargetAdvanced {
-        /// The target.
-        target: TargetName,
-        /// The new acceptance's position in the target's log.
-        seq: u64,
-        /// The acceptance.
-        acceptance: AcceptanceId,
-    },
-    /// A waiting landing lacks a statement it requires.
-    CheckRequested {
-        /// The target it lands on.
-        onto: TargetName,
-        /// The record the required statement must be about.
-        subject: RecordId,
-        /// The statement the landing requires.
-        requirement: Requirement,
-    },
-}
-
-/// What an event is about. The `--subject` option matches against it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Subject {
-    /// A record.
-    Record(RecordId),
-    /// A change. Revision events are about their change.
-    Change(ChangeId),
-    /// A target.
-    Target(TargetName),
-}
-
-impl EventKind {
-    /// The event's name, such as `statement.issued`.
-    #[must_use]
-    pub fn name(&self) -> &'static str {
-        match self {
-            Self::StatementIssued { .. } => "statement.issued",
-            Self::RevisionCreated { .. } => "revision.created",
-            Self::TargetAdvanced { .. } => "target.advanced",
-            Self::CheckRequested { .. } => "check.requested",
-        }
-    }
-
-    /// The record the event is about: the statement, revision or acceptance,
-    /// or for a check request, the record to check.
-    #[must_use]
-    pub fn record(&self) -> RecordId {
-        match *self {
-            Self::StatementIssued { statement, .. } => RecordId::Statement(statement),
-            Self::RevisionCreated { revision, .. } => RecordId::Revision(revision),
-            Self::TargetAdvanced { acceptance, .. } => RecordId::Acceptance(acceptance),
-            Self::CheckRequested { subject, .. } => subject,
-        }
-    }
-
-    /// What the event is about: the subject of a statement or check request,
-    /// the change of a revision, or the target that advanced.
-    #[must_use]
-    pub fn subject(&self) -> Subject {
-        match self {
-            Self::StatementIssued { subject, .. } | Self::CheckRequested { subject, .. } => {
-                Subject::Record(*subject)
-            }
-            Self::RevisionCreated { change, .. } => Subject::Change(*change),
-            Self::TargetAdvanced { target, .. } => Subject::Target(target.clone()),
-        }
-    }
-
-    /// The subjects `--subject` matches the event by: its
-    /// [subject](Self::subject), plus the revision itself for
-    /// `revision.created`.
-    fn subjects(&self) -> Vec<Subject> {
-        let subject = self.subject();
-        match *self {
-            Self::RevisionCreated { revision, .. } => {
-                vec![subject, Subject::Record(RecordId::Revision(revision))]
-            }
-            _ => vec![subject],
-        }
-    }
-
-    /// The kinds `--kind` matches the event by: its name, plus the kind of the
-    /// statement it issues or requests.
-    fn kinds(&self) -> Vec<Kind> {
-        let name = Kind::new(self.name()).expect("event names are valid kinds");
-        match self {
-            Self::StatementIssued { kind, .. } => vec![name, kind.clone()],
-            Self::CheckRequested { requirement, .. } => vec![name, requirement.kind.clone()],
-            Self::RevisionCreated { .. } | Self::TargetAdvanced { .. } => vec![name],
-        }
-    }
-}
-
-impl fmt::Display for Subject {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Record(RecordId::Snapshot(id)) => write!(f, "snapshot:{id}"),
-            Self::Record(RecordId::Revision(id)) => write!(f, "revision:{id}"),
-            Self::Record(RecordId::Statement(id)) => write!(f, "statement:{id}"),
-            Self::Record(RecordId::Acceptance(id)) => write!(f, "acceptance:{id}"),
-            Self::Change(id) => write!(f, "change:{id}"),
-            Self::Target(name) => write!(f, "target:{name}"),
-        }
-    }
-}
-
-/// Formats the event as one line: the cursor, the name, then `key=value`
-/// fields with full ids.
-impl fmt::Display for Event {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} {}", self.cursor, self.kind.name())?;
-        let verdict = |verdict: &Option<Verdict>| {
-            verdict.map_or_else(|| "none".to_owned(), |verdict| verdict.to_string())
-        };
-        match &self.kind {
-            EventKind::StatementIssued {
-                statement,
-                subject,
-                kind,
-                verdict: issued,
-                issuer,
-            } => write!(
-                f,
-                " statement={statement} subject={} kind={kind} verdict={} issuer={issuer}",
-                Subject::Record(*subject),
-                verdict(issued)
-            ),
-            EventKind::RevisionCreated {
-                revision,
-                change,
-                author,
-            } => write!(f, " revision={revision} change={change} author={author}"),
-            EventKind::TargetAdvanced {
-                target,
-                seq,
-                acceptance,
-            } => write!(f, " target={target} seq={seq} acceptance={acceptance}"),
-            EventKind::CheckRequested {
-                onto,
-                subject,
-                requirement,
-            } => write!(
-                f,
-                " onto={onto} subject={} kind={} verdict={} issuer={}",
-                Subject::Record(*subject),
-                requirement.kind,
-                requirement.verdict,
-                requirement.issuer
-            ),
-        }
-    }
-}
-
-/// Which events to deliver. An empty list matches everything.
-#[derive(Clone, Debug, Default)]
-pub struct Filter {
-    /// Event names or statement kinds to match, such as `check.requested`,
-    /// `core.conflict` or `ci.*`. An event matches if its name, or the kind of
-    /// the statement it issues or requests, matches one of them.
-    pub kinds: Vec<KindPattern>,
-    /// Subject prefixes to match, such as `change:3fa2`, `main` or the start of
-    /// a revision id. An event matches if its [subject](EventKind::subject),
-    /// or for `revision.created` its revision, starts with one of them. The
-    /// subject can be written with its type, such as `revision:<id>`, or as the
-    /// bare id or name.
-    pub subjects: Vec<String>,
-}
-
-impl Filter {
-    /// Whether `event` passes the filter.
-    #[must_use]
-    pub fn matches(&self, event: &EventKind) -> bool {
-        let kind = self.kinds.is_empty()
-            || event
-                .kinds()
-                .iter()
-                .any(|kind| self.kinds.iter().any(|pattern| pattern.matches(kind)));
-        kind && (self.subjects.is_empty()
-            || event.subjects().iter().any(|subject| {
-                let subject = subject.to_string();
-                let bare = subject.split_once(':').map_or("", |(_, bare)| bare);
-                self.subjects.iter().any(|start| {
-                    subject.starts_with(start.as_str()) || bare.starts_with(start.as_str())
-                })
-            }))
-    }
-}
-
-/// A batch of events, and the cursor to read the next batch from.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Page {
-    /// The events, oldest first.
-    pub events: Vec<Event>,
-    /// The cursor after the entries read. Pass it to the next read.
-    pub next: u64,
-}
 
 /// Reads the events of a store.
 #[derive(Debug)]
@@ -454,10 +219,10 @@ impl<'a, P: Platform> Events<'a, P> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
     use std::fs;
 
-    use origin_shared::{Base, ChangeId, EncodedObject, ObjectId};
+    use origin_shared::event::Subject;
+    use origin_shared::{Base, ChangeId, ObjectId, RecordId, TargetName};
 
     use super::*;
     use crate::annotations::Annotations;
@@ -672,7 +437,7 @@ mod tests {
         // file replaces the conflict's: readers wait for both.
         let again = Effect::Waiting {
             onto: TargetName::MAIN,
-            proposal: crate::queue::Proposal::Change(ChangeId::from_bytes([2; 16])),
+            proposal: origin_shared::landing::Proposal::Change(ChangeId::from_bytes([2; 16])),
         };
         let (_, writing) = repo.store.oplog().append_in_progress(&again).unwrap();
         assert_eq!(
@@ -690,29 +455,6 @@ mod tests {
             Some(&("check.requested", Some("ci.test".to_owned()))),
             "{requested:?}"
         );
-    }
-
-    #[test]
-    fn check_requests_about_one_record_are_told_apart() {
-        let subject = RecordId::Revision(EncodedObject::blob(b"a revision").id().into());
-        let request = |onto: &str, kind: &str| EventKind::CheckRequested {
-            onto: TargetName::new(onto).unwrap(),
-            subject,
-            requirement: Requirement {
-                kind: Kind::new(kind).unwrap(),
-                verdict: Verdict::Pass,
-                issuer: "group:runners".parse().unwrap(),
-            },
-        };
-        let requests = [
-            request("main", "ci.test"),
-            request("main", "ci.lint"),
-            request("release", "ci.test"),
-            request("main", "ci.test"),
-        ];
-        assert!(requests.iter().all(|request| request.record() == subject));
-        let distinct: HashSet<_> = requests.iter().collect();
-        assert_eq!(distinct.len(), 3, "the same request twice is one");
     }
 
     #[test]
