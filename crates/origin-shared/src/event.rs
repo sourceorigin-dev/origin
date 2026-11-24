@@ -12,19 +12,26 @@ use crate::{
 };
 
 /// An event, with its position in the op log.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
 pub struct Event {
     /// The sequence number of the op log entry the event comes from. Reading
     /// from this cursor delivers the events of later entries.
     pub cursor: u64,
     /// What happened.
+    #[serde(flatten)]
     pub kind: EventKind,
 }
 
-/// What happened. Consumers deduplicate events by it.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+/// What happened: the event without its cursor. Consumers deduplicate events
+/// by it. In JSON, the `event` field holds its name, as [`EventKind::name`]
+/// returns it.
+#[derive(
+    Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, utoipa::ToSchema,
+)]
+#[serde(tag = "event")]
 pub enum EventKind {
     /// A statement was issued.
+    #[serde(rename = "statement.issued")]
     StatementIssued {
         /// The statement.
         statement: StatementId,
@@ -38,6 +45,7 @@ pub enum EventKind {
         issuer: Principal,
     },
     /// A revision was created.
+    #[serde(rename = "revision.created")]
     RevisionCreated {
         /// The revision.
         revision: RevisionId,
@@ -47,6 +55,7 @@ pub enum EventKind {
         author: Principal,
     },
     /// A target advanced.
+    #[serde(rename = "target.advanced")]
     TargetAdvanced {
         /// The target.
         target: TargetName,
@@ -56,6 +65,7 @@ pub enum EventKind {
         acceptance: AcceptanceId,
     },
     /// A waiting landing lacks a statement it requires.
+    #[serde(rename = "check.requested")]
     CheckRequested {
         /// The target it lands on.
         onto: TargetName,
@@ -238,7 +248,9 @@ impl Filter {
 }
 
 /// A batch of events, and the cursor to read the next batch from.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(
+    Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, utoipa::ToSchema,
+)]
 pub struct Page {
     /// The events, oldest first.
     pub events: Vec<Event>,

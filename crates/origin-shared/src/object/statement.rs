@@ -16,7 +16,7 @@ use crate::{
 /// Statements are permanent. An issuer revises one by issuing another that
 /// supersedes it. A promoted statement carries another one over to a record
 /// with the same input digest, pointing at it instead of copying its issuer.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
 pub struct Statement {
     /// The record the claim is about.
     pub subject: RecordId,
@@ -309,7 +309,7 @@ impl Field for Verdict {
 /// The input digest of a snapshot hashes the ids it stores at `paths`, with
 /// `definition` and `toolchain`. A statement that declares inputs and isn't
 /// `external` is promoted to every revision with the same input digest.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
 pub struct Inputs {
     /// The files and directories read, each covering everything under it.
     pub paths: Vec<RepoPath>,
