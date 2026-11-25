@@ -50,26 +50,14 @@ pub trait Durability {
 }
 
 /// Files written durably as a group, at the cost of one batch sync and one
-/// sync per directory involved.
-///
-/// [`DurableWrite::stage`] writes each file under a temporary name in its
-/// destination's directory, which [`DurableWrite::is_temporary`] recognizes.
-/// [`DurableWrite::commit`] then makes them all durable with
-/// [`Durability::sync_batch`], renames them into place from several threads
-/// and syncs their directories. Readers see either the previous file or the
-/// complete new one, and once `commit` returns a crash loses none of them.
-/// Dropping the write before committing removes its temporary files; a crash
-/// leaves them behind, so code that lists a directory written this way skips
-/// them, and removes the stale ones.
-///
-/// Staging beside the destination keeps each rename within one directory,
-/// so writes to different directories never contend on a shared one.
-///
-/// [`DurableWrite::sync_with`] adds a file written in place, such as an
-/// append-only log, to the batch sync, so it becomes durable no later than
-/// the batch is published, at no extra sync.
-///
-/// Files can be staged from several threads at once.
+/// sync per directory involved. [`DurableWrite::stage`] writes each beside its
+/// destination under a temporary name ([`DurableWrite::is_temporary`]);
+/// [`DurableWrite::commit`] syncs them all with [`Durability::sync_batch`],
+/// renames them into place and syncs their directories, so readers see the
+/// old file or the whole new one, and a crash after `commit` loses none.
+/// Dropping the write removes its temporary files; a crash leaves them for
+/// readers to skip and remove. [`DurableWrite::sync_with`] adds a file
+/// written in place to the batch sync. Files can be staged from several threads.
 #[derive(Debug)]
 pub struct DurableWrite<'a, P> {
     platform: &'a P,
@@ -123,11 +111,9 @@ impl<'a, P: Durability> DurableWrite<'a, P> {
     /// [`DurableWrite::commit`], replacing any file there.
     ///
     /// Each directory created is durable at once, whatever becomes of the
-    /// write, so a later write into it never relies on this one committing.
-    /// A directory found already there may not be: another write may have
-    /// just created it, or died before syncing its parent. So the write
-    /// syncs the parent of the deepest one it found too: at once if it
-    /// creates directories in it, with the batch otherwise.
+    /// write. A directory found already there may not be, so the write also
+    /// syncs the parent of the deepest one it found: at once if it creates
+    /// directories in it, with the batch otherwise.
     ///
     /// # Errors
     ///
