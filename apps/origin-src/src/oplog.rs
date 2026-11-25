@@ -785,18 +785,21 @@ impl<'a, P: Platform> OpLog<'a, P> {
     /// Damages `part` of the frame of the entry `seq`, as a bad disk would.
     #[cfg(test)]
     pub(crate) fn damage(&self, seq: u64, part: FramePart) {
-        let segments = self.segments().unwrap();
+        let segments = self.segments().expect("`segments()` succeeds");
         let first = segments[segments.partition_point(|&first| first <= seq) - 1];
         let path = self.segment(first);
-        let mut bytes = fs::read(&path).unwrap();
+        let mut bytes = fs::read(&path).expect("`fs::read(&path)` succeeds");
         let (frames, _) = Self::FRAMES.parse(&bytes, Entry::decode);
-        let (offset, entry) = frames.iter().find(|(_, entry)| entry.seq == seq).unwrap();
-        let offset = usize::try_from(*offset).unwrap();
+        let (offset, entry) = frames
+            .iter()
+            .find(|(_, entry)| entry.seq == seq)
+            .expect("`find(|(_, entry)| entry.seq == seq)` yields a value");
+        let offset = usize::try_from(*offset).expect("`usize::try_from(*offset)` succeeds");
         match part {
             FramePart::Check => bytes[offset + entry.encode().len() - 6] ^= 1,
             FramePart::Length => bytes[offset..offset + 3].fill(0xff),
         }
-        fs::write(&path, &bytes).unwrap();
+        fs::write(&path, &bytes).expect("`fs::write(&path, &bytes)` succeeds");
     }
 
     /// Creates and locks the lock file of a writer whose first entry, `first`,
@@ -948,10 +951,10 @@ mod tests {
     use super::*;
 
     fn store() -> (tempfile::TempDir, Store) {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("`tempfile::tempdir()` succeeds");
         let store = Store::new(dir.path().join(".origin"), Native::default())
             .with_actor(Actor::new("test").in_workspace(dir.path()));
-        store.init().unwrap();
+        store.init().expect("`init()` succeeds");
         (dir, store)
     }
 
@@ -959,7 +962,7 @@ mod tests {
     fn log(store: &Store, effect: &Effect) -> u64 {
         store
             .commit_logged(store.durable_write(), slice::from_ref(effect))
-            .unwrap()
+            .expect("`commit_logged()` succeeds")
     }
 
     fn wrote(seed: u8) -> Effect {
@@ -981,7 +984,7 @@ mod tests {
                 proposal: Proposal::Change(ChangeId::from_bytes([3; 16])),
             },
             Effect::Waiting {
-                onto: TargetName::new("release/v3").unwrap(),
+                onto: TargetName::new("release/v3").expect("`TargetName::new()` succeeds"),
                 proposal: Proposal::Target(TargetName::MAIN),
             },
             Effect::Moved(Move {
@@ -1022,13 +1025,13 @@ mod tests {
     fn sequence_numbers_continue_across_segments_and_retention() {
         let (_dir, store) = store();
         let oplog = store.oplog();
-        assert_eq!(oplog.last_seq().unwrap(), 0);
-        assert_eq!(oplog.after(0).unwrap().entries, []);
+        assert_eq!(oplog.last_seq().expect("`last_seq()` succeeds"), 0);
+        assert_eq!(oplog.after(0).expect("`after(0)` succeeds").entries, []);
         let seqs: Vec<u64> = (0..200).map(|i| log(&store, &wrote(i))).collect();
         assert_eq!(seqs, (1..=200).collect::<Vec<_>>());
-        assert_eq!(oplog.last_seq().unwrap(), 200);
+        assert_eq!(oplog.last_seq().expect("`last_seq()` succeeds"), 200);
 
-        let segments = oplog.segments().unwrap();
+        let segments = oplog.segments().expect("`segments()` succeeds");
         assert_eq!(
             segments.len(),
             OpLog::<Native>::SEGMENTS,
@@ -1039,17 +1042,24 @@ mod tests {
             oplog.after(0),
             Err(StoreError::Expired { after: 0, oldest: o }) if o == oldest
         ));
-        let kept = oplog.after(oldest - 1).unwrap().entries;
-        assert_eq!(kept.first().unwrap().seq, oldest);
+        let kept = oplog
+            .after(oldest - 1)
+            .expect("`after(oldest - 1)` succeeds")
+            .entries;
+        assert_eq!(kept.first().expect("`first()` yields a value").seq, oldest);
         assert!(kept.windows(2).all(|pair| pair[1].seq == pair[0].seq + 1));
-        let tail = oplog.after(197).unwrap().entries;
+        let tail = oplog.after(197).expect("`after(197)` succeeds").entries;
         assert_eq!(
             tail.iter().map(|entry| entry.seq).collect::<Vec<_>>(),
             [198, 199, 200]
         );
         assert_eq!(tail[0].effect, wrote(197));
 
-        let newest: Vec<_> = oplog.newest_first().unwrap().map(Result::unwrap).collect();
+        let newest: Vec<_> = oplog
+            .newest_first()
+            .expect("`newest_first()` succeeds")
+            .map(|entry| entry.expect("every entry reads"))
+            .collect();
         assert_eq!(newest.len(), kept.len());
         assert_eq!(newest[0].seq, 200);
         assert!(newest.iter().all(|entry| entry.op == 1), "one operation");
@@ -1062,7 +1072,10 @@ mod tests {
         let oplog = store.oplog();
         log(&store, &wrote(1));
         let segment = oplog.segment(1);
-        let mut file = OpenOptions::new().append(true).open(&segment).unwrap();
+        let mut file = OpenOptions::new()
+            .append(true)
+            .open(&segment)
+            .expect("`open(&segment)` succeeds");
         let frame = Entry {
             seq: 2,
             op: 2,
@@ -1072,20 +1085,43 @@ mod tests {
             effect: wrote(2),
         }
         .encode();
-        file.write_all(&frame[..frame.len() / 2]).unwrap();
-        assert_eq!(oplog.last_seq().unwrap(), 1, "readers skip it");
+        file.write_all(&frame[..frame.len() / 2])
+            .expect("`write_all(&frame[..frame.len() / 2])` succeeds");
+        assert_eq!(
+            oplog.last_seq().expect("`last_seq()` succeeds"),
+            1,
+            "readers skip it"
+        );
         assert_eq!(log(&store, &wrote(3)), 2, "the next append cuts it off");
-        assert_eq!(oplog.after(0).unwrap().entries.len(), 2);
+        assert_eq!(
+            oplog.after(0).expect("`after(0)` succeeds").entries.len(),
+            2
+        );
 
-        let mut bytes = fs::read(&segment).unwrap();
+        let mut bytes = fs::read(&segment).expect("`fs::read(&segment)` succeeds");
         let len = bytes.len();
         bytes[len - 6] ^= 1;
-        fs::write(&segment, &bytes).unwrap();
-        assert_eq!(oplog.last_seq().unwrap(), 1, "readers stop at it");
+        fs::write(&segment, &bytes).expect("`fs::write(&segment, &bytes)` succeeds");
+        assert_eq!(
+            oplog.last_seq().expect("`last_seq()` succeeds"),
+            1,
+            "readers stop at it"
+        );
         let next = log(&store, &wrote(4));
         assert!(next > 2, "{next} reuses a hidden number");
-        assert_eq!(oplog.segments().unwrap(), [1, next], "in a new segment");
-        assert_eq!(oplog.after(next - 1).unwrap().entries[0].effect, wrote(4));
+        assert_eq!(
+            oplog.segments().expect("`segments()` succeeds"),
+            [1, next],
+            "in a new segment"
+        );
+        assert_eq!(
+            oplog
+                .after(next - 1)
+                .expect("`after(next - 1)` succeeds")
+                .entries[0]
+                .effect,
+            wrote(4)
+        );
     }
 
     #[test]
@@ -1097,7 +1133,7 @@ mod tests {
         }
         oplog.damage(2, FramePart::Check);
 
-        let read = oplog.after(0).unwrap();
+        let read = oplog.after(0).expect("`after(0)` succeeds");
         let seqs: Vec<_> = read.entries.iter().map(|entry| entry.seq).collect();
         assert_eq!(seqs, [1, 3, 4], "the entries after it are read");
         assert_eq!(
@@ -1109,13 +1145,13 @@ mod tests {
             })
         );
         assert_eq!(
-            oplog.segments().unwrap(),
+            oplog.segments().expect("`segments()` succeeds"),
             [1, 5],
             "appends continue past it"
         );
         assert_eq!(log(&store, &wrote(5)), 5);
         assert_eq!(
-            oplog.after(3).unwrap().damage,
+            oplog.after(3).expect("`after(3)` succeeds").damage,
             None,
             "only readers crossing it"
         );
@@ -1129,12 +1165,12 @@ mod tests {
             log(&store, &wrote(i));
         }
         oplog.damage(2, FramePart::Length);
-        let read = oplog.after(0).unwrap();
+        let read = oplog.after(0).expect("`after(0)` succeeds");
         let seqs: Vec<_> = read.entries.iter().map(|entry| entry.seq).collect();
         assert_eq!(seqs, [1, 3, 4], "the entries after it are read");
         assert_eq!(read.damage.map(|damage| damage.lost), Some(1));
         assert_eq!(
-            oplog.segments().unwrap(),
+            oplog.segments().expect("`segments()` succeeds"),
             [1, 5],
             "appends continue past it"
         );
@@ -1142,11 +1178,19 @@ mod tests {
         assert_eq!(log(&store, &wrote(5)), 5);
         assert_eq!(log(&store, &wrote(6)), 6);
         oplog.damage(6, FramePart::Length);
-        let segment = fs::read(oplog.segment(5)).unwrap();
+        let segment = fs::read(oplog.segment(5)).expect("`fs::read(oplog.segment(5))` succeeds");
         let next = log(&store, &wrote(7));
         assert!(next > 6, "{next} reuses a number");
-        assert_eq!(fs::read(oplog.segment(5)).unwrap(), segment, "kept");
-        assert_eq!(oplog.segments().unwrap(), [1, 5, next], "in a new segment");
+        assert_eq!(
+            fs::read(oplog.segment(5)).expect("`fs::read(oplog.segment(5))` succeeds"),
+            segment,
+            "kept"
+        );
+        assert_eq!(
+            oplog.segments().expect("`segments()` succeeds"),
+            [1, 5, next],
+            "in a new segment"
+        );
     }
 
     #[test]
@@ -1154,22 +1198,32 @@ mod tests {
         let (_dir, store) = store();
         let oplog = store.oplog();
         log(&store, &wrote(1));
-        let (seq, writing) = oplog.append_in_progress(&wrote(2)).unwrap();
+        let (seq, writing) = oplog
+            .append_in_progress(&wrote(2))
+            .expect("`append_in_progress(&wrote(2))` succeeds");
         log(&store, &wrote(3));
-        assert_eq!(oplog.last_seq().unwrap(), 3);
-        assert_eq!(oplog.settled().unwrap(), seq - 1, "readers wait for it");
+        assert_eq!(oplog.last_seq().expect("`last_seq()` succeeds"), 3);
+        assert_eq!(
+            oplog.settled().expect("`settled()` succeeds"),
+            seq - 1,
+            "readers wait for it"
+        );
 
         drop(writing);
         let left = oplog.writer_path(seq);
         assert!(left.exists());
-        assert_eq!(oplog.settled().unwrap(), 3, "nothing waits for it");
+        assert_eq!(
+            oplog.settled().expect("`settled()` succeeds"),
+            3,
+            "nothing waits for it"
+        );
         assert!(
             !left.exists(),
             "its entries are synced, and its file removed"
         );
         assert_eq!(
             fs::read_dir(oplog.dir().join(OpLog::<Native>::WRITERS))
-                .unwrap()
+                .expect("`fs::read_dir()` succeeds")
                 .count(),
             0,
             "done writers leave nothing behind"
@@ -1187,13 +1241,20 @@ mod tests {
                     scope.spawn(|| {
                         let oplog = store.oplog();
                         while !done.load(Ordering::Relaxed) {
-                            let Some(&newest) = oplog.segments().unwrap().last() else {
+                            let Some(&newest) =
+                                oplog.segments().expect("`segments()` succeeds").last()
+                            else {
                                 continue;
                             };
                             if let Ok(found) = fs::metadata(oplog.segment(newest)) {
                                 assert!(found.len() >= header, "{} bytes", found.len());
                             }
-                            match oplog.after(oplog.last_seq().unwrap().saturating_sub(1)) {
+                            match oplog.after(
+                                oplog
+                                    .last_seq()
+                                    .expect("`last_seq()` succeeds")
+                                    .saturating_sub(1),
+                            ) {
                                 Ok(read) => assert!(read.damage.is_none()),
                                 Err(StoreError::Expired { .. }) => {}
                                 Err(error) => panic!("{error}"),
@@ -1207,7 +1268,7 @@ mod tests {
             }
             done.store(true, Ordering::Relaxed);
             for reader in readers {
-                reader.join().unwrap();
+                reader.join().expect("`join()` succeeds");
             }
         });
     }
@@ -1218,9 +1279,10 @@ mod tests {
     fn segments_shorter_than_their_header_are_damage() {
         let (_dir, store) = store();
         let oplog = store.oplog();
-        fs::write(oplog.segment(1), &OpLog::<Native>::FRAMES.header()[..2]).unwrap();
+        fs::write(oplog.segment(1), &OpLog::<Native>::FRAMES.header()[..2])
+            .expect("`fs::write()` succeeds");
         assert_eq!(log(&store, &wrote(1)), 2, "in a new segment");
-        let read = oplog.after(0).unwrap();
+        let read = oplog.after(0).expect("`after(0)` succeeds");
         let seqs: Vec<_> = read.entries.iter().map(|entry| entry.seq).collect();
         assert_eq!(seqs, [2]);
         assert_eq!(

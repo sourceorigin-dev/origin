@@ -18,26 +18,32 @@ fn missing_evidence_waits_and_promoted_results_count() {
     };
     assert!(matches!(&pending.blocked, Blocked::Evidence(missing) if missing.len() == 1));
     assert_eq!(
-        Queue::pending(&repo.store).unwrap(),
+        Queue::pending(&repo.store).expect("`Queue::pending(&repo.store)` succeeds"),
         std::slice::from_ref(pending)
     );
 
-    let annotations = Annotations::open(&repo.store).unwrap();
+    let annotations =
+        Annotations::open(&repo.store).expect("`Annotations::open(&repo.store)` succeeds");
     annotations
         .issue(&ci_test(code, "user:mallory"), None)
-        .unwrap();
+        .expect("`issue()` succeeds");
     assert_eq!(repo.land(1), waiting);
-    let result = annotations.issue(&ci_test(code, "node:ci"), None).unwrap();
+    let result = annotations
+        .issue(&ci_test(code, "node:ci"), None)
+        .expect("`issue()` succeeds");
     let [landing] = &repo.land(1)[..] else {
         panic!()
     };
     let acceptance = repo
         .store
         .get(repo.tip(&TargetName::MAIN).acceptance)
-        .unwrap();
+        .expect("`get(repo.tip(&TargetName::MAIN).acceptance)` succeeds");
     assert_eq!(landed(landing), code);
     assert_eq!(acceptance.body().evidence, [result]);
-    assert_eq!(Queue::pending(&repo.store).unwrap(), []);
+    assert_eq!(
+        Queue::pending(&repo.store).expect("`Queue::pending(&repo.store)` succeeds"),
+        []
+    );
 
     let [landing] = &repo.land(2)[..] else {
         panic!()
@@ -47,14 +53,17 @@ fn missing_evidence_waits_and_promoted_results_count() {
     let acceptance = repo
         .store
         .get(repo.tip(&TargetName::MAIN).acceptance)
-        .unwrap();
+        .expect("`get(repo.tip(&TargetName::MAIN).acceptance)` succeeds");
     let [evidence] = acceptance.body().evidence[..] else {
         panic!()
     };
-    let promoted = repo.store.get(evidence).unwrap();
+    let promoted = repo.store.get(evidence).expect("`get(evidence)` succeeds");
     assert_eq!(promoted.subject, RecordId::Revision(rebased));
     assert_eq!(promoted.promoted_from, Some(result));
-    assert_eq!(promoted.issuer, "node:queue".parse().unwrap());
+    assert_eq!(
+        promoted.issuer,
+        "node:queue".parse().expect("`parse()` succeeds")
+    );
 }
 
 #[test]
@@ -141,30 +150,36 @@ fn forged_promotions_are_no_evidence() {
     let mut original = ci_test(failed, "user:ci");
     original.verdict = Some(Verdict::Fail);
     let id = Annotations::open(&repo.store)
-        .unwrap()
+        .expect("`Annotations::open(&repo.store)` succeeds")
         .issue(&original, None)
-        .unwrap();
+        .expect("`issue(&original, None)` succeeds");
     let forged = Statement {
         verdict: Some(Verdict::Pass),
-        issuer: "user:eve".parse().unwrap(),
+        issuer: "user:eve".parse().expect("`parse()` succeeds"),
         promoted_from: Some(id),
         ..original.clone()
     };
     let old = repo.change_on_main(3, &[("src/lib.rs", "bad")]);
     let docs = repo.change_on_main(2, &[("src/lib.rs", "bad"), ("docs", "d")]);
     let mut external = ci_test(old, "user:ci");
-    external.inputs.as_mut().unwrap().external = true;
+    external
+        .inputs
+        .as_mut()
+        .expect("`as_mut()` yields a value")
+        .external = true;
     let external_id: StatementId = external.encode().id().into();
     let reused = Statement {
         subject: RecordId::Revision(docs),
-        issuer: "user:eve".parse().unwrap(),
+        issuer: "user:eve".parse().expect("`parse()` succeeds"),
         promoted_from: Some(external_id),
         ..external.clone()
     };
-    repo.store.write_all(&[external.encode()]).unwrap();
+    repo.store
+        .write_all(&[external.encode()])
+        .expect("`write_all(&[external.encode()])` succeeds");
     repo.store
         .write_all(&[forged.encode(), reused.encode()])
-        .unwrap();
+        .expect("`write_all(&[forged.encode(), reused.encode()])` succeeds");
     assert!(matches!(repo.land(1)[..], [Landing::Pending(_)]));
     assert!(matches!(repo.land(2)[..], [Landing::Pending(_)]));
 }
@@ -175,8 +190,11 @@ fn replaced_results_are_promoted_again() {
     let old = repo.change_on_main(1, &[("src/lib.rs", "code")]);
     let new = repo.change_on_main(2, &[("src/lib.rs", "code"), ("docs", "new")]);
     let original = ci_test(old, "user:ci");
-    let annotations = Annotations::open(&repo.store).unwrap();
-    let id = annotations.issue(&original, None).unwrap();
+    let annotations =
+        Annotations::open(&repo.store).expect("`Annotations::open(&repo.store)` succeeds");
+    let id = annotations
+        .issue(&original, None)
+        .expect("`issue(&original, None)` succeeds");
     Annotations::open(&repo.store)
         .unwrap()
         .promote(
@@ -189,7 +207,9 @@ fn replaced_results_are_promoted_again() {
         supersedes: Some(id),
         ..original
     };
-    annotations.issue(&rerun, None).unwrap();
+    annotations
+        .issue(&rerun, None)
+        .expect("`issue(&rerun, None)` succeeds");
     let landings = repo.land(2);
     assert!(
         matches!(landings[..], [Landing::Landed { .. }]),

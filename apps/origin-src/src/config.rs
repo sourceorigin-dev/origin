@@ -274,12 +274,16 @@ mod tests {
 
     #[test]
     fn a_leftover_temporary_key_is_replaced() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("`tempfile::tempdir()` succeeds");
         let file = KeyFile(dir.path().join("node.key"));
-        fs::write(dir.path().join(format!(".node.key-{}", process::id())), b"").unwrap();
+        fs::write(dir.path().join(format!(".node.key-{}", process::id())), b"")
+            .expect("the leftover temporary key is written");
 
-        let key = file.load().unwrap();
-        assert_eq!(file.read().unwrap().to_bytes(), key.to_bytes());
+        let key = file.load().expect("`load()` succeeds");
+        assert_eq!(
+            file.read().expect("`read()` succeeds").to_bytes(),
+            key.to_bytes()
+        );
     }
 }
 

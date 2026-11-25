@@ -717,7 +717,7 @@ mod tests {
     }
 
     fn kind(kind: &str) -> Kind {
-        Kind::new(kind).unwrap()
+        Kind::new(kind).expect("`Kind::new(kind)` succeeds")
     }
 
     #[test]
@@ -726,7 +726,7 @@ mod tests {
             "[retention]\n\"*\" = \"365d\"\n\"ci.*\" = \"90d\"\n\
              \"ci.bench.*\" = \"12h\"\n\"ci.bench\" = \"30m\"\n",
         )
-        .unwrap();
+        .expect("`retention()` succeeds");
         let days = |days: u64| Some(Duration::from_hours(days * 24));
         assert_eq!(retention.period(&kind("ci.test")), days(90));
         assert_eq!(
@@ -746,7 +746,8 @@ mod tests {
     #[test]
     fn reserved_kinds_keep_their_payloads() {
         for rule in ["core.*", "core.conflict"] {
-            let error = retention(&format!("[retention]\n\"{rule}\" = \"1d\"\n")).unwrap_err();
+            let error = retention(&format!("[retention]\n\"{rule}\" = \"1d\"\n"))
+                .expect_err("the operation fails");
             assert!(error.message().contains("reserved kinds"), "{error}");
         }
     }
@@ -824,13 +825,14 @@ mod tests {
     }
 
     fn principal(principal: &str) -> Principal {
-        principal.parse().unwrap()
+        principal.parse().expect("`parse()` succeeds")
     }
 
     #[test]
     fn parses_every_table() {
-        let policy: Policy = toml::from_str(&full_policy()).unwrap();
-        let hosted = PrincipalName::new("hosted").unwrap();
+        let policy: Policy =
+            toml::from_str(&full_policy()).expect("`toml::from_str(&full_policy())` succeeds");
+        let hosted = PrincipalName::new("hosted").expect("`PrincipalName::new()` succeeds");
         assert_eq!(
             policy.node_key(&hosted),
             Some(&origin_shared::NodeKey::from_bytes(&[42; 32]).public())
@@ -856,7 +858,7 @@ mod tests {
             "a user isn't the node of the same name"
         );
 
-        let other = TargetName::new("overhaul").unwrap();
+        let other = TargetName::new("overhaul").expect("`TargetName::new()` succeeds");
         assert_eq!(policy.authority(&other), Some(&hosted));
         assert_eq!(policy.requirements(&other), []);
 
@@ -872,7 +874,9 @@ mod tests {
         let invalid = |from: &str, to: &str| {
             let toml = full_policy().replace(from, to);
             assert_ne!(toml, full_policy(), "{from}");
-            toml::from_str::<Policy>(&toml).unwrap_err().to_string()
+            toml::from_str::<Policy>(&toml)
+                .expect_err("`toml::from_str(&toml)` fails")
+                .to_string()
         };
         for (from, to, expected) in [
             (
@@ -911,7 +915,7 @@ mod tests {
 
     #[test]
     fn without_rules_payloads_stay() {
-        let retention = retention("[groups]\nrunners = []\n").unwrap();
+        let retention = retention("[groups]\nrunners = []\n").expect("`retention()` succeeds");
         assert!(retention.is_empty());
         assert_eq!(retention.period(&kind("ci.test")), None);
     }

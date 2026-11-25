@@ -11,15 +11,21 @@ use super::*;
 fn landings_wait_for_collection() {
     let repo = Repo::new("[targets.main]\nauthority = \"node:queue\"\n");
     repo.change_on_main(1, &[("a", "a")]);
-    let collecting = repo.store.lock_for_collection().unwrap();
+    let collecting = repo
+        .store
+        .lock_for_collection()
+        .expect("`lock_for_collection()` succeeds");
     let (done, landed) = std::sync::mpsc::channel();
     thread::scope(|scope| {
-        scope.spawn(|| done.send(repo.land(1)).unwrap());
+        scope.spawn(|| {
+            done.send(repo.land(1))
+                .expect("`send(repo.land(1))` succeeds");
+        });
         thread::sleep(std::time::Duration::from_millis(100));
         assert!(landed.try_recv().is_err(), "the landing waits");
         drop(collecting);
         assert!(matches!(
-            landed.recv().unwrap()[..],
+            landed.recv().expect("`recv()` succeeds")[..],
             [Landing::Landed { .. }]
         ));
     });
@@ -40,21 +46,24 @@ fn collection_applies_a_policy_landed_while_it_waits() {
         ..ci_test(subject, "node:ci")
     };
     Annotations::open(&repo.store)
-        .unwrap()
+        .expect("`Annotations::open(&repo.store)` succeeds")
         .issue(&statement, Some(payload.clone()))
-        .unwrap();
+        .expect("`issue(&statement, Some(payload.clone()))` succeeds");
 
-    let held = repo.store.hold_objects().unwrap();
+    let held = repo
+        .store
+        .hold_objects()
+        .expect("`hold_objects()` succeeds");
     let (done, collected) = std::sync::mpsc::channel();
     thread::scope(|scope| {
         scope.spawn(|| {
             let later = std::time::SystemTime::now() + std::time::Duration::from_hours(2);
             let retention = || Ok::<_, PolicyError>(Policy::load(&repo.store)?.retention);
             let dropped = Annotations::open(&repo.store)
-                .unwrap()
+                .expect("`Annotations::open(&repo.store)` succeeds")
                 .drop_expired_payloads(retention, later)
-                .unwrap();
-            done.send(dropped).unwrap();
+                .expect("`drop_expired_payloads(retention, later)` succeeds");
+            done.send(dropped).expect("`send(dropped)` succeeds");
         });
         thread::sleep(std::time::Duration::from_millis(100));
         assert!(collected.try_recv().is_err(), "collection waits");
@@ -68,12 +77,16 @@ fn collection_applies_a_policy_landed_while_it_waits() {
                 ChangeId::from_bytes([2; 16]),
                 &TargetName::POLICY,
             )
-            .unwrap();
+            .expect("`land_change` succeeds");
         assert!(matches!(landed[..], [Landing::Landed { .. }]), "{landed:?}");
         drop(held);
-        assert_eq!(collected.recv().unwrap().payloads, 0);
+        assert_eq!(collected.recv().expect("`recv()` succeeds").payloads, 0);
     });
-    assert!(repo.store.contains(payload.id()).unwrap());
+    assert!(
+        repo.store
+            .contains(payload.id())
+            .expect("`contains(payload.id())` succeeds")
+    );
 }
 
 #[test]
@@ -112,7 +125,7 @@ fn policy_landings_keep_a_valid_policy() {
     .encode();
     repo.store
         .write_all(std::slice::from_ref(&encoded))
-        .unwrap();
+        .expect("`write_all(std::slice::from_ref(&encoded))` succeeds");
     let landings = repo
         .queue()
         .land_change(
@@ -120,7 +133,7 @@ fn policy_landings_keep_a_valid_policy() {
             ChangeId::from_bytes([3; 16]),
             &policy,
         )
-        .unwrap();
+        .expect("`land_change` succeeds");
     assert!(
         matches!(landings[..], [Landing::Landed { .. }]),
         "{landings:?}"
@@ -155,17 +168,28 @@ fn each_policy_landing_is_governed_by_the_one_before() {
             ChangeId::from_bytes([2; 16]),
             &policy,
         )
-        .unwrap();
+        .expect("`land_change` succeeds");
     assert_eq!(landed(&landings[0]), first);
     assert!(matches!(landings[1], Landing::Pending(_)), "{landings:?}");
 
-    let log = repo.store.log(&policy).unwrap();
+    let log = repo.store.log(&policy).expect("`log(&policy)` succeeds");
     for (seq, &id) in log.iter().enumerate() {
-        let body = repo.store.get(id).unwrap().body().clone();
-        let governing = Policy::governing(id, &body).unwrap();
+        let body = repo
+            .store
+            .get(id)
+            .expect("`get(id)` succeeds")
+            .body()
+            .clone();
+        let governing =
+            Policy::governing(id, &body).expect("`Policy::governing(id, &body)` succeeds");
         assert_eq!(governing, if seq == 0 { id } else { log[seq - 1] });
     }
-    let mut body = repo.store.get(log[1]).unwrap().body().clone();
+    let mut body = repo
+        .store
+        .get(log[1])
+        .expect("`get(log[1])` succeeds")
+        .body()
+        .clone();
     body.policy = Some(log[1]);
     assert!(matches!(
         Policy::governing(log[1], &body),

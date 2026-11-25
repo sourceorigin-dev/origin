@@ -905,9 +905,9 @@ pub(crate) mod tests {
     use super::*;
 
     pub(super) fn store() -> (tempfile::TempDir, Store) {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("`tempfile::tempdir()` succeeds");
         let store = Store::new(dir.path().join(".origin"), Native::default());
-        store.init().unwrap();
+        store.init().expect("`init()` succeeds");
         (dir, store)
     }
 
@@ -958,15 +958,26 @@ pub(crate) mod tests {
 
     #[test]
     fn rewriting_an_object_syncs_its_directory() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("`tempfile::tempdir()` succeeds");
         let store = Store::new(dir.path().join(".origin"), Recorder::default());
-        store.init().unwrap();
+        store.init().expect("`init()` succeeds");
         let blob = EncodedObject::blob(b"hello");
-        store.write_all(slice::from_ref(&blob)).unwrap();
+        store
+            .write_all(slice::from_ref(&blob))
+            .expect("`write_all(slice::from_ref(&blob))` succeeds");
         store.platform.0.lock().clear();
 
-        assert_eq!(store.write_all(slice::from_ref(&blob)).unwrap(), 0);
-        let shard = store.path(blob.id()).parent().unwrap().to_owned();
+        assert_eq!(
+            store
+                .write_all(slice::from_ref(&blob))
+                .expect("`write_all(slice::from_ref(&blob))` succeeds"),
+            0
+        );
+        let shard = store
+            .path(blob.id())
+            .parent()
+            .expect("`parent()` yields a value")
+            .to_owned();
         assert_eq!(
             store.platform.0.into_inner(),
             [Synced::Batch(0), Synced::Dir(shard)]
@@ -975,18 +986,32 @@ pub(crate) mod tests {
 
     #[test]
     fn dependencies_are_durable_with_the_batch() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("`tempfile::tempdir()` succeeds");
         let store = Store::new(dir.path().join(".origin"), Recorder::default());
-        store.init().unwrap();
+        store.init().expect("`init()` succeeds");
         let blob = EncodedObject::blob(b"hello");
-        store.write_all(slice::from_ref(&blob)).unwrap();
+        store
+            .write_all(slice::from_ref(&blob))
+            .expect("`write_all(slice::from_ref(&blob))` succeeds");
         store.platform.0.lock().clear();
 
         let batch = store.batch();
-        assert!(batch.depend(blob.id()).unwrap());
-        assert!(!batch.depend(EncodedObject::blob(b"absent").id()).unwrap());
-        batch.commit().unwrap();
-        let shard = store.path(blob.id()).parent().unwrap().to_owned();
+        assert!(
+            batch
+                .depend(blob.id())
+                .expect("`depend(blob.id())` succeeds")
+        );
+        assert!(
+            !batch
+                .depend(EncodedObject::blob(b"absent").id())
+                .expect("`depend()` succeeds")
+        );
+        batch.commit().expect("`commit()` succeeds");
+        let shard = store
+            .path(blob.id())
+            .parent()
+            .expect("`parent()` yields a value")
+            .to_owned();
         assert_eq!(
             store.platform.0.into_inner(),
             [Synced::Batch(0), Synced::Dir(shard)]
@@ -998,16 +1023,39 @@ pub(crate) mod tests {
         let (_dir, store) = store();
         let blob = EncodedObject::blob(b"hello");
 
-        assert!(!store.contains(blob.id()).unwrap());
-        assert!(store.try_read(blob.id()).unwrap().is_none());
-        assert_eq!(store.write_all(slice::from_ref(&blob)).unwrap(), 1);
+        assert!(
+            !store
+                .contains(blob.id())
+                .expect("`contains(blob.id())` succeeds")
+        );
+        assert!(
+            store
+                .try_read(blob.id())
+                .expect("`try_read(blob.id())` succeeds")
+                .is_none()
+        );
         assert_eq!(
-            store.write_all(slice::from_ref(&blob)).unwrap(),
+            store
+                .write_all(slice::from_ref(&blob))
+                .expect("`write_all(slice::from_ref(&blob))` succeeds"),
+            1
+        );
+        assert_eq!(
+            store
+                .write_all(slice::from_ref(&blob))
+                .expect("`write_all(slice::from_ref(&blob))` succeeds"),
             0,
             "already there"
         );
-        assert!(store.contains(blob.id()).unwrap());
-        assert_eq!(store.read(blob.id()).unwrap(), blob);
+        assert!(
+            store
+                .contains(blob.id())
+                .expect("`contains(blob.id())` succeeds")
+        );
+        assert_eq!(
+            store.read(blob.id()).expect("`read(blob.id())` succeeds"),
+            blob
+        );
     }
 
     #[test]
@@ -1019,21 +1067,32 @@ pub(crate) mod tests {
 
         let batch = store.batch();
         for object in &objects {
-            assert!(batch.write(object).unwrap());
+            assert!(batch.write(object).expect("`write(object)` succeeds"));
         }
-        assert!(!store.contains(objects[0].id()).unwrap());
+        assert!(
+            !store
+                .contains(objects[0].id())
+                .expect("`contains(objects[0].id())` succeeds")
+        );
         drop(batch);
         assert!(
-            !store.contains(objects[0].id()).unwrap(),
+            !store
+                .contains(objects[0].id())
+                .expect("`contains(objects[0].id())` succeeds"),
             "dropped batches vanish"
         );
 
-        assert_eq!(store.write_all(&objects).unwrap(), objects.len());
-        assert!(
-            objects
-                .iter()
-                .all(|object| store.contains(object.id()).unwrap())
+        assert_eq!(
+            store
+                .write_all(&objects)
+                .expect("`write_all(&objects)` succeeds"),
+            objects.len()
         );
+        assert!(objects.iter().all(|object| {
+            store
+                .contains(object.id())
+                .expect("`contains(object.id())` succeeds")
+        }));
     }
 
     #[test]
@@ -1041,9 +1100,16 @@ pub(crate) mod tests {
         let (_dir, store) = store();
         let tree = Tree::default().encode();
         let blob = EncodedObject::blob(b"not a tree");
-        store.write_all(&[tree.clone(), blob.clone()]).unwrap();
+        store
+            .write_all(&[tree.clone(), blob.clone()])
+            .expect("`write_all(&[tree.clone(), blob.clone()])` succeeds");
 
-        assert_eq!(store.get(TreeId::from(tree.id())).unwrap(), Tree::default());
+        assert_eq!(
+            store
+                .get(TreeId::from(tree.id()))
+                .expect("`get(TreeId::from(tree.id()))` succeeds"),
+            Tree::default()
+        );
         assert!(matches!(
             store.get(TreeId::from(blob.id())),
             Err(StoreError::Decode { .. })
@@ -1058,23 +1124,25 @@ pub(crate) mod tests {
         let fresh = shard.join(".tmp-1-1");
         let packing = store.packs_dir().join(".tmp-1-2");
         for temp in [&stale, &fresh, &packing] {
-            fs::write(temp, b"partial").unwrap();
+            fs::write(temp, b"partial").expect("`fs::write()` succeeds");
         }
         let old = SystemTime::now() - Store::<Native>::STALE_TEMP * 2;
         for temp in [&stale, &packing] {
             File::options()
                 .write(true)
                 .open(temp)
-                .unwrap()
+                .expect("`open(temp)` succeeds")
                 .set_modified(old)
-                .unwrap();
+                .expect("`set_modified(old)` succeeds");
         }
 
-        store.remove_stale_temps().unwrap();
+        store
+            .remove_stale_temps()
+            .expect("`remove_stale_temps()` succeeds");
         assert!(!stale.exists(), "a crashed write's file is removed");
         assert!(fresh.exists(), "a write in progress keeps its file");
         assert!(packing.exists(), "the compactor's are left to it");
-        store.gc().unwrap();
+        store.gc().expect("`gc()` succeeds");
         assert!(!packing.exists());
     }
 
@@ -1082,9 +1150,13 @@ pub(crate) mod tests {
     fn detects_corruption() {
         let (_dir, store) = store();
         let blob = EncodedObject::blob(b"hello");
-        store.write_all(slice::from_ref(&blob)).unwrap();
-        let other = zstd::bulk::compress(EncodedObject::blob(b"evil").bytes(), 1).unwrap();
-        fs::write(store.path(blob.id()), other).unwrap();
+        store
+            .write_all(slice::from_ref(&blob))
+            .expect("`write_all(slice::from_ref(&blob))` succeeds");
+        let other = zstd::bulk::compress(EncodedObject::blob(b"evil").bytes(), 1)
+            .expect("`zstd::bulk::compress()` succeeds");
+        fs::write(store.path(blob.id()), other)
+            .expect("`fs::write(store.path(blob.id()), other)` succeeds");
 
         assert!(matches!(store.read(blob.id()), Err(StoreError::Corrupt(_))));
     }
@@ -1093,9 +1165,13 @@ pub(crate) mod tests {
     fn reading_each_fails_only_on_reaching_an_unreadable_object() {
         let (_dir, store) = store();
         let blobs: Vec<_> = (0..8_u8).map(|i| EncodedObject::blob(&[i])).collect();
-        store.write_all(&blobs).unwrap();
-        let corrupt = zstd::bulk::compress(EncodedObject::blob(b"evil").bytes(), 1).unwrap();
-        fs::write(store.path(blobs[4].id()), corrupt).unwrap();
+        store
+            .write_all(&blobs)
+            .expect("`write_all(&blobs)` succeeds");
+        let corrupt = zstd::bulk::compress(EncodedObject::blob(b"evil").bytes(), 1)
+            .expect("`zstd::bulk::compress()` succeeds");
+        fs::write(store.path(blobs[4].id()), corrupt)
+            .expect("`fs::write(store.path(blobs[4].id()), corrupt)` succeeds");
         let ids: Vec<_> = blobs.iter().map(EncodedObject::id).collect();
 
         let mut read = Vec::new();
@@ -1104,7 +1180,7 @@ pub(crate) mod tests {
                 read.push(object);
                 Ok::<_, StoreError>(read.len() < 4)
             })
-            .unwrap();
+            .expect("`read_each` succeeds");
         assert_eq!(read, blobs[..4], "stopped before it");
         let reached = store.read_each(&ids, |_| Ok::<_, StoreError>(true));
         assert!(
@@ -1117,12 +1193,15 @@ pub(crate) mod tests {
     fn a_frame_claiming_a_huge_size_fails_to_read() {
         let (_dir, store) = store();
         let blob = EncodedObject::blob(b"hello");
-        store.write_all(slice::from_ref(&blob)).unwrap();
+        store
+            .write_all(slice::from_ref(&blob))
+            .expect("`write_all(slice::from_ref(&blob))` succeeds");
         let mut frame = vec![0x28, 0xb5, 0x2f, 0xfd, 0xe0];
         frame.extend_from_slice(&(1u64 << 62).to_le_bytes());
         frame.extend_from_slice(&[5 << 3 | 1, 0, 0]);
         frame.extend_from_slice(b"hello");
-        fs::write(store.path(blob.id()), frame).unwrap();
+        fs::write(store.path(blob.id()), frame)
+            .expect("`fs::write(store.path(blob.id()), frame)` succeeds");
 
         assert!(store.read(blob.id()).is_err());
     }

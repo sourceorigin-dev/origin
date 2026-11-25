@@ -7,11 +7,16 @@ use super::*;
 #[test]
 fn targets_land_on_each_other() {
     let repo = Repo::new("[targets.main]\nauthority = \"node:queue\"\n");
-    let (main, overhaul) = (TargetName::MAIN, TargetName::new("overhaul").unwrap());
+    let (main, overhaul) = (
+        TargetName::MAIN,
+        TargetName::new("overhaul").expect("`TargetName::new()` succeeds"),
+    );
     repo.change_on_main(1, &[("shared", "v1")]);
     repo.land(1);
     let queue = repo.queue();
-    queue.create_target(&overhaul, &main).unwrap();
+    queue
+        .create_target(&overhaul, &main)
+        .expect("`create_target(&overhaul, &main)` succeeds");
     assert!(matches!(
         queue.create_target(&overhaul, &main),
         Err(LandError::TargetExists(_))
@@ -26,19 +31,19 @@ fn targets_land_on_each_other() {
             ChangeId::from_bytes([2; 16]),
             &overhaul,
         )
-        .unwrap();
+        .expect("`land_change` succeeds");
     repo.change_on_main(3, &[("other", "o")]);
     repo.land(3);
 
     assert!(matches!(
         queue
             .land_target(&mut repo.annotations(), &main, &overhaul)
-            .unwrap(),
+            .expect("`land_target()` succeeds"),
         Landing::Landed { .. }
     ));
     let landing = queue
         .land_target(&mut repo.annotations(), &overhaul, &main)
-        .unwrap();
+        .expect("`land_target()` succeeds");
     assert!(matches!(
         landing,
         Landing::Landed {
@@ -52,7 +57,7 @@ fn targets_land_on_each_other() {
     assert_eq!(
         queue
             .land_target(&mut repo.annotations(), &overhaul, &main)
-            .unwrap(),
+            .expect("`land_target()` succeeds"),
         Landing::Unchanged(Proposal::Target(overhaul.clone()))
     );
     assert!(matches!(
@@ -66,15 +71,22 @@ fn sibling_targets_merge_from_where_they_forked() {
     let repo = Repo::new("[targets.main]\nauthority = \"node:queue\"\n");
     repo.change_on_main(1, &[("keep", "k"), ("delete", "d")]);
     repo.land(1);
-    let (a, b) = (TargetName::new("a").unwrap(), TargetName::new("b").unwrap());
+    let (a, b) = (
+        TargetName::new("a").expect("`TargetName::new()` succeeds"),
+        TargetName::new("b").expect("`TargetName::new()` succeeds"),
+    );
     let queue = repo.queue();
-    queue.create_target(&a, &TargetName::MAIN).unwrap();
-    queue.create_target(&b, &TargetName::MAIN).unwrap();
+    queue
+        .create_target(&a, &TargetName::MAIN)
+        .expect("`create_target(&a, &TargetName::MAIN)` succeeds");
+    queue
+        .create_target(&b, &TargetName::MAIN)
+        .expect("`create_target(&b, &TargetName::MAIN)` succeeds");
     let on = |target| Base::Acceptance(repo.tip(target).acceptance);
     repo.revision(2, &[], on(&a), &[("keep", "k")]);
     queue
         .land_change(&mut repo.annotations(), ChangeId::from_bytes([2; 16]), &a)
-        .unwrap();
+        .expect("`a)` succeeds");
     repo.revision(
         3,
         &[],
@@ -83,9 +95,11 @@ fn sibling_targets_merge_from_where_they_forked() {
     );
     queue
         .land_change(&mut repo.annotations(), ChangeId::from_bytes([3; 16]), &b)
-        .unwrap();
+        .expect("`b)` succeeds");
     assert!(matches!(
-        queue.land_target(&mut repo.annotations(), &a, &b).unwrap(),
+        queue
+            .land_target(&mut repo.annotations(), &a, &b)
+            .expect("`land_target(&mut repo.annotations(), &a, &b)` succeeds"),
         Landing::Landed { .. }
     ));
     assert_eq!(repo.state(&b), repo.files(&[("keep", "k"), ("other", "o")]));
@@ -98,16 +112,22 @@ fn a_merge_that_changes_nothing_still_records_the_tip() {
          require = [{ kind = \"ci.test\", verdict = \"pass\", issuer = \"user:ci\" }]\n",
     );
     let queue = repo.queue();
-    let annotations = Annotations::open(&repo.store).unwrap();
+    let annotations =
+        Annotations::open(&repo.store).expect("`Annotations::open(&repo.store)` succeeds");
     let pass = |subject| {
         let statement = Statement {
             subject,
             inputs: None,
             ..ci_test(RevisionId::from(EncodedObject::blob(b"").id()), "user:ci")
         };
-        annotations.issue(&statement, None).unwrap();
+        annotations
+            .issue(&statement, None)
+            .expect("`issue(&statement, None)` succeeds");
     };
-    let (a, b) = (TargetName::new("a").unwrap(), TargetName::new("b").unwrap());
+    let (a, b) = (
+        TargetName::new("a").expect("`TargetName::new()` succeeds"),
+        TargetName::new("b").expect("`TargetName::new()` succeeds"),
+    );
     let land = |change: u8, target: &TargetName, files: &[(&str, &str)]| {
         let on = Base::Acceptance(repo.tip(target).acceptance);
         pass(RecordId::Revision(repo.revision(change, &[], on, files)));
@@ -117,43 +137,57 @@ fn a_merge_that_changes_nothing_still_records_the_tip() {
                 ChangeId::from_bytes([change; 16]),
                 target,
             )
-            .unwrap();
+            .expect("`land_change` succeeds");
     };
-    queue.create_target(&a, &TargetName::MAIN).unwrap();
-    queue.create_target(&b, &TargetName::MAIN).unwrap();
+    queue
+        .create_target(&a, &TargetName::MAIN)
+        .expect("`create_target(&a, &TargetName::MAIN)` succeeds");
+    queue
+        .create_target(&b, &TargetName::MAIN)
+        .expect("`create_target(&b, &TargetName::MAIN)` succeeds");
     land(1, &a, &[("f", "f")]);
     land(2, &b, &[("f", "f")]);
     let state = repo.state(&b);
     assert!(matches!(
-        queue.land_target(&mut repo.annotations(), &a, &b).unwrap(),
+        queue
+            .land_target(&mut repo.annotations(), &a, &b)
+            .expect("`land_target(&mut repo.annotations(), &a, &b)` succeeds"),
         Landing::Landed { .. }
     ));
     assert_eq!(repo.state(&b), state);
     assert_eq!(
-        queue.land_target(&mut repo.annotations(), &a, &b).unwrap(),
+        queue
+            .land_target(&mut repo.annotations(), &a, &b)
+            .expect("`land_target(&mut repo.annotations(), &a, &b)` succeeds"),
         Landing::Unchanged(Proposal::Target(a.clone()))
     );
 
     land(3, &a, &[]);
-    let landing = queue.land_target(&mut repo.annotations(), &a, &b).unwrap();
+    let landing = queue
+        .land_target(&mut repo.annotations(), &a, &b)
+        .expect("`land_target(&mut repo.annotations(), &a, &b)` succeeds");
     let Landing::Pending(pending) = landing else {
         panic!("a deletion waits for its evidence: {landing:?}")
     };
     pass(pending.subject);
     assert!(matches!(
-        queue.land_target(&mut repo.annotations(), &a, &b).unwrap(),
+        queue
+            .land_target(&mut repo.annotations(), &a, &b)
+            .expect("`land_target(&mut repo.annotations(), &a, &b)` succeeds"),
         Landing::Landed { .. }
     ));
     assert_eq!(repo.state(&b), repo.files(&[]));
 
-    let c = TargetName::new("c").unwrap();
-    queue.create_target(&c, &TargetName::MAIN).unwrap();
+    let c = TargetName::new("c").expect("`TargetName::new()` succeeds");
+    queue
+        .create_target(&c, &TargetName::MAIN)
+        .expect("`create_target(&c, &TargetName::MAIN)` succeeds");
     for _ in 0..2 {
         for (from, onto) in [(&c, &TargetName::MAIN), (&TargetName::MAIN, &c)] {
             assert_eq!(
                 queue
                     .land_target(&mut repo.annotations(), from, onto)
-                    .unwrap(),
+                    .expect("`land_target(&mut repo.annotations(), from, onto)` succeeds"),
                 Landing::Unchanged(Proposal::Target(from.clone()))
             );
         }
@@ -164,7 +198,8 @@ fn a_merge_that_changes_nothing_still_records_the_tip() {
 fn targets_merge_from_their_newest_shared_acceptance() {
     let repo = Repo::new("[targets.main]\nauthority = \"node:queue\"\n");
     let queue = repo.queue();
-    let [a, b, c, d] = ["a", "b", "c", "d"].map(|name| TargetName::new(name).unwrap());
+    let [a, b, c, d] = ["a", "b", "c", "d"]
+        .map(|name| TargetName::new(name).expect("`TargetName::new(name)` succeeds"));
     let land = |change: u8, target: &TargetName, files: &[(&str, &str)]| {
         let on = Base::Acceptance(repo.tip(target).acceptance);
         repo.revision(change, &[], on, files);
@@ -174,14 +209,22 @@ fn targets_merge_from_their_newest_shared_acceptance() {
                 ChangeId::from_bytes([change; 16]),
                 target,
             )
-            .unwrap();
+            .expect("`land_change` succeeds");
     };
-    queue.create_target(&c, &TargetName::MAIN).unwrap();
-    queue.create_target(&d, &TargetName::MAIN).unwrap();
+    queue
+        .create_target(&c, &TargetName::MAIN)
+        .expect("`create_target(&c, &TargetName::MAIN)` succeeds");
+    queue
+        .create_target(&d, &TargetName::MAIN)
+        .expect("`create_target(&d, &TargetName::MAIN)` succeeds");
     repo.change_on_main(1, &[("delete", "d")]);
     repo.land(1);
-    queue.create_target(&a, &TargetName::MAIN).unwrap();
-    queue.create_target(&b, &TargetName::MAIN).unwrap();
+    queue
+        .create_target(&a, &TargetName::MAIN)
+        .expect("`create_target(&a, &TargetName::MAIN)` succeeds");
+    queue
+        .create_target(&b, &TargetName::MAIN)
+        .expect("`create_target(&b, &TargetName::MAIN)` succeeds");
     for n in 0..4 {
         let counter = n.to_string();
         land(10 + n, &a, &[("a", &counter)]);
@@ -190,16 +233,22 @@ fn targets_merge_from_their_newest_shared_acceptance() {
     land(30, &c, &[("c", "c")]);
     land(31, &d, &[("d", "d")]);
     assert!(matches!(
-        queue.land_target(&mut repo.annotations(), &c, &a).unwrap(),
+        queue
+            .land_target(&mut repo.annotations(), &c, &a)
+            .expect("`land_target(&mut repo.annotations(), &c, &a)` succeeds"),
         Landing::Landed { .. }
     ));
     assert!(matches!(
-        queue.land_target(&mut repo.annotations(), &d, &b).unwrap(),
+        queue
+            .land_target(&mut repo.annotations(), &d, &b)
+            .expect("`land_target(&mut repo.annotations(), &d, &b)` succeeds"),
         Landing::Landed { .. }
     ));
 
     assert!(matches!(
-        queue.land_target(&mut repo.annotations(), &a, &b).unwrap(),
+        queue
+            .land_target(&mut repo.annotations(), &a, &b)
+            .expect("`land_target(&mut repo.annotations(), &a, &b)` succeeds"),
         Landing::Landed { .. }
     ));
     assert_eq!(
@@ -213,7 +262,8 @@ fn targets_merge_from_their_newest_shared_acceptance() {
 fn criss_crossed_targets_merge_what_their_bases_agree_on() {
     let repo = Repo::new("[targets.main]\nauthority = \"node:queue\"\n");
     let queue = repo.queue();
-    let [a, b] = ["a", "b"].map(|name| TargetName::new(name).unwrap());
+    let [a, b] =
+        ["a", "b"].map(|name| TargetName::new(name).expect("`TargetName::new(name)` succeeds"));
     let land = |change: u8, target: &TargetName, files: &[(&str, &str)]| {
         let on = Base::Acceptance(repo.tip(target).acceptance);
         repo.revision(change, &[], on, files);
@@ -223,10 +273,14 @@ fn criss_crossed_targets_merge_what_their_bases_agree_on() {
                 ChangeId::from_bytes([change; 16]),
                 target,
             )
-            .unwrap();
+            .expect("`land_change` succeeds");
     };
-    queue.create_target(&a, &TargetName::MAIN).unwrap();
-    queue.create_target(&b, &TargetName::MAIN).unwrap();
+    queue
+        .create_target(&a, &TargetName::MAIN)
+        .expect("`create_target(&a, &TargetName::MAIN)` succeeds");
+    queue
+        .create_target(&b, &TargetName::MAIN)
+        .expect("`create_target(&b, &TargetName::MAIN)` succeeds");
     land(1, &a, &[("a", "0"), ("shared", "a")]);
     land(2, &b, &[("b", "0"), ("shared", "b")]);
     let tips = [repo.tip(&a), repo.tip(&b)];
@@ -243,12 +297,16 @@ fn criss_crossed_targets_merge_what_their_bases_agree_on() {
             policy,
         }
         .sign(&repo.key);
-        repo.store.append(target, &merged).unwrap();
+        repo.store
+            .append(target, &merged)
+            .expect("`append(target, &merged)` succeeds");
     }
     land(3, &a, &[("a", "1"), ("b", "0"), ("shared", "a")]);
     land(4, &b, &[("a", "0"), ("b", "1"), ("shared", "b")]);
 
-    let Landing::Pending(pending) = queue.land_target(&mut repo.annotations(), &a, &b).unwrap()
+    let Landing::Pending(pending) = queue
+        .land_target(&mut repo.annotations(), &a, &b)
+        .expect("`land_target(&mut repo.annotations(), &a, &b)` succeeds")
     else {
         panic!("the bases disagree on `shared`, so it can't be merged blindly");
     };
@@ -258,7 +316,9 @@ fn criss_crossed_targets_merge_what_their_bases_agree_on() {
     );
     land(5, &a, &[("a", "1"), ("b", "0"), ("shared", "b")]);
     assert!(matches!(
-        queue.land_target(&mut repo.annotations(), &a, &b).unwrap(),
+        queue
+            .land_target(&mut repo.annotations(), &a, &b)
+            .expect("`land_target(&mut repo.annotations(), &a, &b)` succeeds"),
         Landing::Landed { .. }
     ));
     assert_eq!(
@@ -280,11 +340,16 @@ fn bases_that_disagree_on_a_kind_conflict_on_any_change_under_it() {
                 ChangeId::from_bytes([change; 16]),
                 target,
             )
-            .unwrap();
+            .expect("`land_change` succeeds");
     };
-    let [a, b] = ["a", "b"].map(|name| TargetName::new(name).unwrap());
-    queue.create_target(&a, &TargetName::MAIN).unwrap();
-    queue.create_target(&b, &TargetName::MAIN).unwrap();
+    let [a, b] =
+        ["a", "b"].map(|name| TargetName::new(name).expect("`TargetName::new(name)` succeeds"));
+    queue
+        .create_target(&a, &TargetName::MAIN)
+        .expect("`create_target(&a, &TargetName::MAIN)` succeeds");
+    queue
+        .create_target(&b, &TargetName::MAIN)
+        .expect("`create_target(&b, &TargetName::MAIN)` succeeds");
     land(1, &a, &[("p", "file")]);
     land(2, &b, &[("p/delete", "original")]);
     let tips = [repo.tip(&a), repo.tip(&b)];
@@ -300,12 +365,16 @@ fn bases_that_disagree_on_a_kind_conflict_on_any_change_under_it() {
             policy,
         }
         .sign(&repo.key);
-        repo.store.append(target, &merged).unwrap();
+        repo.store
+            .append(target, &merged)
+            .expect("`append(target, &merged)` succeeds");
     }
     land(3, &a, &[("a", "new")]);
     land(4, &b, &[("p/delete", "original"), ("p/new", "new")]);
 
-    let Landing::Pending(pending) = queue.land_target(&mut repo.annotations(), &a, &b).unwrap()
+    let Landing::Pending(pending) = queue
+        .land_target(&mut repo.annotations(), &a, &b)
+        .expect("`land_target(&mut repo.annotations(), &a, &b)` succeeds")
     else {
         panic!("the bases disagree on `p`, so it can't be merged blindly");
     };
