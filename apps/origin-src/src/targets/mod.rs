@@ -1,21 +1,20 @@
 //! Target chains: the acceptances of each target, in order.
 //!
-//! A target lives in `targets/<id>/`, where the [`TargetId`] is the hash of
-//! its name, so names never become file names:
+//! A target is stored in `targets/<id>/`, where the [`TargetId`] is the hash
+//! of its name, so names never become file names:
 //!
 //! - `name`: the target's name.
-//! - `log`: the id of each acceptance in hex, one line each, append-only.
-//!   Appenders hold an exclusive lock on it, which the kernel releases if
-//!   the process dies, and it is never replaced, so the lock always
-//!   protects it.
+//! - `log`: the id of each acceptance in hex, one per line, append-only.
+//!   Appenders hold an exclusive lock on it, which the kernel releases if the
+//!   process dies. The file is never replaced, so the lock always protects it.
 //! - `head`: `<seq> <id>`, the latest published acceptance, replaced
 //!   atomically.
 //!
-//! Appending writes the acceptance durably, then appends its id to the log
-//! and syncs it, and only then publishes the new head. Readers go by the
-//! head, so they only ever see durable acceptances. If a crash leaves the
-//! log ahead of the head, or a partial line at its end, the next append
-//! repairs it first, syncing the log before publishing what it holds.
+//! An append writes the acceptance durably, appends its id to the log and
+//! syncs the log, and only then publishes the new head. Readers go by the
+//! head, so they only see durable acceptances. If a crash leaves the log
+//! ahead of the head, or a partial line at its end, the next append repairs
+//! it first: it syncs the log, then publishes what it holds.
 
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -33,7 +32,8 @@ use origin_shared::{
 use crate::oplog::Effect;
 use crate::store::{Store, StoreError};
 
-/// Describes where a target is, for error messages.
+/// Describes a target's head for error messages, or `nothing` if it has
+/// none.
 pub(crate) fn describe(head: Option<Head>) -> String {
     head.map_or_else(|| "nothing".to_owned(), |head| head.to_string())
 }
@@ -68,7 +68,7 @@ impl TargetFiles {
         }
     }
 
-    /// The published head.
+    /// Reads the published head, or `None` if the target has none.
     fn read_head(&self) -> Result<Option<Head>, StoreError> {
         let path = self.head();
         let Some(bytes) = Self::read(&path)? else {
@@ -90,7 +90,8 @@ impl TargetFiles {
         })
     }
 
-    /// Parses the complete lines of a log, ignoring a partial last one.
+    /// Parses the complete lines of a log into acceptance ids, ignoring a
+    /// partial last line.
     fn parse_log(&self, bytes: &[u8]) -> Result<Vec<AcceptanceId>, StoreError> {
         bytes
             .as_chunks::<{ Self::LINE }>()
@@ -136,8 +137,8 @@ impl TargetFiles {
             .collect())
     }
 
-    /// The last complete entry of a locked log, after cutting off a partial
-    /// line left by a crash.
+    /// Returns the last complete entry of a locked log, first cutting off a
+    /// partial last line left by a crash.
     fn last_entry(&self, log: &File) -> Result<Option<Head>, StoreError> {
         let io_error = |source| StoreError::io(&self.log(), source);
         let len = log.metadata().map_err(io_error)?.len();
@@ -167,7 +168,8 @@ impl<P: Platform> Store<P> {
         }
     }
 
-    /// The latest acceptance of `target`, or `None` if it doesn't exist.
+    /// Returns the latest acceptance of `target`, or `None` if it doesn't
+    /// exist.
     ///
     /// # Errors
     ///
@@ -176,7 +178,7 @@ impl<P: Platform> Store<P> {
         self.target_files(target.id()).read_head()
     }
 
-    /// The acceptances of `target`, oldest first.
+    /// Returns the published acceptances of `target`, oldest first.
     ///
     /// # Errors
     ///
@@ -307,7 +309,7 @@ impl<P: Platform> Store<P> {
             .transpose()
     }
 
-    /// The names of every target, in no particular order.
+    /// Returns the names of every target, in no particular order.
     ///
     /// # Errors
     ///

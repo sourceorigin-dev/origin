@@ -1,6 +1,6 @@
-//! Statements: input digests over a large snapshot, and the promotion
-//! search over many statements, with their digests cached by the index and
-//! without.
+//! Benchmarks for statements: the input digest of a large snapshot, and
+//! the promotion search over many statements, with and without their
+//! digests cached in the index.
 
 use std::fs;
 
@@ -147,8 +147,9 @@ const CHECKS: [(&str, &[&str]); 10] = [
     ("ci.unit", &["src"]),
 ];
 
-/// A snapshot of a small crate, at version `version` of its sources and
-/// `docs` of its documentation.
+/// Builds the objects of a small crate's snapshot, with version `version`
+/// of its sources and version `docs` of its documentation. The root tree
+/// comes last.
 fn snapshot(version: usize, docs: usize) -> Vec<EncodedObject> {
     let file = |content: String| {
         let blob = EncodedObject::blob(content.as_bytes());
@@ -189,9 +190,9 @@ fn snapshot(version: usize, docs: usize) -> Vec<EncodedObject> {
     objects
 }
 
-/// A store with a revision of its own change for each version, each with a
-/// result of every check, 20k statements in all, and a revision whose
-/// sources match one of them.
+/// Builds a store with one revision per version, each of its own change
+/// and with a passing result of every check: 20k statements in all. Returns
+/// it with one more revision, whose sources match one of the others.
 fn promotion_store() -> (tempfile::TempDir, Store, RevisionId) {
     let (dir, store) = store();
     let main = AcceptanceBody {
@@ -251,8 +252,9 @@ fn promotion_store() -> (tempfile::TempDir, Store, RevisionId) {
     (dir, store, target)
 }
 
-/// Searching 20k statements for those to promote to a revision, with every
-/// digest cached: the cost of each search after the first.
+/// Benchmarks searching 20k statements for those to promote to a
+/// revision, with every digest already cached: the cost of every search
+/// after the first.
 #[divan::bench(sample_count = 20)]
 fn promotions_cached(bencher: Bencher<'_, '_>) {
     let (_dir, store, target) = promotion_store();
@@ -276,8 +278,8 @@ fn promotions_cached(bencher: Bencher<'_, '_>) {
         });
 }
 
-/// The first search, which computes and remembers the digest of each of
-/// the 20k statements, reading its subject's trees.
+/// Benchmarks the first search, which computes the digest of each of the
+/// 20k statements from its subject's trees and stores it in the index.
 #[divan::bench(sample_count = 10, sample_size = 1)]
 fn promotions_uncached(bencher: Bencher<'_, '_>) {
     let (dir, store, target) = promotion_store();

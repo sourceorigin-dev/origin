@@ -67,7 +67,7 @@ pub struct Policy {
     paths: Vec<PathRule>,
 }
 
-/// Who orders a target, and what landing on it requires.
+/// The node that orders a target, and what landing on it requires.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct TargetRules {
     authority: PrincipalName,
@@ -124,13 +124,13 @@ impl Policy {
         }
     }
 
-    /// The policy in force, at the head of the `policy` target, and the
-    /// acceptance holding it.
+    /// Returns the policy in force, from the head of the `policy` target,
+    /// with the acceptance that holds it.
     ///
     /// # Errors
     ///
-    /// Fails if the repository has no policy, its records cannot be read,
-    /// or it is invalid.
+    /// Fails if the repository has no policy, its records cannot be read, or
+    /// the policy is invalid.
     pub fn in_force<P: Platform>(store: &Store<P>) -> Result<(AcceptanceId, Self), PolicyError> {
         let head = store
             .head(&TargetName::POLICY)?
@@ -140,11 +140,12 @@ impl Policy {
         Ok((head.acceptance, policy))
     }
 
-    /// The policy in force, or the default if the repository has none.
+    /// Returns the policy in force, or the default policy if the repository
+    /// has none.
     ///
     /// # Errors
     ///
-    /// Fails like [`Policy::in_force`], but for a missing policy.
+    /// Fails like [`Policy::in_force`], except when the policy is missing.
     pub fn load<P: Platform>(store: &Store<P>) -> Result<Self, PolicyError> {
         match Self::in_force(store) {
             Ok((_, policy)) => Ok(policy),
@@ -153,12 +154,12 @@ impl Policy {
         }
     }
 
-    /// The policy in `snapshot`, or `None` if it has no `policy.toml`.
+    /// Reads the policy in `snapshot`, or returns `None` if it has no
+    /// `policy.toml`.
     ///
     /// # Errors
     ///
-    /// Fails if the snapshot cannot be read, or its `policy.toml` is
-    /// invalid.
+    /// Fails if the snapshot cannot be read, or its `policy.toml` is invalid.
     pub fn of_snapshot<P: Platform>(
         store: &Store<P>,
         snapshot: TreeId,
@@ -192,8 +193,9 @@ impl Policy {
         (file, tree.encode())
     }
 
-    /// The node that orders `target`: the one its table names, or else the
-    /// authority of `policy`. `None` if neither has a table.
+    /// Returns the node that orders `target`: the authority its table names,
+    /// or else the authority of the `policy` target. `None` if neither has a
+    /// table.
     #[must_use]
     pub fn authority(&self, target: &TargetName) -> Option<&PrincipalName> {
         self.targets
@@ -202,7 +204,8 @@ impl Policy {
             .map(|rules| &rules.authority)
     }
 
-    /// What landing on `target` requires: nothing, if it has no table.
+    /// Returns what landing on `target` requires: nothing if it has no
+    /// table.
     #[must_use]
     pub fn requirements(&self, target: &TargetName) -> &[Requirement] {
         self.targets
@@ -210,7 +213,7 @@ impl Policy {
             .map_or(&[], |rules| rules.require.as_slice())
     }
 
-    /// The public key of `node`, if the policy lists it.
+    /// Returns the public key of `node`, if the policy lists it.
     #[must_use]
     pub fn node_key(&self, node: &PrincipalName) -> Option<&NodePublicKey> {
         self.nodes.get(node)
@@ -228,7 +231,7 @@ impl Policy {
         }
     }
 
-    /// The `[[paths]]` rules, in order.
+    /// Returns the `[[paths]]` rules, in file order.
     #[must_use]
     pub fn paths(&self) -> &[PathRule] {
         &self.paths
@@ -378,7 +381,8 @@ struct PathRuleFile {
 }
 
 impl PolicyFile {
-    /// Parses `value`, which is a `what`.
+    /// Parses `value` as a `T`. If it doesn't parse, the error says the value
+    /// was meant to be a `what`.
     fn parse<T>(what: &'static str, value: String) -> Result<T, RuleError>
     where
         T: FromStr,
@@ -546,7 +550,8 @@ impl Policy {
         }
     }
 
-    /// Checks that the group `principals` names, if any, is defined.
+    /// Checks that the group `principals` names, if any, is defined, and
+    /// returns `principals`.
     fn check(&self, principals: Principals) -> Result<Principals, RuleError> {
         match &principals {
             Principals::Group(group) if !self.groups.contains_key(group) => {
@@ -577,7 +582,7 @@ pub enum RuleError {
     /// A value doesn't parse.
     #[error("{what}: {reason}")]
     Invalid {
-        /// What the value is.
+        /// What the value should be, such as `node key`.
         what: &'static str,
         /// The value.
         value: String,
@@ -695,7 +700,7 @@ pub enum PolicyError {
     Invalid {
         /// The snapshot holding it.
         snapshot: TreeId,
-        /// What is wrong, boxed: it's large, and rare.
+        /// What is wrong. Boxed because the error is large and rare.
         source: Box<toml::de::Error>,
     },
     /// An acceptance of `policy`, at this sequence number, names a policy other
@@ -751,8 +756,8 @@ mod tests {
         }
     }
 
-    /// A policy with every table, whose node `hosted` has the key of the
-    /// secret `[42; 32]`.
+    /// Builds a policy with every table, where node `hosted` has the public
+    /// key of the secret key `[42; 32]`.
     fn full_policy() -> String {
         let key = origin_shared::NodeKey::from_bytes(&[42; 32]).public();
         format!(

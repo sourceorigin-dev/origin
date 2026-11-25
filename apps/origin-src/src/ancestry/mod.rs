@@ -1,7 +1,7 @@
-//! Merge bases in a history of immutable records with snapshots: the
-//! acceptances of targets, each after the one before it and the
-//! acceptances it landed, or the revisions of a change, each after its
-//! predecessors.
+//! Finds merge bases in a history of records that each have parents and a
+//! snapshot. The records are either the acceptances of a target, whose
+//! parents are the acceptance before and the acceptances it landed, or the
+//! revisions of a change, whose parents are their predecessors.
 
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
@@ -19,12 +19,12 @@ pub struct Ancestry<I> {
 }
 
 impl<I: Copy + Eq + Hash + Ord> Ancestry<I> {
-    /// Walks everything `tips` descend from, asking `read` for the parents
-    /// and the snapshot of each record, once.
+    /// Walks every record `tips` descend from, `tips` included, calling
+    /// `read` once per record for its parents and snapshot.
     ///
     /// # Errors
     ///
-    /// Fails as `read` does.
+    /// Fails if `read` fails.
     pub fn walk<E>(
         tips: &[I],
         mut read: impl FnMut(I) -> Result<(Vec<I>, TreeId), E>,
@@ -64,7 +64,8 @@ impl<I: Copy + Eq + Hash + Ord> Ancestry<I> {
         self.merge_base_of(store, &groups, &mut need)
     }
 
-    /// The snapshot to merge `groups` from, each standing for all it holds.
+    /// Like [`Self::merge_base`], but for groups of records: each group stands
+    /// for a merge of all its records.
     fn merge_base_of<P: Platform, E: From<StoreError>>(
         &self,
         store: &Store<P>,
@@ -87,10 +88,9 @@ impl<I: Copy + Eq + Hash + Ord> Ancestry<I> {
         Ok(Some(tree))
     }
 
-    /// The best common ancestors of `groups`: the records that every group
-    /// has one that is or descends from, but that none of the others
-    /// descends from, sorted. Each record is visited a bounded number of
-    /// times.
+    /// Returns the best common ancestors of `groups`, sorted: the records
+    /// that are, or are ancestors of, a record in every group, and that no
+    /// other such record descends from.
     fn best_common(&self, groups: &[&[I]]) -> Vec<I> {
         let Some((first, others)) = groups.split_first() else {
             return Vec::new();
@@ -107,7 +107,7 @@ impl<I: Copy + Eq + Hash + Ord> Ancestry<I> {
         bases
     }
 
-    /// The records `from` are or descend from.
+    /// Returns the records in `from` and every record they descend from.
     fn reachable(&self, from: impl IntoIterator<Item = I>) -> HashSet<I> {
         let mut reached = HashSet::new();
         let mut next: Vec<_> = from.into_iter().collect();
@@ -119,8 +119,8 @@ impl<I: Copy + Eq + Hash + Ord> Ancestry<I> {
         reached
     }
 
-    /// Whether `id` is or descends from `ancestor`, as far as the walk
-    /// read.
+    /// Whether `id` is `ancestor` or descends from it, within the records the
+    /// walk read.
     #[must_use]
     pub fn descends(&self, id: I, ancestor: I) -> bool {
         self.reachable([id]).contains(&ancestor)

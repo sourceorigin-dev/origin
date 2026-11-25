@@ -18,7 +18,7 @@ fn key() -> NodeKey {
     NodeKey::from_bytes(&[42; 32])
 }
 
-/// An acceptance of `target` following `prev`.
+/// Builds an acceptance of `target` that follows `prev`.
 fn acceptance(target: &TargetName, prev: Option<Head>) -> Acceptance {
     AcceptanceBody {
         target: target.id(),

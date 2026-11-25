@@ -2,7 +2,7 @@ use origin_shared::{Record, Tree};
 
 use super::*;
 
-/// The history of `edges`, each a record and its parents.
+/// Builds the history of `edges`, each a record and its parents.
 fn ancestry(edges: &[(u8, &[u8])]) -> Ancestry<u8> {
     let tips: Vec<_> = edges.iter().map(|&(id, _)| id).collect();
     let empty = Tree::default().encode().id().into();
