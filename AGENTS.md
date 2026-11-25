@@ -40,7 +40,16 @@ temporary directory, which holds the user's `config.toml` and node key.
 The HTTP tests drive every SDK method against a real server. One fails
 while `docs/openapi.json` is stale: `just openapi` rewrites it.
 
-## Commits & Pull Requests
+## Validation
 
-Titles follow conventional commits with a scope, e.g.
-`feat(server): add transactional push`.
+`just check-changed` runs CI's quick checks on what a change reaches;
+`just validate` runs them all. `just standard` checks the engineering
+standard's rules (the `sourceorigin-standard` crate's README lists them);
+the `standard` skill says how to fix a violation, and `standard.toml` holds
+origin's deviations.
+
+## Issues & Pull Requests
+
+Issues live in GitHub issues. Pull requests follow
+`.github/pull_request_template.md`, and `standard / pr-checks` checks their
+titles and descriptions. `docs/design.md` is the documentation page.
