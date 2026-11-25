@@ -47,7 +47,6 @@ impl FixtureTree {
         let mut state = (index as u64 + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ version;
         let mut content = String::with_capacity(self.file_size + 64);
         while content.len() < self.file_size {
-            // xorshift64: cheap, deterministic variety.
             state ^= state << 13;
             state ^= state >> 7;
             state ^= state << 17;

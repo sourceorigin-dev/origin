@@ -856,7 +856,6 @@ mod tests {
             "a user isn't the node of the same name"
         );
 
-        // A target without a table: the policy's authority, no requirements.
         let other = TargetName::new("overhaul").unwrap();
         assert_eq!(policy.authority(&other), Some(&hosted));
         assert_eq!(policy.requirements(&other), []);

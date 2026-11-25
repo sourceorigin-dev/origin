@@ -173,8 +173,6 @@ impl ServerConfig {
             println!("Listening on http://{}", listener.local_addr()?);
             axum::serve(listener, Api::router(repositories))
                 .with_graceful_shutdown(async {
-                    // If the signal handler cannot be installed, run until
-                    // killed.
                     if let Err(error) = tokio::signal::ctrl_c().await {
                         tracing::warn!(%error, "cannot listen for Ctrl-C: serving until killed");
                         std::future::pending::<()>().await;

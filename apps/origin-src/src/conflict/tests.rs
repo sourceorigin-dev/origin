@@ -42,7 +42,6 @@ fn a_path_resolves_once_its_entry_changes() {
         "user:ada".parse().unwrap(),
         None,
     );
-    // Without its payload, the statement lists nothing it can trust.
     assert!(matches!(
         Conflicts::listed(&store, &statement),
         Err(StoreError::NotFound(id)) if id == payload.id()
@@ -52,7 +51,6 @@ fn a_path_resolves_once_its_entry_changes() {
 
     let unchanged = conflicts.clone().remaining(&store, snapshot(&marked));
     assert_eq!(unchanged.unwrap(), conflicts);
-    // Even to content that looks like a marker.
     let remaining = conflicts.remaining(&store, snapshot(&resolved)).unwrap();
     assert_eq!(remaining.paths(), [path("removed")]);
 }
@@ -94,7 +92,6 @@ fn only_a_user_author_leaves_a_revision_unresolved() {
             .unwrap()
             .is_empty()
     );
-    // A queue that rebased a revision, then could not rebase it elsewhere.
     let queue = revision("node:queue");
     assert!(
         Conflicts::of(&store, &claims("node:queue"), &queue)

@@ -568,9 +568,6 @@ impl Cli {
             | Command::Plugin(_) => {}
         }
         let config = UserConfig::load()?;
-        // The op log records the command line, without the program's name,
-        // as text: an argument that isn't UTF-8, such as a path, is never
-        // an error here.
         let args: Vec<_> = env::args_os()
             .skip(1)
             .map(|arg| arg.to_string_lossy().into_owned())

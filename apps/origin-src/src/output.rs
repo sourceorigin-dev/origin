@@ -116,7 +116,6 @@ mod tests {
     #[test]
     fn text_is_utf8_without_nul() {
         assert_eq!(FileDiff::text("héllo\n".as_bytes()), Some("héllo\n"));
-        // The PNG signature has no NUL byte, but is not UTF-8.
         assert_eq!(FileDiff::text(b"\x89PNG\r\n\x1a\n"), None);
         assert_eq!(FileDiff::text(b"a\0b"), None);
     }

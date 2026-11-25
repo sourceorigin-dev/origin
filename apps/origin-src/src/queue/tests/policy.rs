@@ -11,7 +11,6 @@ use super::*;
 fn landings_wait_for_collection() {
     let repo = Repo::new("[targets.main]\nauthority = \"node:queue\"\n");
     repo.change_on_main(1, &[("a", "a")]);
-    // Its promotions refer to payloads they don't write.
     let collecting = repo.store.lock_for_collection().unwrap();
     let (done, landed) = std::sync::mpsc::channel();
     thread::scope(|scope| {
@@ -45,8 +44,6 @@ fn collection_applies_a_policy_landed_while_it_waits() {
         .issue(&statement, Some(payload.clone()))
         .unwrap();
 
-    // Collection starts, two hours on, under a writer holding objects;
-    // meanwhile a policy lands that keeps the payload longer.
     let held = repo.store.hold_objects().unwrap();
     let (done, collected) = std::sync::mpsc::channel();
     thread::scope(|scope| {
@@ -99,7 +96,6 @@ fn policy_landings_keep_a_valid_policy() {
             "{result:?}"
         );
     }
-    // A valid edit lands, and later landings are under it.
     let requiring = repo.policy_toml(
         "[targets.main]\nauthority = \"node:queue\"\n\
          require = [{ kind = \"review\", verdict = \"pass\", issuer = \"user:bob\" }]\n",
@@ -137,8 +133,6 @@ fn policy_landings_keep_a_valid_policy() {
 fn each_policy_landing_is_governed_by_the_one_before() {
     let repo = Repo::new("[targets.main]\nauthority = \"node:queue\"\n");
     let policy = TargetName::POLICY;
-    // The first edit requires a review to land on `policy`; the second,
-    // stacked on it, must then wait for one.
     let requiring = repo
         .policy_toml("[targets.main]\nauthority = \"node:queue\"\n")
         .replace(
@@ -171,8 +165,6 @@ fn each_policy_landing_is_governed_by_the_one_before() {
         let governing = Policy::governing(id, &body).unwrap();
         assert_eq!(governing, if seq == 0 { id } else { log[seq - 1] });
     }
-    // An acceptance naming any other policy than the one before it is
-    // refused, its own included.
     let mut body = repo.store.get(log[1]).unwrap().body().clone();
     body.policy = Some(log[1]);
     assert!(matches!(

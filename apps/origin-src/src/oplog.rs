@@ -97,7 +97,6 @@ impl Drop for Held {
     /// so readers sync them as they do for a writer that crashed.
     fn drop(&mut self) {
         if self.synced {
-            // Best effort: readers remove a file left behind.
             let _ = fs::remove_file(&self.path);
         }
     }
@@ -475,7 +474,6 @@ impl<'a, P: Platform> OpLog<'a, P> {
             let name = entry
                 .map_err(|source| StoreError::io(&dir, source))?
                 .file_name();
-            // Anything else, such as the locks, isn't a segment.
             segments.extend(
                 name.to_str()
                     .filter(|name| name.len() == 16)
@@ -527,8 +525,6 @@ impl<'a, P: Platform> OpLog<'a, P> {
             .collect();
         let lost = match after_damage.first() {
             Some(next) => next.seq - before - 1,
-            // A file shorter than its header, which no append makes: no
-            // entry fits in what's past it.
             None => (bytes.len() as u64).saturating_sub(end) / Self::SMALLEST_FRAME,
         };
         entries.extend(after_damage);
@@ -579,7 +575,6 @@ impl<'a, P: Platform> OpLog<'a, P> {
         let last = match peeked {
             Some(Some(payload)) => Reader::new(&payload).u64().ok(),
             Some(None) => Some(first - 1),
-            // A partial or damaged end: read up to it.
             None => None,
         };
         if let Some(last) = last {
@@ -599,7 +594,6 @@ impl<'a, P: Platform> OpLog<'a, P> {
     /// Fails with [`StoreError::Expired`] if the log no longer keeps the entry
     /// after `after`, or if it cannot be read.
     pub fn after(&self, after: u64) -> Result<Read, StoreError> {
-        // The common case of a poll: nothing new, known from the last frame.
         if self.last_seq()? <= after {
             return Ok(Read::default());
         }
@@ -610,7 +604,6 @@ impl<'a, P: Platform> OpLog<'a, P> {
         {
             return Err(expired(oldest));
         }
-        // The segment holding the entry after `after`, and those after it.
         let start = segments.partition_point(|&first| first <= after + 1);
         let mut read = Read::default();
         for &first in &segments[start.saturating_sub(1)..] {
@@ -641,8 +634,7 @@ impl<'a, P: Platform> OpLog<'a, P> {
     /// Fails if the log or a writer's lock file cannot be read, or a crashed
     /// writer's entries cannot be synced.
     pub fn settled(&self) -> Result<u64, StoreError> {
-        // Read first: a writer's lock file exists, locked, before its
-        // first entry does.
+        // INVARIANT: the last sequence is read first: a writer's lock file exists, locked, before its first entry does.
         let last = self.last_seq()?;
         let dir = self.dir().join(Self::WRITERS);
         let names = match fs::read_dir(&dir) {
@@ -846,19 +838,13 @@ impl<'a, P: Platform> OpLog<'a, P> {
             }
             Ok(None) => first - 1,
             Err(error) if error.kind() == io::ErrorKind::InvalidData => {
-                // Damage hides the entries after it. Skip as many sequence
-                // numbers as the damaged bytes could hold, so none is
-                // reused, and continue in a new segment.
                 let bytes = fs::read(&path).map_err(io_error)?;
                 let (entries, _) = Self::FRAMES.parse(&bytes, Entry::decode);
                 let (end, last) = entries.last().map_or(
                     (Self::FRAMES.header().len() as u64, first - 1),
                     |(offset, entry)| (offset + entry.encode().len() as u64, entry.seq),
                 );
-                // Shorter than its header, which no append makes, the file
-                // hides no entry.
                 let hidden = (bytes.len() as u64).saturating_sub(end) / Self::SMALLEST_FRAME;
-                // Past the segment's own number, even if it held no entry.
                 return Ok(((last + hidden + 1).max(first + 1), None));
             }
             Err(source) => return Err(io_error(source)),
@@ -879,9 +865,6 @@ impl<'a, P: Platform> OpLog<'a, P> {
         if path.symlink_metadata().is_ok() {
             return Err(io_error(io::ErrorKind::AlreadyExists.into()));
         }
-        // Its entries are synced with their writes; its name, and its
-        // header, now, so the first entry's sync costs no more than the
-        // next's.
         let write = self.store.durable_write();
         write
             .stage(&path, Self::FRAMES.header())
@@ -894,7 +877,6 @@ impl<'a, P: Platform> OpLog<'a, P> {
             .map_err(io_error)?;
         let excess = (segments.len() + 1).saturating_sub(Self::SEGMENTS);
         for &old in &segments[..excess] {
-            // Best effort: a segment left behind is deleted with the next.
             let _ = fs::remove_file(self.segment(old));
         }
         Ok(Segment { path, file })
@@ -1081,7 +1063,6 @@ mod tests {
         log(&store, &wrote(1));
         let segment = oplog.segment(1);
         let mut file = OpenOptions::new().append(true).open(&segment).unwrap();
-        // A crash in the middle of an append.
         let frame = Entry {
             seq: 2,
             op: 2,
@@ -1096,7 +1077,6 @@ mod tests {
         assert_eq!(log(&store, &wrote(3)), 2, "the next append cuts it off");
         assert_eq!(oplog.after(0).unwrap().entries.len(), 2);
 
-        // Damage at the end of the segment, rather than a partial frame.
         let mut bytes = fs::read(&segment).unwrap();
         let len = bytes.len();
         bytes[len - 6] ^= 1;
@@ -1159,7 +1139,6 @@ mod tests {
             "appends continue past it"
         );
 
-        // The last entry is never cut off, nor its number reused.
         assert_eq!(log(&store, &wrote(5)), 5);
         assert_eq!(log(&store, &wrote(6)), 6);
         oplog.damage(6, FramePart::Length);
@@ -1175,13 +1154,11 @@ mod tests {
         let (_dir, store) = store();
         let oplog = store.oplog();
         log(&store, &wrote(1));
-        // A write in progress: its entry is appended, not yet committed.
         let (seq, writing) = oplog.append_in_progress(&wrote(2)).unwrap();
         log(&store, &wrote(3));
         assert_eq!(oplog.last_seq().unwrap(), 3);
         assert_eq!(oplog.settled().unwrap(), seq - 1, "readers wait for it");
 
-        // It crashes: its lock is free, its file left.
         drop(writing);
         let left = oplog.writer_path(seq);
         assert!(left.exists());
@@ -1205,8 +1182,6 @@ mod tests {
         let header = OpLog::<Native>::FRAMES.header().len() as u64;
         let done = AtomicBool::new(false);
         thread::scope(|scope| {
-            // Readers that list the segments, as every read does, and look
-            // at the newest, which a rollover may be creating.
             let readers: Vec<_> = (0..4)
                 .map(|_| {
                     scope.spawn(|| {
@@ -1218,8 +1193,6 @@ mod tests {
                             if let Ok(found) = fs::metadata(oplog.segment(newest)) {
                                 assert!(found.len() >= header, "{} bytes", found.len());
                             }
-                            // Tests keep few small segments, so retention may
-                            // delete one mid-read: that read is skipped.
                             match oplog.after(oplog.last_seq().unwrap().saturating_sub(1)) {
                                 Ok(read) => assert!(read.damage.is_none()),
                                 Err(StoreError::Expired { .. }) => {}
@@ -1229,7 +1202,6 @@ mod tests {
                     })
                 })
                 .collect();
-            // Enough entries to roll over to new segments many times.
             for _ in 0..400 {
                 log(&store, &wrote(1));
             }

@@ -178,14 +178,13 @@ impl<'a, P: Platform> Events<'a, P> {
         let start = Instant::now();
         let mut cursor = cursor;
         loop {
-            // Read before the op log, so no write after it is missed.
+            // INVARIANT: the wakeup is read before the op log, so no write after the read is missed.
             let seen = self.wakeup.map(Wakeup::writes);
             let page = self.after(cursor, |event: &EventKind| accept.accept(event), limit)?;
             let left = timeout.saturating_sub(start.elapsed());
             if !page.events.is_empty() || left.is_zero() {
                 return Ok(page);
             }
-            // Entries with no matching events are read past.
             cursor = page.next;
             let pause = Self::POLL.min(left);
             match (self.wakeup, seen) {
@@ -210,9 +209,6 @@ impl<'a, P: Platform> Events<'a, P> {
                     Some(waiting) => waiting,
                     None => waiting.insert(Queue::pending(self.store)?),
                 };
-                // A landing no longer waiting landed since, or was never
-                // kept, if its writer crashed: either way there's nothing
-                // to check.
                 let pending = waiting
                     .iter()
                     .find(|pending| pending.onto == *onto && pending.proposal == *proposal);
@@ -233,7 +229,6 @@ impl<'a, P: Platform> Events<'a, P> {
                 }
             }
             Effect::Moved(_) => Vec::new(),
-            // A crash may have cut the move short.
             &Effect::Advanced {
                 ref target,
                 seq,
@@ -277,7 +272,6 @@ impl<'a, P: Platform> Events<'a, P> {
                     change: revision.change,
                     author: revision.author,
                 }),
-                // Its event comes once a target advances to it.
                 Object::Acceptance(_)
                 | Object::Blob(_)
                 | Object::Tree(_)

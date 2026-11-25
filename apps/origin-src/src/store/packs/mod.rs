@@ -337,9 +337,7 @@ impl<P: Platform> Store<P> {
                 };
                 return Ok(());
             }
-            // A compactor retires packs only after publishing a manifest
-            // without them, so if the manifest didn't change, the pack is
-            // lost.
+            // INVARIANT: a compactor retires packs only after publishing a manifest without them, so an unchanged manifest means the pack is lost.
             if missing_from.as_ref() == Some(&bytes) {
                 return Err(StoreError::Malformed(path));
             }
@@ -438,7 +436,6 @@ impl<P: Platform> Store<P> {
             return Ok(Some(compaction));
         }
 
-        // Merge the packs smaller than twice the new pack, smallest first.
         let mut by_len = packs;
         by_len.sort_by_key(|pack| pack.len());
         let mut len = loose.len();
@@ -463,8 +460,6 @@ impl<P: Platform> Store<P> {
         sources.dedup_by_key(|&mut (id, _)| id);
         self.replace_packs(&dir, kept, merged, &sources)?;
 
-        // Everything below is published in the new pack. A crash before
-        // these files are gone leaves duplicates for the next compaction.
         Self::on_every_core(&loose, |ids| {
             ids.iter()
                 .try_for_each(|&id| Self::remove_file(&self.path(id)))
@@ -532,8 +527,6 @@ impl<P: Platform> Store<P> {
         write.stage(dir.join(Self::MANIFEST), manifest.as_bytes())?;
         write.commit()?;
         self.reload_packs()?;
-        // A crash before these files are gone leaves them for the next
-        // compaction.
         for pack in retired {
             for extension in ["idx", "pack"] {
                 Self::remove_file(&Pack::file_path(dir, pack.id, extension))?;
@@ -608,7 +601,6 @@ impl<P: Platform> Store<P> {
                 file.read_to_end(&mut bytes).map_err(io_error)?;
                 let len = u32::try_from(bytes.len())
                     .map_err(|_| io_error(io::ErrorKind::FileTooLarge.into()))?;
-                // A time before the epoch counts as the epoch.
                 let stored = modified
                     .map_err(io_error)?
                     .duration_since(UNIX_EPOCH)
@@ -656,7 +648,6 @@ impl<P: Platform> Store<P> {
                 let io_error = |source| StoreError::io(&dir, source);
                 for entry in fs::read_dir(&dir).map_err(io_error)? {
                     let entry = entry.map_err(io_error)?;
-                    // Skips temporary files, and any a user left there.
                     let Some(Ok(id)) = entry
                         .file_name()
                         .to_str()

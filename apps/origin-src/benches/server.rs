@@ -188,7 +188,7 @@ fn long_poll_wakeup(bencher: Bencher<'_, '_>) {
             };
             let poller = repo.clone();
             let poll = runtime.spawn(async move { poller.events(&query).await.unwrap() });
-            // Long enough for the poll to be waiting.
+            // wall-clock: long enough for the poll to be waiting.
             std::thread::sleep(Duration::from_millis(20));
             let pack = Pack {
                 objects: statements(hosted.revision, next.fetch_add(1, Ordering::Relaxed), 1),
@@ -265,7 +265,6 @@ fn land_with_large_index(bencher: Bencher<'_, '_>, kept: bool) {
         let landed = service.land(&Caller::Owner, &request).unwrap();
         assert!(matches!(landed.landings[..], [Landing::Landed { .. }]));
     };
-    // Reads the index for the kept service.
     service
         .statements(&Caller::Owner, RecordId::Revision(hosted.revision))
         .unwrap();

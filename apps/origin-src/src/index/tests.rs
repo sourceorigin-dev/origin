@@ -130,7 +130,6 @@ fn write_history(store: &Store) {
         RecordId::Snapshot(Tree::default().encode().id().into()),
         "lint",
     );
-    // A promotable result, and its rerun superseding it.
     let mut result: Statement = statement(RecordId::Revision(b1.id().into()), "ci.test")
         .decode_as()
         .unwrap();
@@ -146,7 +145,6 @@ fn write_history(store: &Store) {
         ..result.clone()
     };
     let batches = [
-        // A successor before its predecessor, as a fetch can deliver.
         vec![a2, on_a2, EncodedObject::blob(b"file")],
         vec![a1.clone(), b1, on_statement, rerun.encode()],
         vec![b2, on_snapshot, a1, result.encode()],
@@ -174,7 +172,6 @@ fn rebuilding_equals_updating() {
     assert_eq!(Index::rebuild(&store).unwrap().index, updated);
     assert_eq!(Index::open(&store).unwrap(), updated, "rebuilt on disk");
 
-    // Without the old index, only the arrival order is lost.
     fs::remove_file(store.index_log()).unwrap();
     assert_eq!(sorted(Index::open(&store).unwrap()), sorted(updated));
 }
@@ -207,8 +204,6 @@ fn damage_rebuilds_the_index() {
     let log = store.index_log();
     let bytes = fs::read(&log).unwrap();
 
-    // Damage past the first frame keeps the arrival order before it:
-    // here, the frame catching up with the last record.
     let mut late = bytes.clone();
     *late.last_mut().unwrap() ^= 1;
     fs::write(&log, late).unwrap();
@@ -243,13 +238,10 @@ fn catches_up_with_what_crashed_writes_published() {
     store.write_all(slice::from_ref(&published)).unwrap();
     let caught_up = Index::open(&store).unwrap();
 
-    // A batch whose writer crashed after logging it: one record made it
-    // into the store, one didn't.
     let entries = [&published, &unpublished].map(|object| Entry::of(object).unwrap().unwrap());
     store
         .commit_logged(store.durable_write(), &[Effect::Wrote(entries.to_vec())])
         .unwrap();
-    // Then a crash in the middle of catching up.
     let frame = Frame::Records {
         applied: 99,
         entries: Cow::Borrowed(&entries),
@@ -276,8 +268,6 @@ fn catches_up_with_what_crashed_writes_published() {
         Tail::Clean
     );
 
-    // Frames lost to a crash are caught up again from the op log, and
-    // the next record lands on top.
     let next = revision(c, &[&published], "next");
     store.write_all(slice::from_ref(&next)).unwrap();
     let reopened = Index::open(&store).unwrap();
@@ -292,7 +282,6 @@ fn writes_in_progress_hold_back_none_published_after_them() {
     let c = change(1);
     let slow = revision(c, &[], "slow");
     let quick = revision(change(2), &[], "quick");
-    // A write whose records aren't published yet, then one that is.
     let entry = Entry::of(&slow).unwrap().unwrap();
     let (held, writing) = store
         .oplog()
@@ -338,8 +327,6 @@ fn op_log_damage_rebuilds_the_index() {
     for revision in &written {
         store.write_all(slice::from_ref(revision)).unwrap();
     }
-    // The entry of the second revision: the store has it, the op log
-    // no longer says so.
     store
         .oplog()
         .damage(store.oplog().last_seq().unwrap() - 1, FramePart::Check);
@@ -352,7 +339,6 @@ fn op_log_damage_rebuilds_the_index() {
 #[test]
 fn rebuilds_once_the_op_log_dropped_what_it_missed() {
     let (_dir, store) = store();
-    // The test op log keeps a few kilobytes: far fewer entries than this.
     let written: Vec<_> = (0..100)
         .map(|i| {
             let object = revision(change(1), &[], &format!("{i}"));
@@ -408,7 +394,6 @@ fn refreshing_catches_up_an_index_kept_open() {
     index.refresh(&store).unwrap();
     assert_eq!(index, Index::open(&store).unwrap());
 
-    // Once the op log dropped what it missed, it reads the index again.
     for i in 0..100 {
         let object = revision(change(2), &[], &format!("{i}"));
         store.write_all(slice::from_ref(&object)).unwrap();
@@ -478,7 +463,6 @@ fn records_written_after_an_unsettled_entry_are_not_logged_yet() {
     let index = Index::open(&store).unwrap();
     let record = RecordId::Revision(written.id().into());
     assert!(index.known.contains(&record), "known in memory");
-    // A power loss takes the record back before its entry settles.
     fs::remove_file(store.path(written.id())).unwrap();
     let (logged, _) = Index::read(&store).unwrap();
     assert!(!logged.known.contains(&record));
