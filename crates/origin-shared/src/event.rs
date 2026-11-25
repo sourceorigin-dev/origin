@@ -145,6 +145,7 @@ impl EventKind {
     ///
     /// Never: event names are valid kinds.
     #[must_use]
+    #[expect(clippy::expect_used, reason = "Event names are valid kinds.")]
     pub fn kinds(&self) -> Vec<Kind> {
         let name = Kind::new(self.name()).expect("event names are valid kinds");
         match self {

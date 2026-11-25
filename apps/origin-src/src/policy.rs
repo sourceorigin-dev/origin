@@ -183,6 +183,7 @@ impl Policy {
 
     /// Builds a snapshot holding only `policy`, as its `policy.toml`, and
     /// returns the file and the tree.
+    #[expect(clippy::expect_used, reason = "`policy.toml` is a valid name.")]
     pub(crate) fn snapshot(policy: &str) -> (EncodedObject, EncodedObject) {
         let file = EncodedObject::blob(policy.as_bytes());
         let entry = TreeEntry {

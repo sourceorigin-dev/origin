@@ -201,7 +201,7 @@ pub(crate) mod hex {
     pub fn string(bytes: &[u8]) -> String {
         let mut hex = vec![0; 2 * bytes.len()];
         encode(bytes, &mut hex);
-        String::from_utf8(hex).expect("hex digits are ASCII")
+        hex.into_iter().map(char::from).collect()
     }
 
     /// Writes the two digits of each byte of `bytes` to `out`, which is

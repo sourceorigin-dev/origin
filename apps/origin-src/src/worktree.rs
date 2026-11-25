@@ -182,6 +182,7 @@ impl StatCache {
     /// `magic scanned_at:i64 has_root:u8 [root:[u8; 32]]` then, per file,
     /// `path_len:u32 path kind:u8 size:u64 mtime:i64 ctime:i64 inode:u64
     /// id:[u8; 32]`.
+    #[expect(clippy::expect_used, reason = "Paths are shorter than 4 GiB.")]
     fn encode(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(48 + self.files.len() * 96);
         out.extend_from_slice(Self::MAGIC);
@@ -866,9 +867,11 @@ impl<'a, P: Platform> Worktree<'a, P> {
                     })
                 })
                 .collect();
-            handles
-                .into_iter()
-                .try_for_each(|handle| handle.join().expect("snapshot threads do not panic"))
+            handles.into_iter().try_for_each(|handle| {
+                handle
+                    .join()
+                    .unwrap_or_else(|panic| panic::resume_unwind(panic))
+            })
         })?;
         let mut results = results.into_inner();
         results.sort_unstable_by_key(|(index, _)| *index);

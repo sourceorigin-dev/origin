@@ -428,6 +428,7 @@ impl Cli {
     ///
     /// Never: `annotate` is a subcommand.
     #[must_use]
+    #[expect(clippy::expect_used, reason = "`annotate` is a subcommand.")]
     pub fn parse_checked() -> Self {
         let cli = Self::parse();
         if let Command::Workspace(WorkspaceCommand::Annotate(args)) = &cli.command

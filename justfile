@@ -1,13 +1,13 @@
 # Validation formats Rust sources and runs every check CI runs.
 default: validate
 
-validate: fmt lint test doc-test deny
+validate: fmt lint standard test doc doc-test audit unused
 
 build:
     @cargo build --workspace --locked
 
 run *ARGS:
-    @cargo run --package origin-src --bin origin -- {{ARGS}}
+    @cargo run --locked --package origin-src --bin origin -- {{ARGS}}
 
 fmt:
     @cargo fmt --all
@@ -19,14 +19,23 @@ fmt-check:
 lint:
     @cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
-test:
-    @cargo nextest run --locked --workspace --all-features --no-tests=pass
+# ARGS, such as `--package origin-src`, replace `--workspace`.
+test *ARGS='--workspace':
+    @cargo nextest run --locked --all-features --no-tests=pass {{ARGS}}
+
+# The API docs, private items included, as most of the code is internal.
+doc:
+    @cargo doc --locked --workspace --all-features --no-deps --document-private-items
 
 doc-test:
     @cargo test --locked --doc --workspace --all-features
 
-deny:
+audit:
     @cargo deny check
+
+# Dependencies a crate declares but never names.
+unused:
+    @cargo machete
 
 # The engineering standard's rules; `cargo xtask standard rules` lists them.
 standard:
@@ -39,7 +48,7 @@ openapi:
 
 # Serve repositories over HTTP (see `origin serve --help`).
 serve *ARGS:
-    @cargo run --package origin-src --bin origin -- serve {{ARGS}}
+    @cargo run --locked --package origin-src --bin origin -- serve {{ARGS}}
 
 # Micro-benchmarks of the hot paths (hashing, storage, snapshots).
 bench *ARGS:

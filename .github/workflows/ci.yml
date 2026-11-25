@@ -1,15 +1,6 @@
-# Continuous integration for origin.
-#
-# Jobs group the `just` validation recipes by what they compile, so each
-# compilation happens once per job:
-#
-#   checks -> fmt-check, deny
-#   rust   -> lint, test, doc-test, on Linux and macOS
-#   msrv   -> the workspace builds with its minimum supported Rust version
-#
-# `ci` is the single status to require: it fails if any job failed. A run
-# cancelled by a newer push skips it, so it never reports that as a failure.
-# Caches are saved from main only, so branches never evict them.
+# Continuous integration for origin. Jobs group the `just` recipes by what
+# they compile, so each compilation happens once per job. `ci` is the status
+# to require: it fails if any job failed. Caches are saved from main only.
 
 name: CI
 
@@ -17,6 +8,11 @@ on:
   pull_request:
   push:
     branches: [main]
+  merge_group:
+  # Weekly, so a new advisory against a dependency fails even when nothing
+  # changes.
+  schedule:
+    - cron: "0 8 * * 1"
   workflow_dispatch:
 
 concurrency:
@@ -41,9 +37,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2
         with:
-          tool: just,cargo-deny
+          tool: just,cargo-deny,cargo-machete
       - run: just fmt-check
-      - run: just deny
+      - run: just audit
+      - run: just unused
 
   # origin-platform has one implementation per OS, so both run the tests.
   rust:
@@ -74,8 +71,8 @@ jobs:
           if-no-files-found: ignore
       - run: just doc-test
 
-  # Builds with the `rust-version` of Cargo.toml rather than the pinned
-  # toolchain, so raising the toolchain cannot silently raise the MSRV.
+  # Builds with the `rust-version` of Cargo.toml rather than stable, so a
+  # newer toolchain cannot silently raise the MSRV.
   msrv:
     name: msrv
     runs-on: ubuntu-latest
@@ -112,7 +109,7 @@ jobs:
 
   ci:
     name: ci
-    if: ${{ !cancelled() }}
+    if: always()
     needs: [checks, rust, msrv, standard]
     runs-on: ubuntu-latest
     timeout-minutes: 5

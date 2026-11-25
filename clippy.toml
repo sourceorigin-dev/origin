@@ -1,1 +1,4 @@
 doc-valid-idents = ["OpenAPI", ".."]
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-dbg-in-tests = true

@@ -152,6 +152,10 @@ impl<'a> Reader<'a> {
 
     /// Writes a length as a `u32`. Nothing in a record comes close to
     /// 4 GiB.
+    #[expect(
+        clippy::expect_used,
+        reason = "Nothing in a record comes close to 4 GiB."
+    )]
     pub(crate) fn write_len(len: usize, out: &mut Vec<u8>) {
         let len = u32::try_from(len).expect("record field longer than 4 GiB");
         out.extend_from_slice(&len.to_le_bytes());
