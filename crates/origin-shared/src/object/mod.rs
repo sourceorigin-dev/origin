@@ -6,13 +6,7 @@
 //! its own hash domain: objects of different kinds never share an id, and a
 //! record of one kind can never be mistaken for another.
 //!
-//! - Blob: the content, as is.
-//! - Tree: its entries, see [`Tree`].
-//! - Revision, statement and acceptance: their fields in declaration order.
-//!   Integers are little endian, ids their raw bytes, names and paths a
-//!   `u32` length and UTF-8, lists a `u32` count and the items, options and
-//!   enums a tag byte and the value. An acceptance ends with its 64-byte
-//!   ed25519 signature of everything before it.
+//! The encoding of each kind is in `docs/design.md`, under "Records".
 
 use std::fmt;
 use std::io::{self, Read};

@@ -59,6 +59,15 @@ lists, and no trailing bytes.
 | Acceptance | One landing on a target. |
 | Attachment | A description or a payload. |
 
+Each kind's encoding is as follows:
+- A blob is its content, as is.
+- A tree is its entries, as `Tree` documents.
+- A revision, statement or acceptance is its fields in declaration order.
+  Integers are little endian, ids their raw bytes, names and paths a `u32`
+  length and UTF-8, lists a `u32` count and the items, and options and enums
+  a tag byte and the value. An acceptance ends with its 64-byte ed25519
+  signature of everything before it.
+
 ```rust
 /// One immutable version of a change.
 struct Revision {
