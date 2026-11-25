@@ -8,9 +8,9 @@ use crate::{Error, Op};
 /// Advisory locks on whole files.
 ///
 /// A lock belongs to an open file and is released when that file is closed,
-/// which the kernel also does when the process dies, so a crash never leaves
-/// a stale lock behind. Two opens of the same path conflict even within one
-/// process. The default methods use the standard library's locks.
+/// including when the process dies, so a crash never leaves a stale lock.
+/// Two opens of the same path conflict, even within one process. The
+/// default methods use the standard library's locks.
 pub trait FileLock {
     /// Blocks until `file` is locked in `mode`.
     ///
@@ -24,8 +24,8 @@ pub trait FileLock {
         }
     }
 
-    /// Locks `file` in `mode` unless another holder conflicts, returning
-    /// whether it did.
+    /// Locks `file` in `mode` unless another holder conflicts. Returns whether
+    /// it took the lock.
     ///
     /// # Errors
     ///
@@ -46,16 +46,18 @@ pub trait FileLock {
 /// How a lock is shared.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LockMode {
-    /// Any number of shared holders, and no exclusive one.
+    /// Shared with any number of other shared holders. Conflicts with an
+    /// exclusive one.
     Shared,
-    /// A single holder.
+    /// Held by one holder alone. Conflicts with any other lock.
     Exclusive,
 }
 
-/// A file opened and locked, until it's dropped.
+/// A file opened and locked until it is dropped.
 ///
-/// Lock a file that is never replaced: renaming another file over the path
-/// leaves the lock on the old file, so later openers would not conflict.
+/// Only lock a file that is never replaced: if another file is renamed over
+/// the path, the lock stays on the old file, and later openers don't
+/// conflict with it.
 #[derive(Debug)]
 pub struct LockedFile(File);
 

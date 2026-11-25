@@ -29,8 +29,8 @@ pub use native::Native;
 pub use process::Processes;
 pub use read::ReadAt;
 
-/// Everything origin needs from the platform it runs on, shared by all the
-/// threads of a process.
+/// Everything origin needs from the platform it runs on. It is `Send` and
+/// `Sync`, so all the threads of a process can share one.
 pub trait Platform: Durability + FileLock + CloneFile + FileSystem + ReadAt + Send + Sync {}
 
 impl<T: Durability + FileLock + CloneFile + FileSystem + ReadAt + Send + Sync> Platform for T {}

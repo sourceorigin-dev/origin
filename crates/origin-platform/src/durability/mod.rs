@@ -13,11 +13,12 @@ use parking_lot::Mutex;
 
 use crate::{Error, Op};
 
-/// Flushes written data to stable storage, so it survives a crash or a power
-/// loss.
+/// Flushes written data to stable storage, so it survives a crash or a
+/// power loss.
 ///
 /// The default methods use the standard library, which issues each
-/// platform's strongest sync. Each platform syncs batches its own way.
+/// platform's strongest sync. Each platform implements `sync_batch` its own
+/// way.
 pub trait Durability {
     /// Flushes a file's contents, and the metadata needed to read them back.
     ///
@@ -28,8 +29,8 @@ pub trait Durability {
         file.sync_data()
     }
 
-    /// Flushes a directory's entries, making the files created in, renamed
-    /// into or removed from it durable.
+    /// Flushes a directory's entries, so the files created in, renamed into or
+    /// removed from it survive a crash.
     ///
     /// # Errors
     ///
@@ -70,14 +71,14 @@ pub struct DurableWrite<'a, P> {
 struct Staged {
     /// The files of each layer, in the order the layers are published.
     layers: Vec<Layer>,
-    /// Files written in place, synced with the batch but never renamed.
+    /// Files written in place: synced with the batch, never renamed.
     in_place: Vec<PathBuf>,
 }
 
 /// The files of one layer of a [`DurableWrite`].
 #[derive(Debug, Default)]
 struct Layer {
-    /// Each temporary file and the path it's published to.
+    /// Each temporary file, and the path it is renamed to on commit.
     files: Vec<(PathBuf, PathBuf)>,
     /// The directories whose entries must be durable before the next layer is
     /// published: the parents of the published files and, for the first layer,
@@ -85,20 +86,21 @@ struct Layer {
     dirs: BTreeSet<PathBuf>,
 }
 
-/// Distinguishes the temporary files of one process.
+/// A counter that gives each temporary file of this process a unique
+/// name.
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
 impl<P> DurableWrite<'_, P> {
-    /// How temporary file names start: `.tmp-<pid>-<n>`.
+    /// The prefix of temporary file names, which are `.tmp-<pid>-<n>`.
     const TEMP_PREFIX: &str = ".tmp-";
 
-    /// The fewest renames worth a thread of their own in
-    /// [`DurableWrite::commit`]: below that, spawning costs more than it
-    /// saves.
+    /// The fewest renames each thread of [`DurableWrite::commit`] handles. A
+    /// smaller batch is renamed on the current thread, since spawning threads
+    /// would cost more than it saves.
     const RENAMES_PER_THREAD: usize = 64;
 
-    /// Whether `name` is the name of a temporary file: one being written, or
-    /// left behind by a write that crashed.
+    /// Returns whether `name` is a temporary file's name: a file still being
+    /// written, or one left behind by a write that crashed.
     #[must_use]
     pub fn is_temporary(name: &OsStr) -> bool {
         name.as_encoded_bytes()
@@ -115,16 +117,14 @@ impl<'a, P: Durability> DurableWrite<'a, P> {
         }
     }
 
-    /// Writes `contents` as the next version of `path`, and creates its
-    /// missing parent directories. The file appears at `path` on
-    /// [`DurableWrite::commit`], replacing any file there.
+    /// Writes `contents` to a temporary file that replaces `path` on
+    /// [`DurableWrite::commit`]. Creates any missing parent directories.
     ///
-    /// Each directory created is durable at once, whatever becomes of the
-    /// write, so a later write into it never relies on this one committing.
-    /// A directory found already there may not be: another write may have
-    /// just created it, or died before syncing its parent. So the write
-    /// syncs the parent of the deepest one it found too: at once if it
-    /// creates directories in it, with the batch otherwise.
+    /// The directories it creates are synced right away, so they stay durable
+    /// even if this write is never committed. An existing directory may not be
+    /// durable yet, since another write may have just created it, so the parent
+    /// of the deepest existing directory is synced too: right away if this
+    /// write creates directories in it, otherwise on commit.
     ///
     /// # Errors
     ///
@@ -135,12 +135,12 @@ impl<'a, P: Durability> DurableWrite<'a, P> {
     }
 
     /// Stages `path` like [`DurableWrite::stage`], with the contents `write`
-    /// writes through a buffered [`StagedFile`], so a file never needs to
-    /// fit in memory. If `write` fails, nothing is staged.
+    /// writes through a buffered [`StagedFile`], so the file never has to fit
+    /// in memory. If `write` fails, nothing is staged.
     ///
     /// # Errors
     ///
-    /// Fails like [`DurableWrite::stage`], or with the error of `write`.
+    /// Fails like [`DurableWrite::stage`], or with the error `write` returns.
     pub fn stage_with<E: From<Error>>(
         &self,
         path: impl Into<PathBuf>,
@@ -190,22 +190,21 @@ impl<'a, P: Durability> DurableWrite<'a, P> {
         staged.layer(0).dirs.insert(dir.into());
     }
 
-    /// Makes `path`, a file already written in place, durable with the
-    /// batch: [`DurableWrite::commit`] syncs it with the staged files, before
-    /// publishing any of them.
+    /// Adds `path`, a file already written in place, to the batch sync:
+    /// [`DurableWrite::commit`] syncs it with the staged files, before renaming
+    /// any of them.
     pub fn sync_with(&self, path: impl Into<PathBuf>) {
         let mut staged = self.staged.lock();
         staged.in_place.push(path.into());
     }
 
-    /// Creates the missing parent directories of `path`, outermost first,
-    /// syncing the directory each is created in right after creating it.
+    /// Creates the missing parent directories of `path`, outermost first, and
+    /// syncs each one's parent right after creating it.
     ///
-    /// The deepest directory that already exists may not be durable yet, if
-    /// another write created it, so its parent is synced too: before
-    /// creating anything in it, so a directory this write creates is only
-    /// ever reachable through durable entries, or else returned, for the
-    /// batch to sync.
+    /// The deepest existing directory may not be durable yet, so the directory
+    /// holding it is synced too: right away, before anything is created in it,
+    /// or, when nothing needs creating, returned for the commit to sync.
+    /// Returns `None` when nothing is left to sync.
     fn create_parents(&self, path: &Path) -> Result<Option<PathBuf>, Error> {
         let mut missing = Vec::new();
         let mut dir = Self::parent(path);
@@ -237,7 +236,7 @@ impl<'a, P: Durability> DurableWrite<'a, P> {
         Ok(None)
     }
 
-    /// The directory containing `path`, which is `.` for a bare file name.
+    /// Returns the directory containing `path`, or `.` for a bare file name.
     #[must_use]
     pub fn parent(path: &Path) -> &Path {
         match path.parent() {
@@ -246,8 +245,8 @@ impl<'a, P: Durability> DurableWrite<'a, P> {
         }
     }
 
-    /// The directory holding the entry of the directory `dir`, unless it
-    /// can't be named: for `/`, or `.`.
+    /// Returns the directory holding the entry of the directory `dir`, or
+    /// `None` when it can't be named: for `/` and `.`.
     fn holder(dir: &Path) -> Option<&Path> {
         (dir != Path::new(".") && dir.parent().is_some()).then(|| Self::parent(dir))
     }
@@ -283,8 +282,8 @@ impl<'a, P: Durability> DurableWrite<'a, P> {
         Ok(())
     }
 
-    /// Renames each temporary file to its path, spread over the cores. Each
-    /// rename locks its directory, and a batch usually spans many.
+    /// Renames each temporary file to its path, on several threads when there
+    /// are enough files to be worth it.
     fn rename_all(files: &[(PathBuf, PathBuf)]) -> Result<(), Error> {
         let rename = |files: &[(PathBuf, PathBuf)]| {
             files.iter().try_for_each(|(temp, path)| {
@@ -345,7 +344,7 @@ pub struct StagedFile {
 }
 
 impl StagedFile {
-    /// Creates `temp` and fills it with `write`.
+    /// Creates `temp`, fills it with `write`, and flushes the buffer.
     fn write<E: From<Error>>(
         temp: &Path,
         write: impl FnOnce(&mut Self) -> Result<(), E>,

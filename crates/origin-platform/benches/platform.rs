@@ -1,5 +1,4 @@
-//! The cost of durability and locking on the native platform: what every
-//! store write and target landing pays.
+//! Benchmarks durable writes and file locks on the native platform.
 
 use std::path::PathBuf;
 use std::thread;
@@ -12,11 +11,12 @@ fn main() {
     divan::main();
 }
 
-/// The size of a typical small record.
+/// The contents of each benchmarked file: 512 bytes, the size of a typical
+/// small record.
 const CONTENTS: [u8; 512] = [b'x'; 512];
 
-/// Fresh paths for one durable write of `files` files, spread over
-/// `shards` directories like loose objects.
+/// Returns a generator of fresh paths for one durable write: `files` paths
+/// spread over `shards` directories, like loose objects.
 fn paths(dir: &tempfile::TempDir, files: usize, shards: usize) -> impl FnMut() -> Vec<PathBuf> {
     let objects = dir.path().join("objects");
     let mut write = 0;
@@ -28,8 +28,8 @@ fn paths(dir: &tempfile::TempDir, files: usize, shards: usize) -> impl FnMut() -
     }
 }
 
-/// Each file written durably on its own: a batch sync and a directory sync
-/// per file.
+/// Writes each file in a durable write of its own, which costs a batch sync
+/// and a directory sync per file.
 #[divan::bench(args = [1, 16, 128], sample_count = 10, sample_size = 1)]
 fn one_at_a_time(bencher: Bencher<'_, '_>, files: usize) {
     let dir = tempfile::tempdir().unwrap();
@@ -46,7 +46,8 @@ fn one_at_a_time(bencher: Bencher<'_, '_>, files: usize) {
         });
 }
 
-/// One group commit: a batch sync, and one for the directory.
+/// Writes all the files in one durable write: one batch sync and one
+/// directory sync.
 #[divan::bench(args = [1, 16, 128], sample_count = 10, sample_size = 1)]
 fn batched(bencher: Bencher<'_, '_>, files: usize) {
     let dir = tempfile::tempdir().unwrap();
@@ -63,8 +64,8 @@ fn batched(bencher: Bencher<'_, '_>, files: usize) {
         });
 }
 
-/// One group commit of files spread over 32 directories, like loose
-/// objects.
+/// Writes all the files in one durable write, spread over 32 directories
+/// like loose objects.
 #[divan::bench(args = [128], sample_count = 10, sample_size = 1)]
 fn batched_sharded(bencher: Bencher<'_, '_>, files: usize) {
     let dir = tempfile::tempdir().unwrap();
@@ -81,7 +82,8 @@ fn batched_sharded(bencher: Bencher<'_, '_>, files: usize) {
         });
 }
 
-/// One group commit staged from 8 threads, which overlaps their writes.
+/// Writes all the files in one durable write, staged from 8 threads at
+/// once.
 #[divan::bench(args = [16, 128], sample_count = 10, sample_size = 1)]
 fn batched_parallel(bencher: Bencher<'_, '_>, files: usize) {
     let dir = tempfile::tempdir().unwrap();
@@ -105,7 +107,8 @@ fn batched_parallel(bencher: Bencher<'_, '_>, files: usize) {
         });
 }
 
-/// Taking and releasing an uncontended lock, as every landing does.
+/// Takes and releases an uncontended exclusive lock, as every landing
+/// does.
 #[divan::bench]
 fn lock(bencher: Bencher<'_, '_>) {
     let dir = tempfile::tempdir().unwrap();

@@ -3,25 +3,23 @@ use std::path::{Path, PathBuf};
 
 use crate::{Error, Op};
 
-/// Tells local file systems from network ones, which origin refuses to
-/// write to: they lose locks and reorder or drop syncs, so a repository on
-/// one can be corrupted by a crash or a concurrent writer.
+/// Tells local file systems from network ones. Origin refuses to write to
+/// network file systems: they can lose locks and reorder or drop syncs, so
+/// a crash or a concurrent writer can corrupt a repository on one.
 ///
-/// Sync services such as Dropbox and iCloud Drive keep their folders on a
-/// local file system and replace files behind origin's back. Nothing in
-/// `statfs` tells them apart, and origin doesn't guess from paths, so a
-/// repository there is accepted.
+/// Folders of sync services such as Dropbox and iCloud Drive are on a local
+/// file system, so a repository there is accepted, even though the service
+/// may replace files behind origin's back.
 pub trait FileSystem {
-    /// The kind of file system holding `path`, which must exist.
+    /// Returns the kind of file system holding `path`, which must exist.
     ///
     /// # Errors
     ///
     /// Fails if `path` cannot be inspected.
     fn file_system(&self, path: &Path) -> io::Result<FsKind>;
 
-    /// Checks that the repository at `path` may be opened for writing:
-    /// refuses network file systems, and accepts the ones the platform
-    /// cannot identify.
+    /// Checks that the repository at `path` may be opened for writing. Refuses
+    /// network file systems, and accepts the ones the platform cannot identify.
     ///
     /// # Errors
     ///
@@ -46,14 +44,15 @@ pub trait FileSystem {
 pub enum FsKind {
     /// A disk attached to this machine.
     Local,
-    /// A file system served by another machine, by name, such as `NFS`.
+    /// A file system served by another machine, with its name, such as
+    /// `NFS`.
     Network(&'static str),
-    /// A file system that could be either, such as FUSE, which serves
-    /// sshfs as well as local disks.
+    /// A file system that may be local or networked, with its name. FUSE is
+    /// one: it serves sshfs as well as local disks.
     Unknown(&'static str),
 }
 
-/// A repository that cannot be opened for writing.
+/// Why a repository cannot be opened for writing.
 #[derive(Debug, thiserror::Error)]
 pub enum WritableError {
     /// The repository is on a network file system.
@@ -63,7 +62,7 @@ pub enum WritableError {
         path.display()
     )]
     Network {
-        /// The repository.
+        /// The repository's path.
         path: PathBuf,
         /// The file system's name.
         name: &'static str,
