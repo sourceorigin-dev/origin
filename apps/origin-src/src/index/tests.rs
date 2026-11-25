@@ -20,7 +20,8 @@ fn change(seed: u8) -> ChangeId {
     ChangeId::from_bytes([seed; 16])
 }
 
-/// A revision of `change` evolving from `predecessors`.
+/// A revision of `change` evolving from `predecessors`, made distinct by
+/// `seed`.
 fn revision(change: ChangeId, predecessors: &[&EncodedObject], seed: &str) -> EncodedObject {
     Revision {
         change,
@@ -34,7 +35,7 @@ fn revision(change: ChangeId, predecessors: &[&EncodedObject], seed: &str) -> En
     .encode()
 }
 
-/// A statement about `subject`.
+/// A passing statement of `kind` about `subject`.
 fn statement(subject: RecordId, kind: &str) -> EncodedObject {
     Statement {
         subject,
@@ -116,7 +117,7 @@ fn finds_changes_by_unique_prefix() {
     }
 }
 
-/// Records arriving in several batches, out of order and some twice.
+/// Writes records in several batches, out of order and some twice.
 fn write_history(store: &Store) {
     let (a, b) = (change(1), change(2));
     let a1 = revision(a, &[], "a1");
@@ -178,7 +179,8 @@ fn rebuilding_equals_updating() {
     assert_eq!(sorted(Index::open(&store).unwrap()), sorted(updated));
 }
 
-/// The index with every list sorted: what's left without arrival order.
+/// Returns the index with every list sorted, to compare indexes regardless
+/// of arrival order.
 fn sorted(mut index: Index) -> Index {
     index.arrivals.sort();
     for change in index.changes.values_mut() {

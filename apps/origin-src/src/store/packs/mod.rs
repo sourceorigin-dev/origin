@@ -51,7 +51,7 @@ use parking_lot::{Mutex, RwLock};
 
 use super::{Store, StoreError};
 
-/// The packs a store loaded last, shared by its clones.
+/// The packs a store loaded last, shared by the store's clones.
 #[derive(Default)]
 pub(super) struct Packs {
     manifest: RwLock<Manifest>,
@@ -59,7 +59,7 @@ pub(super) struct Packs {
     read_at: Mutex<Option<Instant>>,
 }
 
-/// A manifest and the packs it names, open.
+/// A manifest and the open packs it names.
 #[derive(Default)]
 struct Manifest {
     /// The manifest's contents, or `None` until it's first read.
@@ -68,12 +68,12 @@ struct Manifest {
 }
 
 impl Packs {
-    /// How long a store goes by the manifest it read before its next lookup
-    /// in the packs reads it again, so that a long-running process lets go
-    /// of the packs another process's compaction retired.
+    /// How long a store trusts the manifest it read. After that, its next
+    /// lookup in the packs reads the manifest again, so a long-running process
+    /// lets go of packs that another process's compaction retired.
     const RELOAD_AFTER: Duration = Duration::from_secs(10);
 
-    /// The pack holding `id` among those loaded, and where it is.
+    /// Returns the loaded pack holding `id`, and where in it the object is.
     pub(super) fn find(&self, id: ObjectId) -> Option<(Arc<Pack>, Location)> {
         let manifest = self.manifest.read();
         manifest
@@ -122,7 +122,7 @@ pub(super) struct Location {
 }
 
 impl Location {
-    /// The length of an encoded location.
+    /// The length of an encoded location: a `u64` offset and a `u32` length.
     const LEN: usize = 8 + 4 + 8;
 
     fn encode(self, out: &mut Vec<u8>) {
@@ -152,21 +152,21 @@ impl Pack {
     /// How an index file starts: its format and version.
     const INDEX_MAGIC: [u8; 8] = *b"oindex\0\x01";
 
-    /// The bytes an object takes in an index.
+    /// The bytes each object takes in an index: its id and its location.
     const ENTRY: usize = ObjectId::LEN + Location::LEN;
 
-    /// The path of the pack `id`'s file with `extension`, `pack` or `idx`.
+    /// The path of pack `id`'s file with `extension`, `pack` or `idx`.
     fn file_path(dir: &Path, id: Digest, extension: &str) -> PathBuf {
         dir.join(format!("{id}.{extension}"))
     }
 
-    /// The id of a pack holding `ids`, which are sorted.
+    /// The id of a pack: the hash of `ids`, its object ids in ascending order.
     fn id_of(ids: &[u8]) -> Digest {
         Digest::of(ids)
     }
 
-    /// Opens the pack `id` in `dir`, or returns `None` if its files are
-    /// gone.
+    /// Opens pack `id` in `dir` and checks its files, or returns `None` if they
+    /// are gone.
     fn open(platform: &impl ReadAt, dir: &Path, id: Digest) -> Result<Option<Self>, StoreError> {
         let index_path = Self::file_path(dir, id, "idx");
         let path = Self::file_path(dir, id, "pack");
@@ -197,8 +197,8 @@ impl Pack {
         Ok(Some(pack))
     }
 
-    /// Whether the index has the right shape, ascending ids, and the ids
-    /// the pack's id says.
+    /// Whether the index has the right header and size, ascending ids, and ids
+    /// that hash to the pack's id.
     fn index_is_valid(&self) -> bool {
         let Some(tables) = self.index.strip_prefix(&Self::INDEX_MAGIC) else {
             return false;
@@ -231,7 +231,7 @@ impl Pack {
         Some(Location::decode(&self.locations()[index]))
     }
 
-    /// Every object of the pack, in ascending order.
+    /// Every object of the pack and its location, in ascending id order.
     fn entries(&self) -> impl Iterator<Item = (ObjectId, Location)> {
         self.ids()
             .iter()
@@ -272,36 +272,38 @@ impl fmt::Debug for Pack {
 enum Source {
     /// Its loose file.
     Loose,
-    /// The merged pack at this position, at a location.
+    /// A merged pack, by its position in the list of merged packs, and the
+    /// object's location in it.
     Packed(usize, Location),
 }
 
 /// What a compaction did.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Compaction {
-    /// Loose objects moved into the new pack.
+    /// How many loose objects were moved into the new pack.
     pub packed: usize,
-    /// Packs merged into it.
+    /// How many packs were merged into the new pack.
     pub merged: usize,
-    /// Loose objects removed because a pack already held them, left by a
-    /// writer that didn't know of the pack yet, or by a crash.
+    /// How many loose objects were removed because a pack already held them. A
+    /// crash, or a writer that didn't know of the pack yet, leaves such copies.
     pub duplicates: usize,
 }
 
 impl<P: Platform> Store<P> {
-    /// The largest loose file compaction packs. Larger objects are mostly
-    /// file contents, which a pack merge would copy over and over.
+    /// The largest loose file compaction packs. Larger objects are mostly file
+    /// contents, which merging packs would copy again and again.
     const PACKED_MAX: u64 = 16 * 1024;
 
     /// How many small loose objects make a compaction due, see
-    /// [`Store::compact_if_due`]: about as many as git lets pile up.
+    /// [`Store::compact_if_due`].
     const COMPACT_AFTER: usize = 8 * 1024;
 
     /// How many objects a compaction reads at once, from every core, before
     /// appending them to the pack.
     const READ_CHUNK: usize = 16 * 1024;
 
-    /// The packs directory's files besides the packs.
+    /// The names of the packs directory's other files: the manifest and the
+    /// compactor's lock.
     const MANIFEST: &str = "manifest";
     const LOCK: &str = "lock";
 
@@ -309,8 +311,8 @@ impl<P: Platform> Store<P> {
         self.root.join("objects/packs")
     }
 
-    /// The pack holding `id`, reloading the manifest if no pack loaded
-    /// holds it, or if it was read too long ago.
+    /// Returns the pack holding `id`, and where it is. Reads the manifest again
+    /// if no loaded pack holds it, or if it was read too long ago.
     pub(super) fn find_packed(
         &self,
         id: ObjectId,
@@ -325,7 +327,7 @@ impl<P: Platform> Store<P> {
         Ok(self.packs.find(id))
     }
 
-    /// The id of every packed object, as of the current manifest.
+    /// Returns the id of every packed object, as of the current manifest.
     pub(super) fn packed_ids(&self) -> Result<Vec<ObjectId>, StoreError> {
         self.reload_packs()?;
         Ok(self
@@ -336,7 +338,7 @@ impl<P: Platform> Store<P> {
             .collect())
     }
 
-    /// Loads the manifest's packs, unless they're already loaded.
+    /// Reads the manifest and opens its packs, unless they are already loaded.
     pub(super) fn reload_packs(&self) -> Result<(), StoreError> {
         let dir = self.packs_dir();
         let path = dir.join(Self::MANIFEST);
@@ -373,8 +375,8 @@ impl<P: Platform> Store<P> {
         }
     }
 
-    /// Opens the packs a manifest names, reusing those already open, or
-    /// returns `None` if one is gone.
+    /// Opens the packs `manifest` names, reusing those in `open`. Returns
+    /// `None` if one of them is gone.
     fn open_packs(
         &self,
         dir: &Path,
@@ -397,18 +399,16 @@ impl<P: Platform> Store<P> {
         Ok(Some(packs))
     }
 
-    /// Moves the small loose objects into a new pack, merging packs into it
-    /// as the [module documentation](self) describes. Readers and writers
-    /// may use the store meanwhile, from any process, so a compaction can
-    /// run in the background.
+    /// Moves the small loose objects into a new pack, merging smaller packs
+    /// into it as the [module documentation](self) describes. Other readers and
+    /// writers, in any process, may use the store meanwhile.
     ///
-    /// Returns `None` without doing anything if another compaction is
-    /// running.
+    /// Returns `None` without doing anything if another compaction is running.
     ///
     /// # Errors
     ///
-    /// Fails if the store's files cannot be read, written or removed, or a
-    /// pack is malformed. Whatever the failure, no object is lost.
+    /// Fails if the store's files cannot be read, written or removed, or a pack
+    /// is malformed. No object is lost on failure.
     pub fn compact(&self) -> Result<Option<Compaction>, StoreError> {
         let Some(_lock) = self.lock_compactor()? else {
             return Ok(None);
@@ -418,11 +418,11 @@ impl<P: Platform> Store<P> {
     }
 
     /// Compacts like [`Store::compact`] if the store holds more than
-    /// [`Store::COMPACT_AFTER`] small loose objects, estimated from one
-    /// shard of the 256, as git estimates its loose objects. Cheap enough to
-    /// call after every few writes: it lists that one shard.
+    /// [`Store::COMPACT_AFTER`] small loose objects. It estimates the count
+    /// from one of the 256 shards, so it is cheap enough to call after every
+    /// few writes.
     ///
-    /// Returns `None` if the compaction isn't due, or another is running.
+    /// Returns `None` if no compaction is due, or another one is running.
     ///
     /// # Errors
     ///
@@ -450,7 +450,8 @@ impl<P: Platform> Store<P> {
         )?)
     }
 
-    /// [`Store::compact`], holding the lock, with the packs reloaded.
+    /// Does the work of [`Store::compact`]. The caller must hold the
+    /// compactor's lock and have reloaded the packs.
     fn compact_locked(&self) -> Result<Option<Compaction>, StoreError> {
         let dir = self.packs_dir();
         let packs = self.packs.loaded();
@@ -569,8 +570,8 @@ impl<P: Platform> Store<P> {
         Ok(())
     }
 
-    /// Writes a pack of `sources`, sorted by id, and its index, durably,
-    /// returning its id.
+    /// Writes a pack of `sources`, which are sorted by id, and its index,
+    /// durably, and returns the pack's id.
     fn write_pack(
         &self,
         dir: &Path,
@@ -650,10 +651,9 @@ impl<P: Platform> Store<P> {
         }
     }
 
-    /// Removes the files of the packs directory that no pack of `packs`
-    /// owns: those of compactions that crashed before publishing, and of
-    /// packs retired by compactions that crashed before removing them. Only
-    /// the compactor writes there, so it must hold the lock.
+    /// Removes the files in the packs directory that belong to none of `packs`:
+    /// leftovers of compactions that crashed. The caller must hold the
+    /// compactor's lock.
     fn remove_unlisted(dir: &Path, packs: &[Arc<Pack>]) -> Result<(), StoreError> {
         let mut keep = vec![Self::MANIFEST.to_owned(), Self::LOCK.to_owned()];
         for pack in packs {
@@ -668,8 +668,9 @@ impl<P: Platform> Store<P> {
         Ok(())
     }
 
-    /// The small loose objects of `shards` that no pack of `packs` holds,
-    /// and how many loose duplicates of packed objects it removed.
+    /// Returns the small loose objects in `shards` that no pack of `packs`
+    /// holds. Removes the loose copies of packed objects, and also returns how
+    /// many it removed.
     fn small_loose(
         &self,
         packs: &[Arc<Pack>],

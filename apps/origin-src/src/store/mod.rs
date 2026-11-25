@@ -59,17 +59,16 @@ pub struct Store<P = Native> {
 }
 
 impl<P: Platform> Store<P> {
-    /// Favors speed: higher levels shrink source code little and cost a lot
-    /// on every snapshot.
+    /// The zstd compression level. It is low because higher levels shrink
+    /// source code little and slow down every snapshot.
     const COMPRESSION_LEVEL: i32 = 1;
 
-    /// How old a temporary file must be for [`Store::remove_stale_temps`]
-    /// to remove it. A write publishes or removes its own files long before:
-    /// even a million-object batch stages in under a minute.
+    /// How old a temporary file must be before [`Store::remove_stale_temps`]
+    /// removes it. Writes finish with their own files long before that.
     const STALE_TEMP: Duration = Duration::from_hours(1);
 
-    /// Opens the storage in `root`, the `.origin` directory, on `platform`,
-    /// for reading.
+    /// Opens the store in `root`, the `.origin` directory, on `platform`, for
+    /// reading.
     pub fn new(root: impl Into<PathBuf>, platform: P) -> Self {
         Self {
             root: root.into(),
@@ -120,7 +119,7 @@ impl<P: Platform> Store<P> {
 
     /// Collects garbage: compacts the store, unless another compaction is
     /// running, then removes the temporary files crashed writes left behind.
-    /// Returns what the compaction did.
+    /// Returns what the compaction did, or `None` if it was skipped.
     ///
     /// # Errors
     ///
@@ -131,11 +130,9 @@ impl<P: Platform> Store<P> {
         Ok(compaction)
     }
 
-    /// Removes the temporary files that crashed writes left behind: those
-    /// older than an hour. It walks every loose object, so only garbage
-    /// collection calls it. It leaves the packs directory to the compactor,
-    /// which removes what crashed compactions left there under its lock, so
-    /// a long compaction never loses its pack.
+    /// Removes the temporary files crashed writes left behind, those older than
+    /// an hour. It walks every loose object, so only garbage collection should
+    /// call it. It skips the packs directory, which the compactor cleans itself.
     ///
     /// # Errors
     ///
@@ -251,14 +248,13 @@ impl<P: Platform> Store<P> {
         DurableWrite::new(&self.platform)
     }
 
-    /// Writes `objects` in one batch, staged from every core, returning how
-    /// many were new. Staging compresses and writes without syncing, so it
-    /// scales with the cores.
+    /// Writes `objects` in one batch, staging them from every core, and returns
+    /// how many were new.
     ///
     /// # Errors
     ///
-    /// Fails if an object cannot be written. Objects written before the
-    /// failure may not be durable.
+    /// Fails if an object cannot be written. Objects written before the failure
+    /// may not be durable.
     pub fn write_all(&self, objects: &[EncodedObject]) -> Result<usize, StoreError> {
         self.write_layers(&[objects])
     }
@@ -285,8 +281,8 @@ impl<P: Platform> Store<P> {
         Ok(written)
     }
 
-    /// Splits `items` into a chunk per core, and maps each on its own
-    /// thread, returning each chunk's result in order.
+    /// Splits `items` into one chunk per core, maps each chunk on its own
+    /// thread, and returns the results in chunk order.
     pub(crate) fn on_every_core<T: Sync, R: Send>(
         items: &[T],
         map: impl Fn(&[T]) -> R + Sync,
@@ -509,14 +505,15 @@ impl<P: Platform> Store<P> {
         Ok(Some(EncodedObject::verify(id, bytes)?))
     }
 
-    /// The largest size recorded in a frame that is decompressed in one
-    /// shot. A corrupt frame can claim any size, which a single allocation
-    /// of it would abort on.
+    /// The largest size, as recorded in a zstd frame, that is decompressed in
+    /// one allocation. Larger frames stream, since a corrupt frame can claim
+    /// any size.
     const ONE_SHOT_MAX: u64 = 64 << 20;
 
-    /// Decompresses in one shot using the size recorded in the frame, which
-    /// is much faster for small objects than a streaming decoder. Larger
-    /// frames stream, so the buffer only grows with what they really hold.
+    /// Decompresses a zstd frame. Frames up to `ONE_SHOT_MAX` are decompressed
+    /// in one shot, into a buffer of the size the frame records, which is much
+    /// faster for small objects. Larger ones stream. Fails if the frame doesn't
+    /// record its size.
     fn decompress(compressed: &[u8]) -> io::Result<Vec<u8>> {
         let corrupt = || io::Error::new(io::ErrorKind::InvalidData, "missing zstd frame size");
         let size = zstd::zstd_safe::get_frame_content_size(compressed)
@@ -671,12 +668,12 @@ impl<P: Platform> Store<P> {
     }
 }
 
-/// Objects written durably as a group. None is durable until
-/// [`Batch::commit`] returns, so nothing may refer to them before. Dropping
-/// the batch abandons them.
+/// A group of objects written durably together. None of them is durable
+/// until [`Batch::commit`] returns, so nothing may refer to them before.
+/// Dropping the batch abandons them.
 ///
-/// Objects can be written from several threads at once, and should be: each
-/// write compresses its object (see [`Store::write_all`]).
+/// Objects can be written from several threads at once, and should be,
+/// since each write compresses its object (see [`Store::write_all`]).
 #[derive(Debug)]
 pub struct Batch<'a, P> {
     store: &'a Store<P>,
@@ -844,13 +841,14 @@ pub enum StoreError {
     /// A durable write failed.
     #[error(transparent)]
     Write(#[from] origin_platform::Error),
-    /// The store is somewhere origin refuses to write.
+    /// The store is somewhere origin refuses to write, such as a network file
+    /// system.
     #[error(transparent)]
     Unwritable(#[from] WritableError),
     /// An object's content does not match its id.
     #[error(transparent)]
     Corrupt(#[from] IdMismatch),
-    /// An object's file is not valid zstd: it is corrupt too.
+    /// An object's file is not valid zstd, so it is corrupt.
     #[error("cannot decompress object {id} from {}", path.display())]
     Decompress {
         /// The object.
@@ -868,8 +866,8 @@ pub enum StoreError {
         /// Why decoding failed.
         source: DecodeError,
     },
-    /// An acceptance doesn't follow the target's latest one: another landing
-    /// got there first.
+    /// An acceptance doesn't follow the target's latest one, because another
+    /// landing got there first.
     #[error(
         "target `{target}` moved: expected acceptance {expected} to follow {}",
         targets::describe(*actual)
@@ -877,7 +875,7 @@ pub enum StoreError {
     Conflict {
         /// The target.
         target: TargetName,
-        /// The sequence number of the acceptance appended.
+        /// The sequence number of the acceptance being appended.
         expected: u64,
         /// The target's latest acceptance.
         actual: Option<Head>,
@@ -938,7 +936,7 @@ pub(crate) mod tests {
         (dir, store)
     }
 
-    /// Records syncs, in order, and performs them.
+    /// A platform that records each sync, in order, then performs it.
     #[derive(Default)]
     pub(crate) struct Recorder(pub(crate) Mutex<Vec<Synced>>);
 

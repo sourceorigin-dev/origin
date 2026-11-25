@@ -26,7 +26,8 @@ fn main() {
     divan::main();
 }
 
-/// Source-code-like content, which compresses like real files do.
+/// Returns `len` bytes of source-code-like content, distinct for each
+/// `seed`, which compresses like real files do.
 fn content(len: usize, seed: usize) -> Vec<u8> {
     format!("fn item_{seed}() -> usize {{ {seed} }}\n")
         .into_bytes()
@@ -49,8 +50,8 @@ fn store_on<P: Platform>(platform: P) -> (tempfile::TempDir, Store<P>) {
     (dir, store)
 }
 
-/// Writing new objects one batch each: a file and a directory sync per
-/// object.
+/// Writing new objects one batch each, which costs a file sync and a
+/// directory sync per object.
 #[divan::bench(args = [4 * 1024, 1024 * 1024], sample_count = 20)]
 fn write_unbatched(bencher: Bencher<'_, '_>, len: usize) {
     let (_dir, store) = store();
@@ -64,8 +65,8 @@ fn write_unbatched(bencher: Bencher<'_, '_>, len: usize) {
         .bench_local_refs(|object| store.write_all(slice::from_ref(object)).unwrap());
 }
 
-/// Writing new 4 KiB objects in one batch, staged from every core: the
-/// first snapshot of a tree of that many files.
+/// Writing `count` new 4 KiB objects in one batch, staged from every core,
+/// like the first snapshot of a tree of that many files.
 #[divan::bench(args = [1_000, 20_000], sample_count = 5, sample_size = 1)]
 fn write_batch(bencher: Bencher<'_, '_>, count: usize) {
     let objects: Vec<_> = (0..count)
@@ -78,7 +79,7 @@ fn write_batch(bencher: Bencher<'_, '_>, count: usize) {
 }
 
 /// Walking a store of 20k objects for the temporary files crashed writes
-/// left: what garbage collection pays.
+/// left behind, as garbage collection does.
 #[divan::bench(sample_count = 20)]
 fn remove_stale_temps(bencher: Bencher<'_, '_>) {
     let (_dir, store) = store();
@@ -89,9 +90,9 @@ fn remove_stale_temps(bencher: Bencher<'_, '_>) {
     bencher.bench(|| store.remove_stale_temps().unwrap());
 }
 
-/// Writing objects the store already has: the common case when
-/// snapshotting. The batch syncs the directory of each, for the writer that
-/// renamed it there may not have yet.
+/// Writing objects the store already has, the common case when
+/// snapshotting. The batch still syncs each object's directory, since the
+/// writer that put the object there may not have synced it yet.
 #[divan::bench(args = [1, 1_000, 20_000])]
 fn write_existing(bencher: Bencher<'_, '_>, count: usize) {
     let (_dir, store) = store();
@@ -104,7 +105,7 @@ fn write_existing(bencher: Bencher<'_, '_>, count: usize) {
         .bench(|| store.write_all(black_box(&objects)).unwrap());
 }
 
-/// Reading, decompressing, and verifying objects: the cost of checkouts.
+/// Reading, decompressing and verifying an object, as checkouts do.
 #[divan::bench(args = [4 * 1024, 1024 * 1024])]
 fn read(bencher: Bencher<'_, '_>, len: usize) {
     let (_dir, store) = store();
@@ -115,7 +116,7 @@ fn read(bencher: Bencher<'_, '_>, len: usize) {
         .bench(|| store.read(black_box(object.id())).unwrap());
 }
 
-/// Appending an acceptance to a target: the durable part of every landing.
+/// Appending an acceptance to a target, the durable step of every landing.
 #[divan::bench(sample_count = 20)]
 fn append(bencher: Bencher<'_, '_>) {
     let (_dir, store) = store();
@@ -138,9 +139,10 @@ fn append(bencher: Bencher<'_, '_>) {
     });
 }
 
-/// `count` records, as a busy repository receives them: a revision of one
-/// of a hundred changes, evolving from that change's previous one, then nine
-/// statements about it.
+/// Returns `count` records like a busy repository receives them: every
+/// tenth is a revision of one of a hundred changes, in turn, evolving from
+/// that change's previous revision, and the nine after it are statements
+/// about it.
 fn records(count: usize) -> Vec<EncodedObject> {
     let snapshot = TreeId::from(Tree::default().encode().id());
     let mut heads = vec![None; 100];
@@ -179,7 +181,7 @@ fn records(count: usize) -> Vec<EncodedObject> {
         .collect()
 }
 
-/// The native platform without syncs, to measure what syncs hide.
+/// The native platform with every sync skipped, to measure what syncs cost.
 #[derive(Clone, Copy, Debug, Default)]
 struct NoSync;
 
@@ -214,9 +216,9 @@ impl FileSystem for NoSync {
 }
 
 /// Writing new records in one batch, which indexes them, against blobs of
-/// the same content, which aren't indexed: the difference is what indexing
-/// costs, which [`NoSync`] shows apart from the syncs. One record is what
-/// issuing a statement costs.
+/// the same bytes, which aren't indexed. The difference is what indexing
+/// costs; [`NoSync`] shows it without the syncs. A batch of one, a
+/// revision, is the cost of writing a single record.
 #[divan::bench(
     types = [Native, NoSync],
     consts = [true, false],
