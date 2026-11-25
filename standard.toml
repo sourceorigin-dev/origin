@@ -82,10 +82,6 @@ paths = [
     "apps/origin-src/src/worktree/tests.rs",
     "apps/origin-src/tests/cli.rs",
     "apps/origin-src/tests/http.rs",
-    "crates/origin-platform/src/clone.rs",
-    "crates/origin-platform/src/durability/mod.rs",
-    "crates/origin-platform/src/durability/tests.rs",
-    "crates/origin-platform/tests/conformance.rs",
 ]
 
 [deviations.doc-length]

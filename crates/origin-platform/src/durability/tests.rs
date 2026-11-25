@@ -126,7 +126,6 @@ fn directories_stay_durable_when_their_write_is_abandoned() {
 
 #[test]
 fn writes_into_a_directory_another_made_sync_what_holds_it() {
-    // Another write created `new`, and may not have synced `root` yet.
     let root = tempfile::tempdir().unwrap();
     let root = root.path();
     fs::create_dir(root.join("new")).unwrap();

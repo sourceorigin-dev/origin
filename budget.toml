@@ -7,3 +7,6 @@ origin-src = 8
 
 [invariant]
 origin-shared = 1
+
+[wall-clock]
+origin-platform = 1
