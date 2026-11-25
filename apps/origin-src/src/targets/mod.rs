@@ -195,8 +195,6 @@ impl<P: Platform> Store<P> {
         if since > head.seq {
             return Ok(Vec::new());
         }
-        // The log can be ahead of the head while an append is in progress:
-        // read only up to the head.
         let end = limit.map_or(head.seq + 1, |limit| {
             since.saturating_add(limit).min(head.seq + 1)
         });
@@ -312,7 +310,6 @@ impl<P: Platform> Store<P> {
                 continue;
             }
             let files = TargetFiles { dir: entry.path() };
-            // A target is created by publishing its first head.
             if files.read_head()?.is_none() {
                 continue;
             }
@@ -362,7 +359,7 @@ impl<P: Platform> Store<P> {
         let Some(first) = acceptances.first() else {
             return Ok(());
         };
-        // A new policy changes which payloads collection keeps, so it never
+        // INVARIANT: A new policy changes which payloads collection keeps, so it never
         // lands while collection, which reads the policy first, runs.
         let _held = (*target == TargetName::POLICY)
             .then(|| self.hold_objects())
@@ -389,7 +386,7 @@ impl<P: Platform> Store<P> {
         let log_error = |source| StoreError::io(&files.log(), source);
         if head != latest {
             match latest {
-                // A crash left the log ahead of the head. Its entries name
+                // INVARIANT: A crash left the log ahead of the head. Its entries name
                 // durable acceptances, but may not be durable themselves.
                 Some(latest) if head.is_none_or(|head| head.seq < latest.seq) => {
                     self.platform.sync_file(&log).map_err(log_error)?;

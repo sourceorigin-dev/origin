@@ -78,8 +78,6 @@ impl Workspace {
         working_copy.index = Index::open(&self.store)?;
         working_copy.behind =
             self.behind(&working_copy.index, working_copy.id, &working_copy.revision)?;
-        // A change the target already had is as good as landed, though no
-        // acceptance says so.
         let unchanged = Landing::Unchanged(Proposal::Change(working_copy.revision.change));
         if landings.contains(&unchanged) {
             let base = working_copy.revision.snapshot;
@@ -426,7 +424,6 @@ impl Workspace {
         with: Vec<EncodedObject>,
         revision: &EncodedObject,
     ) -> Result<(Conflicts, Vec<Vec<EncodedObject>>), WorkspaceError> {
-        // Finding the working copy's conflicts that remain reads its trees.
         self.write(&[merge.files.into_iter().chain(merge.trees).collect()])?;
         let conflicts = working_copy.conflicts.clone();
         let conflicts = conflicts

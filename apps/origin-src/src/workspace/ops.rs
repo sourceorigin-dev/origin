@@ -35,7 +35,6 @@ impl Workspace {
         for entry in self.store.oplog().newest_first()? {
             let entry = entry?;
             let full = ops.len() >= limit;
-            // An operation's entries all come after its first.
             if full && ops.keys().next().is_some_and(|&oldest| entry.seq < oldest) {
                 break;
             }
@@ -132,8 +131,6 @@ impl Workspace {
         let (to, restored, layers) = if heads.contains(&from) {
             (from, revision, Vec::new())
         } else {
-            // A newer revision of the change exists: restore this one's
-            // contents, and its unresolved conflicts, in a revision after it.
             let conflicts = self.conflicts(&mut working_copy.index, from, &revision)?;
             let restored = Revision {
                 predecessors: heads,
@@ -158,7 +155,6 @@ impl Workspace {
         &self,
         current: RevisionId,
     ) -> Result<(u64, String, RevisionId), WorkspaceError> {
-        // This workspace's moves, newest first.
         let mut moves = Vec::new();
         for entry in self.store.oplog().newest_first()? {
             let entry = entry?;
@@ -179,17 +175,13 @@ impl Workspace {
             if skipped.contains(op) || !seen.insert(*op) {
                 continue;
             }
-            // Where the operation's first move, other than a draft's,
-            // started.
             let from = moves
                 .iter()
                 .rfind(|(other, _, moved)| other == op && moved.why == Why::Command)
                 .map(|(_, _, moved)| moved.from);
             match from {
-                // Only snapshots, or it left the working copy where it is.
                 None => {}
                 Some(Some(from)) if from == current => {}
-                // Logged before a crash kept its revision from being written.
                 Some(Some(from)) if !self.store.contains(from.into())? => {}
                 Some(None) => return Err(WorkspaceError::UndoCreation(self.root.clone())),
                 Some(Some(from)) => return Ok((*op, command.clone(), from)),

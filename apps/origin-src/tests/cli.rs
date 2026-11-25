@@ -62,8 +62,6 @@ fn the_working_copy_is_a_revision_of_the_current_change() {
         )),
         "{log}"
     );
-    // Created empty, its draft recorded, described: the first change has
-    // three revisions, of which the newest is its head.
     let evolog = repo.ok(&["evolog", &first]);
     let revisions: Vec<_> = evolog.lines().skip(1).collect();
     assert_eq!(revisions.len(), 3, "{evolog}");
@@ -96,13 +94,11 @@ fn only_commands_that_build_on_the_working_copy_record_it() {
     let revisions = || repo.ok(&["evolog", &change]).lines().count() - 1;
     repo.write("file", "draft\n");
 
-    // Reading the working copy shows the draft, and records nothing.
     assert!(repo.ok(&["status"]).ends_with("A file\n"));
     assert!(repo.ok(&["diff"]).contains("+draft\n"));
     assert!(repo.ok(&["show"]).contains(", with unrecorded edits\n"));
     assert_eq!(revisions(), 1);
 
-    // Starting the next change records it first.
     repo.ok(&["new"]);
     assert_eq!(revisions(), 2);
     assert!(repo.ok(&["show", &change]).contains("+draft\n"));
@@ -121,7 +117,6 @@ fn edit_switches_the_files_to_another_change() {
     repo.write("dir/added", "added\n");
     fs::remove_file(repo.path("run.sh")).unwrap();
 
-    // A unique prefix is enough.
     repo.ok(&["edit", &first[..6]]);
     assert_eq!(repo.read("shared"), "first\n");
     assert!(!repo.path("dir").exists());
@@ -154,7 +149,6 @@ fn a_directory_holding_untracked_files_refuses_to_become_a_file() {
     repo.ok(&["describe", "Directory"]);
     let pointer = repo.path(".origin/workspace");
     let revision = fs::read_to_string(&pointer).unwrap();
-    // Another tool's repository in it, which no snapshot tracks.
     repo.write("a/.git/HEAD", "ref\n");
 
     let refused = repo.fails(&["edit", &file]);
@@ -162,7 +156,6 @@ fn a_directory_holding_untracked_files_refuses_to_become_a_file() {
         refused.contains("changed while origin was moving"),
         "{refused}"
     );
-    // The files it removed are back, and the working copy stays.
     assert_eq!(repo.read("a/b"), "in a directory\n");
     assert_eq!(repo.read("a/.git/HEAD"), "ref\n");
     assert!(!repo.path(".origin/moving").exists());
@@ -177,8 +170,6 @@ fn divergence_shows_until_converged() {
     repo.write("file", "base\n");
     repo.ok(&["describe", "Shared work"]);
     let change = repo.change();
-    // Two agents revise the same revision: one, then the other from the
-    // revision the first started from.
     let pointer = repo.path(".origin/workspace");
     let started = fs::read_to_string(&pointer).unwrap();
     repo.write("file", "left\n");
@@ -202,7 +193,6 @@ fn divergence_shows_until_converged() {
     );
     assert!(repo.fails(&["edit", &change]).contains("is divergent"));
     assert_eq!(repo.ok(&["show", &change]).matches("Revision ").count(), 2);
-    // The divergence is flagged once, about one of the heads.
     let evolog = repo.ok(&["evolog", &change]);
     let flagged: usize = evolog
         .lines()
@@ -225,7 +215,6 @@ fn divergence_shows_until_converged() {
         converged.contains("Conflicts: file hold both versions"),
         "{converged}"
     );
-    // Both versions, the working copy's first, between markers.
     let file = repo.read("file");
     assert!(file.starts_with("<<<<<<< "), "{file}");
     assert!(file.contains("\nright\n=======\nleft\n>>>>>>> "), "{file}");
@@ -234,8 +223,6 @@ fn divergence_shows_until_converged() {
     assert!(status.contains("Conflicts: file hold"), "{status}");
     assert!(repo.ok(&["evolog"]).contains("    converges "));
 
-    // It doesn't land until the file changes: describing it keeps the
-    // conflict, an edit resolves it, whatever the file then holds.
     repo.ok(&["describe", "Shared work, converged"]);
     let refused = repo.fails(&["land"]);
     assert!(refused.contains("unresolved conflicts"), "{refused}");
@@ -267,7 +254,6 @@ fn binary_conflicts_resolve_only_when_accepted() {
     repo.ok(&["converge", &change]);
     assert_eq!(repo.read("image"), "right\0", "the working copy's side");
 
-    // An edit elsewhere leaves it unresolved, even without markers.
     repo.write("unrelated", "docs\n");
     assert!(repo.fails(&["land"]).contains("unresolved conflicts"));
     let resolved = repo.ok(&["resolve", "image", "unrelated"]);
@@ -296,7 +282,6 @@ fn a_revision_is_published_only_after_its_conflicts() {
     repo.write("file", "right\n");
     repo.ok(&["converge", &change]);
 
-    // The `core.conflict` statement `describe` issues about its revision.
     let store = Store::new(repo.path(".origin"), origin_platform::Native::default());
     let converged: RevisionId = fs::read_to_string(&pointer)
         .unwrap()
@@ -320,14 +305,12 @@ fn a_revision_is_published_only_after_its_conflicts() {
     let (_, statement) = conflicts.statement(subject, issuer, None);
     let hex = statement.encode().id().to_hex();
 
-    // Writing it fails: its directory is read-only.
     let dir = repo.path(&format!(".origin/objects/loose/{}", &hex[..2]));
     fs::create_dir_all(&dir).unwrap();
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
     repo.fails(&["describe", "Described"]);
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
 
-    // So the revision, which would hide the conflict, wasn't written.
     assert!(!store.contains(described.id()).unwrap());
     let refused = repo.fails(&["land"]);
     assert!(refused.contains("unresolved conflicts"), "{refused}");
@@ -368,8 +351,6 @@ fn at_names_the_working_copy_s_own_revision() {
     let repo = Repo::new();
     repo.write("file", "base\n");
     repo.ok(&["describe", "Shared work"]);
-    // Another revision of the change, then the working copy back on the
-    // one before: the change diverges, and `@` is still the working copy.
     let pointer = repo.path(".origin/workspace");
     let started = fs::read_to_string(&pointer).unwrap();
     repo.ok(&["describe", "Elsewhere"]);
@@ -390,7 +371,6 @@ fn a_prefix_naming_a_change_and_another_revision_is_ambiguous() {
     repo.write("file", "file\n");
     repo.ok(&["describe", "Ours"]);
     let ours = revision_of(&repo);
-    // Another change, whose id starts as that revision's does.
     let store = Store::new(repo.path(".origin"), Native::default());
     let mut change = [0; 16];
     change[..4].copy_from_slice(&ours.as_bytes()[..4]);
@@ -446,7 +426,6 @@ fn edits_recorded_on_a_stale_revision_flag_divergence() {
     let pointer = repo.path(".origin/workspace");
     let started = fs::read_to_string(&pointer).unwrap();
     repo.ok(&["describe", "Moved on"]);
-    // Edits on the revision before, recorded by `new`, make a second head.
     fs::write(&pointer, &started).unwrap();
     repo.write("file", "stale\n");
     repo.ok(&["new", "Next"]);
@@ -536,7 +515,6 @@ fn only_the_creator_of_a_change_or_admins_abandon_it() {
     repo.write("file", "ada's\n");
     repo.ok(&["describe", "Ada's change"]);
     let change = repo.change();
-    // Eve takes the change over, then tries to give it up.
     let config = repo.config().join("config.toml");
     fs::write(&config, "user = \"eve\"\n").unwrap();
     repo.write("file", "eve's\n");
@@ -684,7 +662,6 @@ fn withdrawing_needs_a_statement_to_take_back() {
     );
     repo.ok(&["annotate", "@", "review", "--fail"]);
     repo.ok(&["annotate", "@", "review", "--withdraw"]);
-    // Withdrawn already.
     assert!(
         repo.fails(&["annotate", "@", "review", "--withdraw"])
             .contains(nothing)
@@ -731,7 +708,6 @@ fn statements_about_statements_show_under_them() {
         "{listed}"
     );
 
-    // Taken back the same way.
     let withdrew = on(&["flaky", "--withdraw"]);
     assert!(
         withdrew.starts_with(&format!("Withdrew statement {flaky} with statement ")),
@@ -768,7 +744,6 @@ fn a_payload_the_repository_lacks_is_unavailable() {
 fn annotating_a_statement_needs_one_and_no_inputs() {
     let repo = Repo::new();
     let mut ids = Vec::new();
-    // Seventeen statements: two of them start with the same hex digit.
     for kind in 0..17 {
         let kind = format!("check.k{kind}");
         ids.push(issued(&repo.ok(&["annotate", "@", &kind, "--pass"])));
@@ -794,8 +769,6 @@ fn annotating_a_statement_needs_one_and_no_inputs() {
     );
     let invalid = repo.fails(&["annotate", "--on", "", "flaky", "--neutral"]);
     assert!(invalid.contains("is not a statement id"), "{invalid}");
-    // Neither a statement nor a withdrawal is promoted: no inputs, nor
-    // what describes them.
     for declared in [
         &["--inputs", "src"][..],
         &["--definition", "x"],
@@ -816,7 +789,6 @@ fn annotating_a_statement_needs_one_and_no_inputs() {
     }
     let both = repo.fails(&["annotate", "--on", &ids[0], "@", "flaky", "--pass"]);
     assert!(both.contains("with --on, give the kind alone"), "{both}");
-    // A bad kind is an error of the command line, found before anything.
     let outside = tempfile::tempdir().unwrap();
     let bad = repo.run(outside.path(), &["annotate", "@", "Bad Kind!", "--pass"]);
     assert_eq!(bad.status.code(), Some(2));
@@ -849,7 +821,6 @@ fn a_repository_is_one_working_copy_however_init_spells_it() {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir(dir.path().join("real")).unwrap();
     std::os::unix::fs::symlink("real", dir.path().join("link")).unwrap();
-    // Into a directory that exists, or one whose parents don't yet.
     for path in ["repo", "a/b/repo"] {
         let init = repo
             .command(dir.path(), &["init", &format!("link/{path}")])
@@ -922,9 +893,7 @@ fn a_move_marker_that_cannot_be_read_is_kept_and_stops_moves() {
     repo.ok(&["new", "Second"]);
     let second = repo.change();
     repo.write("b", "b\n");
-    // Recorded, so the refused `describe` below changes no file.
     repo.ok(&["describe", "Second"]);
-    // A marker that can't be read, even as root.
     let marker = repo.path(".origin/moving");
     fs::create_dir(&marker).unwrap();
 
@@ -933,7 +902,6 @@ fn a_move_marker_that_cannot_be_read_is_kept_and_stops_moves() {
     assert!(status.status.success(), "{warning}");
     assert!(warning.starts_with("warning: cannot read "), "{warning}");
     assert!(marker.is_dir(), "kept");
-    // Nor does it move without changing files.
     let pointer = repo.read(".origin/workspace");
     let refused = repo.fails(&["describe", "Second, still"]);
     assert!(
@@ -948,7 +916,6 @@ fn a_move_marker_that_cannot_be_read_is_kept_and_stops_moves() {
     );
     assert_eq!(repo.read("b"), "b\n");
     fs::remove_dir(&marker).unwrap();
-    // Nothing the refused commands made remains, to make the change diverge.
     let evolog = repo.ok(&["evolog", &second]);
     assert!(!evolog.contains("Second, still"), "{evolog}");
     repo.ok(&["describe", "Second, at last"]);
@@ -1025,7 +992,6 @@ fn statements_are_promoted_where_their_inputs_are_unchanged() {
         "{statements}"
     );
 
-    // A docs-only change keeps the lint result.
     repo.ok(&["new", "Document more"]);
     repo.write("docs/guide.md", "# Guide\nMore.\n");
     let promoted = repo.ok(&["promote"]);
@@ -1071,7 +1037,6 @@ fn workspaces_share_the_repository_with_changes_of_their_own() {
     let others = tempfile::tempdir().unwrap();
     let ws = others.path().join("ws");
 
-    // A new change beside the working copy's, on the same base.
     let change = repo.workspace(&ws, &[]);
     assert_eq!(fs::read_to_string(ws.join("shared")).unwrap(), "base\n");
     let mode = fs::metadata(ws.join("dir/run.sh"))
@@ -1088,7 +1053,6 @@ fn workspaces_share_the_repository_with_changes_of_their_own() {
     );
     assert!(status.ends_with("M shared\n"), "{status}");
 
-    // Main sees the workspace's records, and keeps its own files.
     assert_eq!(repo.read("shared"), "base\n");
     assert!(repo.ok(&["show", &change]).contains("+agent\n"));
     let list = repo.ok(&["workspace", "list"]);
@@ -1097,7 +1061,6 @@ fn workspaces_share_the_repository_with_changes_of_their_own() {
     assert!(lines[0].starts_with("@ ") && lines[0].ends_with(" Main work"));
     assert!(lines[1].starts_with("  ") && lines[1].ends_with(" Agent work"));
 
-    // Another workspace on the same change.
     let same = others.path().join("same");
     assert_eq!(repo.workspace(&same, &["--change", &change]), change);
     assert_eq!(fs::read_to_string(same.join("shared")).unwrap(), "agent\n");
@@ -1113,8 +1076,6 @@ fn a_move_that_fails_takes_its_files_back() {
     let second = repo.change();
     fs::remove_file(repo.path("ro/new")).unwrap();
     repo.write("extra", "extra\n");
-    // Moving back removes `extra`, then fails to write in `ro`, unless
-    // this runs as root, who writes there anyway.
     if fs::metadata(repo.path("extra")).unwrap().uid() == 0 {
         return;
     }
@@ -1142,7 +1103,6 @@ fn a_clean_workspace_behind_its_change_is_removed() {
 
     repo.ok(&["workspace", "rm", clean.to_str().unwrap()]);
     assert!(!clean.exists());
-    // Edits made since would be lost: no revision holds them.
     fs::write(edited.join("notes"), "mine\n").unwrap();
     let refused = repo.fails(&["workspace", "rm", edited.to_str().unwrap()]);
     assert!(refused.contains("`origin pull`"), "{refused}");
@@ -1203,8 +1163,6 @@ fn landing_moves_the_working_copy_onto_the_target() {
     repo.ok(&["new"]);
     let empty = repo.change();
 
-    // The stack lands from the bottom; the empty working copy has nothing
-    // to land, and moves onto the new tip.
     let land = repo.ok(&["land"]);
     let lines: Vec<_> = land.lines().collect();
     assert!(
@@ -1225,7 +1183,6 @@ fn landing_moves_the_working_copy_onto_the_target() {
             .contains("On top of: main #2\nNo changes.\n")
     );
 
-    // Landing the working copy's change starts a new one on the tip.
     repo.write("c", "c\n");
     let land = repo.ok(&["land"]);
     assert!(land.contains(" on main #3\nWorking copy: "), "{land}");
@@ -1253,7 +1210,6 @@ fn a_change_the_target_already_has_moves_onto_its_tip() {
     let land = repo.ok(&["land"]);
     assert!(land.contains(" would change nothing on `main`\n"), "{land}");
 
-    // Deleting the file is then a change to what `main` has.
     fs::remove_file(repo.path("f")).unwrap();
     let land = repo.ok(&["land"]);
     assert!(land.starts_with("Landed change "), "{land}");
@@ -1290,7 +1246,6 @@ fn results_there_count_over_promoted_ones() {
     repo.write("src/lib.rs", "fn a() {}\n");
     repo.ok(&["annotate", "@", "ci.test", "--pass", "--inputs", "src"]);
     assert!(repo.ok(&["land"]).contains(" on main #1\n"));
-    // Each change below keeps `src`, so the pass is promoted to it.
     let promoted = |description: &str| {
         repo.ok(&["new", "--on", "main", description]);
         repo.write(&format!("{description}.md"), "docs\n");
@@ -1300,12 +1255,10 @@ fn results_there_count_over_promoted_ones() {
         let landing = repo.ok(&["land"]);
         assert!(landing.starts_with("The landing of change "), "{landing}");
     };
-    // A pass there, then taken back, takes the promoted one with it.
     promoted("withdrawn");
     repo.ok(&["annotate", "@", "ci.test", "--pass", "--inputs", "src"]);
     repo.ok(&["annotate", "@", "ci.test", "--withdraw"]);
     waits();
-    // A failure there wins over the promoted pass.
     promoted("failed");
     repo.ok(&["annotate", "@", "ci.test", "--fail", "--inputs", "src"]);
     waits();
@@ -1339,14 +1292,11 @@ fn landings_wait_for_the_evidence_policy_requires() {
     assert!(repo.ok(&["log", "main"]).contains("main #1 "));
     repo.ok(&["pull"]);
 
-    // Only the authority lands: here, after a policy edit hands `main` to
-    // another node.
     repo.ok(&["new", "--on", "policy"]);
     let policy = repo.read("policy.toml").replace(
         "[targets.main]\nauthority = \"node:ada\"",
         "[targets.main]\nauthority = \"node:hosted\"",
     );
-    // Another node's key: any valid one will do.
     let key = policy
         .lines()
         .find_map(|line| line.strip_prefix("\"ada\" = "))
@@ -1397,7 +1347,6 @@ fn converge_merges_the_files_of_every_head() {
     }
     repo.ok(&["describe", "Shared work"]);
     let change = repo.change();
-    // Three agents revise the same revision, each changing its own file.
     let pointer = repo.path(".origin/workspace");
     let started = fs::read_to_string(&pointer).unwrap();
     for changed in ["a", "b", "c"] {
@@ -1414,7 +1363,6 @@ fn converge_merges_the_files_of_every_head() {
         }
         repo.ok(&["describe", "Shared work"]);
     }
-    // Merging a third head reads the tree merging the first two.
     let converged = repo.ok(&["converge", &change]);
     assert!(
         converged.ends_with(", merging their files\n"),
@@ -1439,7 +1387,6 @@ fn converge_labels_the_side_holding_merged_heads() {
         repo.ok(&["describe", "Shared work"]);
     }
     repo.ok(&["converge", &change]);
-    // The third head merges into both versions of the first two.
     let file = repo.read("file");
     assert!(file.starts_with("<<<<<<< merged heads\n<<<<<<< "), "{file}");
 }
@@ -1470,8 +1417,6 @@ fn commands_in_different_workspaces_run_concurrently() {
         }
     });
 
-    // Each change has its first revision, then two per edit, recording it
-    // and describing it, whichever order the index received them in.
     let revisions = |change: &str| repo.ok(&["evolog", change]).lines().count() - 1;
     for (_, change) in &workspaces {
         assert_eq!(revisions(change), 1 + 2 * EDITS);
@@ -1511,14 +1456,11 @@ fn workspaces_land_their_own_changes() {
         "{land}"
     );
     assert!(land.contains(" on main #1\nWorking copy: "), "{land}");
-    // Made on main #0, the second change lands rebased onto main #1: a new
-    // revision of it, by the queue.
     let land = repo.ok_in(&two, &["land"]);
     assert!(land.contains(" on main #2\nWorking copy: "), "{land}");
     assert!(repo.ok(&["show", &first]).contains(" by user:ada\n"));
     assert!(repo.ok(&["show", &second]).contains(" by node:ada\n"));
 
-    // Each landing moved its own workspace onto the tip it made.
     let status = repo.ok_in(&two, &["status"]);
     assert!(
         status.ends_with("On top of: main #2\nNo changes.\n"),
@@ -1531,7 +1473,6 @@ fn workspaces_land_their_own_changes() {
         "{status}"
     );
     assert!(!one.join("b").exists());
-    // The main working copy's change didn't land, so it stays.
     let status = repo.ok(&["status"]);
     assert!(
         status.ends_with("On top of: main #0\nA unlanded\n"),
@@ -1552,7 +1493,6 @@ fn pull_follows_a_rebase_waiting_to_land() {
     repo.ok(&["new", "--on", "main"]);
     repo.write("upstream", "upstream\n");
     repo.ok(&["land"]);
-    // Landing on main now needs a check nobody runs.
     repo.ok(&["new", "--on", "policy"]);
     let policy = repo
         .read("policy.toml")
@@ -1564,8 +1504,6 @@ fn pull_follows_a_rebase_waiting_to_land() {
     repo.ok(&["edit", &change]);
     assert!(repo.ok(&["land"]).contains("waits for ci.test"));
 
-    // The other workspace's edits stay unrecorded, rather than fork the
-    // change from the queue's rebase, until `pull` merges them onto it.
     fs::write(other.join("own"), "edited\n").unwrap();
     let status = repo.ok_in(&other, &["status"]);
     assert!(
@@ -1604,13 +1542,10 @@ fn a_workspace_follows_its_change_once_it_lands_elsewhere() {
     let pointer = clean.join(".origin/workspace");
     let before = fs::read_to_string(&pointer).unwrap();
 
-    // The change lands from the main working copy, then main moves on.
     assert!(repo.ok(&["land"]).contains(" on main #1\n"));
     repo.write("shared", "main\n");
     assert!(repo.ok(&["land"]).contains(" on main #2\n"));
 
-    // Reading the working copy never moves it: it says where the change
-    // went, and the commands that build on it refuse.
     fs::write(clean.join("notes"), "mine\n").unwrap();
     let status = repo.ok_in(&clean, &["status"]);
     assert!(
@@ -1629,7 +1564,6 @@ fn a_workspace_follows_its_change_once_it_lands_elsewhere() {
         "{refused}"
     );
 
-    // `pull` starts a new change on the tip, with the edits.
     let pulled = repo.ok_in(&clean, &["pull"]);
     assert!(pulled.contains("On top of: main #2\n"), "{pulled}");
     assert_eq!(fs::read_to_string(clean.join("shared")).unwrap(), "main\n");
@@ -1638,8 +1572,6 @@ fn a_workspace_follows_its_change_once_it_lands_elsewhere() {
             .ends_with("On top of: main #2\nA notes\n")
     );
 
-    // Edits that conflict with the tip are both kept, between markers, and
-    // block the new change until they're resolved.
     fs::write(conflicting.join("shared"), "mine\n").unwrap();
     let pulled = repo.ok_in(&conflicting, &["pull"]);
     assert!(
@@ -1653,7 +1585,6 @@ fn a_workspace_follows_its_change_once_it_lands_elsewhere() {
     );
     let refused = repo.fails_in(&conflicting, &["land"]);
     assert!(refused.contains("shared"), "{refused}");
-    // Pulling again, once main moves on, keeps them unresolved.
     repo.write("other", "main\n");
     assert!(repo.ok(&["land"]).contains(" on main #3\n"));
     let pulled = repo.ok_in(&conflicting, &["pull"]);
@@ -1683,10 +1614,8 @@ fn a_refused_pull_writes_nothing() {
     repo.write("upstream", "upstream\n");
     assert!(repo.ok(&["land"]).contains(" on main #1\n"));
 
-    // A socket, which snapshots skip, where the pull writes a file.
     fs::write(other.join("own"), "edited\n").unwrap();
     let socket = std::os::unix::net::UnixListener::bind(other.join("upstream")).unwrap();
-    // Recorded first, as the pull would.
     repo.ok_in(&other, &["describe", "Feature"]);
     let evolog = repo.ok_in(&other, &["evolog", &change]);
     let refused = repo.fails_in(&other, &["pull"]);
@@ -1719,8 +1648,6 @@ fn undo_moves_the_working_copy_back_one_operation_at_a_time() {
     assert!(undone.contains(": origin new Second\n"), "{undone}");
     assert_eq!(repo.change(), first);
 
-    // Describing makes a newer revision of the change: undoing it restores
-    // the description in another one, so the change keeps a single head.
     repo.ok(&["describe", "Renamed"]);
     repo.ok(&["undo"]);
     let status = repo.ok(&["status"]);
@@ -1730,8 +1657,6 @@ fn undo_moves_the_working_copy_back_one_operation_at_a_time() {
     );
     assert!(!repo.ok(&["evolog", &first]).contains("divergent"));
 
-    // Then the first description, back to the edits it was made on, and
-    // then nothing is left but creating the repository.
     repo.ok(&["undo"]);
     let status = repo.ok(&["status"]);
     assert!(status.starts_with(&format!("Working copy: {first} (no description)\n")));
@@ -1773,7 +1698,6 @@ fn undo_moves_only_its_own_workspace() {
     repo.ok(&["new", "Main work"]);
     let main = repo.change();
 
-    // The latest operation is main's, but the workspace undoes its own.
     let agent = repo.ok_in(&ws, &["undo"]);
     assert!(agent.contains(": origin new Agent work\n"), "{agent}");
     assert_eq!(repo.change(), main);
@@ -1810,12 +1734,10 @@ fn a_move_cut_short_is_finished_without_losing_edits() {
     repo.write("a", "changed\n");
     fs::remove_file(repo.path("ro/b")).unwrap();
 
-    // `edit` back to the first change crashes after writing `a`.
     repo.crash_reading(repo.root(), b"b\n", &["edit", &first], || {
         fs::read_to_string(repo.path("a")).is_ok_and(|a| a == "a\n")
     });
     assert!(repo.path(".origin/moving").exists());
-    // Edits made before the next command finishes the move.
     repo.write("notes", "mine\n");
     repo.write("keep", "edited\n");
 
@@ -1832,7 +1754,6 @@ fn a_move_cut_short_is_finished_without_losing_edits() {
     assert_eq!(repo.read("keep"), "edited\n");
     assert_eq!(repo.read("notes"), "mine\n");
     assert!(!repo.path(".origin/moving").exists());
-    // The edits are a draft on the move's revision.
     assert_eq!(repo.revision(), revision);
     let evolog = repo.ok(&["evolog", &first]);
     assert!(evolog.contains(&revision[..12]), "{evolog}");
@@ -1852,8 +1773,6 @@ fn a_move_cut_short_before_its_revision_is_written_is_taken_back() {
     repo.write("ro/b", "b\n");
     assert!(repo.ok(&["land"]).contains(" on main #1\n"));
 
-    // `pull` crashes as it writes `upstream`, before writing its merge.
-    // Main's copy would be cloned instead of read.
     fs::remove_file(repo.path("upstream")).unwrap();
     let evolog = repo.ok_in(&other, &["evolog", &change]);
     repo.crash_reading(&other, b"upstream\n", &["pull"], || {
@@ -1879,7 +1798,6 @@ fn an_unreadable_move_marker_leaves_the_files() {
     repo.write("a", "a\n");
     repo.ok(&["describe", "First"]);
     let first = repo.revision();
-    // A marker no move writes: where it went is unknown.
     fs::write(repo.path(".origin/moving"), b"").unwrap();
     repo.write("a", "half checked out\n");
     let status = repo.ok(&["status"]);
@@ -1921,14 +1839,11 @@ fn a_refused_move_cut_short_is_taken_back() {
     let revision = repo.revision();
     repo.write("a/.git/HEAD", "ref\n");
 
-    // `edit` removes `only here`, then is refused at `a`, and taking it
-    // back stops before writing `only here` again.
     unreadable_object(&repo, b"only here\n", true);
     repo.fails(&["edit", &file]);
     assert!(repo.path(".origin/moving").exists());
     unreadable_object(&repo, b"only here\n", false);
 
-    // The next command finishes taking it back, not the refused move.
     let status = repo.ok(&["status"]);
     assert!(status.contains(" Directory\n"), "{status}");
     assert_eq!(repo.read("only here"), "only here\n");
@@ -1949,15 +1864,12 @@ fn a_move_that_cannot_be_finished_leaves_the_files() {
     fs::remove_file(repo.path("ro/b")).unwrap();
     repo.ok(&["status"]);
 
-    // `edit` crashes after writing `a`, and the content finishing it
-    // needs can't be read.
     repo.crash_reading(repo.root(), b"b\n", &["edit", &first], || {
         fs::read_to_string(repo.path("a")).is_ok_and(|a| a == "a\n")
     });
     assert!(repo.path(".origin/moving").exists());
     unreadable_object(&repo, b"b\n", true);
 
-    // Every command would fail: the files stay as they are instead.
     let status = repo.ok(&["status"]);
     assert!(
         status.starts_with("Cannot finish a move of the working copy a crash cut short"),
@@ -1974,7 +1886,6 @@ fn watch_prints_events_from_a_cursor_or_as_they_happen() {
     let repo = Repo::new();
     let line =
         |receive: &mpsc::Receiver<String>| receive.recv_timeout(Duration::from_secs(20)).unwrap();
-    // From the start: the targets `init` created.
     let (mut all, receive) = repo.spawn(&["watch", "--since", "0"]);
     let policy = line(&receive);
     assert!(
@@ -1984,7 +1895,7 @@ fn watch_prints_events_from_a_cursor_or_as_they_happen() {
     all.kill().unwrap();
 
     let (mut checks, receive) = repo.spawn(&["watch", "--kind", "ci.*"]);
-    // Let it read where the log ends before anything happens.
+    // wall-clock: the command reads the log in the background, which nothing signals.
     thread::sleep(Duration::from_millis(500));
     repo.ok(&["describe", "Work"]);
     repo.ok(&["annotate", "@", "ci.test", "--pass"]);

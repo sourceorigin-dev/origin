@@ -122,7 +122,6 @@ impl Workspace {
         if Self::read_pointer(&root)?.is_some() {
             let mut workspace = Self::open(&root, self.config.clone(), self.store.actor())?;
             let working_copy = workspace.save_draft()?;
-            // Only behind its change are its edits left unsaved.
             let working_copy = if working_copy.files == working_copy.revision.snapshot {
                 working_copy
             } else {
@@ -239,7 +238,6 @@ impl Workspace {
                         .fold(resolved, |resolved, name| resolved.join(name)));
                 }
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                    // A missing `..` can't be resolved without its parent.
                     let (Some(parent), Some(name)) = (existing.parent(), existing.file_name())
                     else {
                         return Err(WorkspaceError::io(path, error));
