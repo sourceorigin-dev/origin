@@ -21,6 +21,7 @@ clap.workspace = true
 getrandom.workspace = true
 origin-platform.workspace = true
 origin-shared.workspace = true
+parking_lot.workspace = true
 serde.workspace = true
 similar.workspace = true
 thiserror.workspace = true

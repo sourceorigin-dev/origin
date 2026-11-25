@@ -398,11 +398,11 @@ impl<P: Platform> Store<P> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
     use std::thread;
 
     use origin_platform::Native;
     use origin_shared::{AcceptanceBody, NodeKey, Tree, TreeId};
+    use parking_lot::Mutex;
 
     use super::*;
     use crate::store::tests::{Recorder, Synced};
@@ -524,7 +524,7 @@ mod tests {
                         loop {
                             let head = store.head(&main).unwrap();
                             match store.append(&main, &acceptance(&main, head)) {
-                                Ok(id) => break landed.lock().unwrap().push(id),
+                                Ok(id) => break landed.lock().push(id),
                                 Err(StoreError::Conflict { .. }) => {}
                                 Err(error) => panic!("{error}"),
                             }
@@ -535,7 +535,7 @@ mod tests {
         });
         let log = store.log(&main).unwrap();
         assert_eq!(log.len(), 24);
-        let mut landed = landed.into_inner().unwrap();
+        let mut landed = landed.into_inner();
         landed.sort();
         let mut sorted = log.clone();
         sorted.sort();
@@ -606,14 +606,14 @@ mod tests {
         let log = store.target_files(main.id()).log();
         let mut file = fs::OpenOptions::new().append(true).open(log).unwrap();
         writeln!(file, "{}", unsynced.encode().id()).unwrap();
-        store.platform.0.lock().unwrap().clear();
+        store.platform.0.lock().clear();
 
         assert!(store.append(&main, &unsynced).is_err(), "it's there now");
         let targets = store.targets_dir();
         let target = targets.join(main.id().to_hex());
         let shard = &unsynced.encode().id().to_hex()[..2];
         assert_eq!(
-            store.platform.0.into_inner().unwrap(),
+            store.platform.0.into_inner(),
             [
                 Synced::Batch(0),
                 Synced::Dir(dir.path().join(".origin/objects/loose").join(shard)),
@@ -634,14 +634,14 @@ mod tests {
         store.init().unwrap();
         let main = TargetName::MAIN;
         land(&store, &main, 1);
-        store.platform.0.lock().unwrap().clear();
+        store.platform.0.lock().clear();
 
         let id = land(&store, &main, 1)[0];
         let hex = id.to_hex();
         let targets = store.targets_dir();
         let target = targets.join(main.id().to_hex());
         assert_eq!(
-            store.platform.0.into_inner().unwrap(),
+            store.platform.0.into_inner(),
             [
                 // The acceptance and its op log entry, which costs no sync
                 // of its own.

@@ -41,11 +41,12 @@ use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, PoisonError, RwLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use origin_platform::{LockMode, LockedFile, Platform, ReadAt};
 use origin_shared::{Digest, ObjectId};
+use parking_lot::{Mutex, RwLock};
 
 use super::{Store, StoreError};
 
@@ -73,7 +74,7 @@ impl Packs {
 
     /// The pack holding `id` among those loaded, and where it is.
     pub(super) fn find(&self, id: ObjectId) -> Option<(Arc<Pack>, Location)> {
-        let manifest = self.manifest.read().unwrap_or_else(PoisonError::into_inner);
+        let manifest = self.manifest.read();
         manifest
             .packs
             .iter()
@@ -81,13 +82,13 @@ impl Packs {
     }
 
     fn loaded(&self) -> Vec<Arc<Pack>> {
-        let manifest = self.manifest.read().unwrap_or_else(PoisonError::into_inner);
+        let manifest = self.manifest.read();
         manifest.packs.clone()
     }
 
     /// Whether the manifest is due to be read again.
     fn stale(&self) -> bool {
-        let read_at = self.read_at.lock().unwrap_or_else(PoisonError::into_inner);
+        let read_at = self.read_at.lock();
         read_at.is_none_or(|at| at.elapsed() >= Self::RELOAD_AFTER)
     }
 }
@@ -342,31 +343,17 @@ impl<P: Platform> Store<P> {
         let path = dir.join(Self::MANIFEST);
         let mut missing_from = None;
         loop {
-            *self
-                .packs
-                .read_at
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner) = Some(Instant::now());
+            *self.packs.read_at.lock() = Some(Instant::now());
             let bytes = match fs::read(&path) {
                 Ok(bytes) => bytes,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
                 Err(source) => return Err(StoreError::io(&path, source)),
             };
             let current = |manifest: &Manifest| manifest.bytes.as_ref() == Some(&bytes);
-            if current(
-                &self
-                    .packs
-                    .manifest
-                    .read()
-                    .unwrap_or_else(PoisonError::into_inner),
-            ) {
+            if current(&self.packs.manifest.read()) {
                 return Ok(());
             }
-            let mut manifest = self
-                .packs
-                .manifest
-                .write()
-                .unwrap_or_else(PoisonError::into_inner);
+            let mut manifest = self.packs.manifest.write();
             if current(&manifest) {
                 return Ok(());
             }
@@ -738,12 +725,12 @@ impl<P: Platform> Store<P> {
 #[cfg(test)]
 mod tests {
     use std::slice;
-    use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::thread;
 
     use origin_platform::{CloneFile, Durability, Error, FileLock, FileSystem, FsKind, Native, Op};
     use origin_shared::EncodedObject;
+    use parking_lot::Mutex;
 
     use super::super::tests::{Recorder, Synced, store};
     use super::*;
@@ -880,7 +867,7 @@ mod tests {
             |store: &Store| -> Vec<_> { store.packs.loaded().iter().map(|pack| pack.id).collect() };
         assert_readable(&other, &first);
         assert_ne!(ids(&other), ids(&store), "still reading the retired pack");
-        *other.packs.read_at.lock().unwrap() = Instant::now().checked_sub(Packs::RELOAD_AFTER);
+        *other.packs.read_at.lock() = Instant::now().checked_sub(Packs::RELOAD_AFTER);
         assert_readable(&other, &first);
         assert_eq!(ids(&other), ids(&store));
     }
@@ -910,13 +897,13 @@ mod tests {
         let objects = objects(0, 10);
         store.write_all(&objects).unwrap();
         store.compact().unwrap();
-        store.platform.0.lock().unwrap().clear();
+        store.platform.0.lock().clear();
 
         // The compactor may not have synced the manifest naming it yet.
         assert_eq!(store.write_all(&objects[..1]).unwrap(), 0);
         let packs = store.packs_dir();
         assert_eq!(
-            store.platform.0.into_inner().unwrap(),
+            store.platform.0.into_inner(),
             [Synced::Batch(0), Synced::Dir(packs)]
         );
     }
@@ -1010,13 +997,13 @@ mod tests {
     impl Crashing {
         /// Fails the batch sync after the next `batches`.
         fn crash_after(&self, batches: usize) {
-            *self.0.lock().unwrap() = Some(batches);
+            *self.0.lock() = Some(batches);
         }
     }
 
     impl Durability for Crashing {
         fn sync_batch<'f>(&self, files: impl IntoIterator<Item = &'f Path>) -> Result<(), Error> {
-            let mut left = self.0.lock().unwrap();
+            let mut left = self.0.lock();
             match *left {
                 Some(0) => {
                     *left = None;

@@ -31,6 +31,7 @@ clap = { version = "4.6.7", features = ["derive"] }
 divan = "0.1.21"
 ed25519-dalek = "3.0.0"
 getrandom = "0.4.3"
+parking_lot = "0.13.0"
 reflink-copy = "0.1.30"
 # Only in origin-platform. The version and features reflink-copy uses on Linux.
 rustix = { version = "1.1.6", default-features = false, features = ["fs", "std"] }

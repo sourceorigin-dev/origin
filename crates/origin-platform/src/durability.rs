@@ -7,8 +7,9 @@ use std::panic;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, PoisonError};
 use std::thread;
+
+use parking_lot::Mutex;
 
 use crate::{Error, Op};
 
@@ -161,7 +162,7 @@ impl<'a, P: Durability> DurableWrite<'a, P> {
             let _ = fs::remove_file(&temp);
             return Err(error);
         }
-        let mut staged = self.staged.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut staged = self.staged.lock();
         staged.dirs.insert(Self::parent(&path).to_owned());
         staged.dirs.extend(relied_on);
         staged.files.push((temp, path));
@@ -172,7 +173,7 @@ impl<'a, P: Durability> DurableWrite<'a, P> {
     /// staged in it: for a file another write published, which this one
     /// relies on, and may not have synced yet.
     pub fn sync_dir_with(&self, dir: impl Into<PathBuf>) {
-        let mut staged = self.staged.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut staged = self.staged.lock();
         staged.dirs.insert(dir.into());
     }
 
@@ -180,7 +181,7 @@ impl<'a, P: Durability> DurableWrite<'a, P> {
     /// batch: [`DurableWrite::commit`] syncs it with the staged files, before
     /// publishing any of them.
     pub fn sync_with(&self, path: impl Into<PathBuf>) {
-        let mut staged = self.staged.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut staged = self.staged.lock();
         staged.in_place.push(path.into());
     }
 
@@ -248,10 +249,7 @@ impl<'a, P: Durability> DurableWrite<'a, P> {
     /// or if a file cannot be renamed or a directory cannot be synced. Files
     /// renamed before such a failure are visible but may not be durable.
     pub fn commit(mut self) -> Result<(), Error> {
-        let staged = self
-            .staged
-            .get_mut()
-            .unwrap_or_else(PoisonError::into_inner);
+        let staged = self.staged.get_mut();
         let temps = staged.files.iter().map(|(temp, _)| temp.as_path());
         self.platform
             .sync_batch(temps.chain(staged.in_place.iter().map(PathBuf::as_path)))?;
@@ -300,10 +298,7 @@ impl<'a, P: Durability> DurableWrite<'a, P> {
 impl<P> Drop for DurableWrite<'_, P> {
     /// Removes the temporary files that were not published.
     fn drop(&mut self) {
-        let staged = self
-            .staged
-            .get_mut()
-            .unwrap_or_else(PoisonError::into_inner);
+        let staged = self.staged.get_mut();
         for (temp, _) in &staged.files {
             // Best effort: a leftover is garbage that readers skip. After a
             // failed rename, some of these are already published.
@@ -372,11 +367,11 @@ mod tests {
 
     impl Recorder {
         fn record(&self, call: Call) {
-            self.calls.lock().unwrap().push(call);
+            self.calls.lock().push(call);
         }
 
         fn take(&self) -> Vec<Call> {
-            std::mem::take(&mut self.calls.lock().unwrap())
+            std::mem::take(&mut self.calls.lock())
         }
     }
 
