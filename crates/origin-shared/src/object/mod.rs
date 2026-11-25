@@ -75,7 +75,7 @@ impl fmt::Display for ObjectKind {
 
 /// An object with structure: every kind except blobs and attachments.
 pub trait Record: Field {
-    /// The kind every encoding of this record starts with.
+    /// The kind byte every encoding of this record starts with.
     const KIND: ObjectKind;
 
     /// Encodes and hashes the record.
@@ -148,8 +148,9 @@ object!(Tree, Revision, Statement, Acceptance);
 
 /// An object's encoding together with its id.
 ///
-/// The id is always the hash of the bytes: constructors either hash the bytes
-/// or verify a claimed id, so holding an `EncodedObject` proves integrity.
+/// The id is always the hash of the bytes: every constructor either hashes
+/// the bytes or checks a claimed id. Holding an `EncodedObject` proves the
+/// bytes are intact.
 #[derive(Clone, PartialEq, Eq)]
 pub struct EncodedObject {
     id: ObjectId,
@@ -164,8 +165,8 @@ impl EncodedObject {
         }
     }
 
-    /// Encodes a blob, reading its content to the end. `len_hint` sizes the
-    /// buffer up front, so passing the file size avoids reallocating.
+    /// Encodes a blob by reading its content to the end. `len_hint` sizes the
+    /// buffer up front: pass the file size to avoid reallocating.
     ///
     /// # Errors
     ///
@@ -212,8 +213,8 @@ impl EncodedObject {
         Self::hash(bytes)
     }
 
-    /// Accepts bytes claimed to encode the object `id`, such as bytes read
-    /// from disk or the network.
+    /// Wraps bytes that should encode the object `id`, such as bytes read
+    /// from disk or the network, after checking that they hash to `id`.
     ///
     /// # Errors
     ///
@@ -275,7 +276,7 @@ impl EncodedObject {
         Ok(&self.bytes[1..])
     }
 
-    /// Decodes the object as a `R`.
+    /// Decodes the object as an `R`.
     ///
     /// # Errors
     ///

@@ -11,7 +11,7 @@ pub struct IdMismatch {
     pub actual: ObjectId,
 }
 
-/// Bytes that are not a canonical encoding: of an object, or of anything
+/// Bytes that are not a canonical encoding of an object, or of anything
 /// else read with a [`Reader`](super::Reader).
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum DecodeError {
@@ -32,7 +32,8 @@ pub enum DecodeError {
         /// The kind of the object.
         actual: ObjectKind,
     },
-    /// A tag byte (an enum variant, an option or a boolean) has no meaning.
+    /// A tag byte (of an enum variant, an option or a boolean) has no
+    /// meaning.
     #[error("unknown {field} tag {tag}")]
     UnknownTag {
         /// What the tag encodes.
@@ -43,7 +44,8 @@ pub enum DecodeError {
     /// A name is invalid.
     #[error(transparent)]
     InvalidName(#[from] InvalidName),
-    /// A value is valid but not in the one form its type encodes it in.
+    /// A value is valid but not in its canonical form. Holds what the value
+    /// is, such as "path".
     #[error("{0} is not in canonical form")]
     NonCanonical(&'static str),
     /// Tree entries are not strictly sorted by name.

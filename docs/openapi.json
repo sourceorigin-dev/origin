@@ -1164,7 +1164,7 @@
             "items": {
               "$ref": "#/components/schemas/StatementId"
             },
-            "description": "The statements the policy relied on."
+            "description": "The statements the policy relied on to accept the landing."
           },
           "landed": {
             "type": "array",
@@ -1177,7 +1177,7 @@
             "oneOf": [
               {
                 "$ref": "#/components/schemas/AcceptanceId",
-                "description": "The acceptance of the `policy` target in force when this one landed.\nAbsent only for the first acceptance of `policy`, which nothing\nprecedes."
+                "description": "The acceptance of the `policy` target in force when this one landed.\nAbsent only for the first acceptance of `policy` itself."
               },
               {
                 "type": "null"
@@ -1651,18 +1651,18 @@
         "properties": {
           "definition": {
             "$ref": "#/components/schemas/Digest",
-            "description": "The check's command and configuration."
+            "description": "The hash of the check's command and configuration."
           },
           "external": {
             "type": "boolean",
-            "description": "Whether the claim also depended on things outside the snapshot, such\nas the network, which makes it never promotable."
+            "description": "Whether the claim also depended on something outside the snapshot,\nsuch as the network. Such a statement is never promoted."
           },
           "paths": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/RepoPath"
             },
-            "description": "The files and directories read, each covering everything under it."
+            "description": "The files and directories read. Each covers everything under it."
           },
           "target_paths": {
             "type": "array",
@@ -1673,7 +1673,7 @@
           },
           "toolchain": {
             "$ref": "#/components/schemas/Digest",
-            "description": "The tools that ran it, such as the hash of `rustc -V`."
+            "description": "The hash of the tools that ran the check, such as the output of\n`rustc -V`."
           }
         }
       },
@@ -2171,7 +2171,7 @@
       },
       "Revision": {
         "type": "object",
-        "description": "One immutable version of a change.\n\nEditing, rebasing or handing a change to someone else creates a new\nrevision of the same change, whose predecessors are the revisions it\nevolves from.",
+        "description": "One immutable version of a change.\n\nEditing, rebasing or handing over a change creates a new revision of the\nsame change. Its predecessors are the revisions it evolves from.",
         "required": [
           "change",
           "predecessors",
@@ -2199,22 +2199,22 @@
             "items": {
               "$ref": "#/components/schemas/RevisionId"
             },
-            "description": "The exact revisions this one requires: the changes below it in a\nstack."
+            "description": "The exact revisions this one requires, such as the changes below it\nin a stack."
           },
           "description": {
             "$ref": "#/components/schemas/AttachmentId",
-            "description": "The intent, written for humans and agents."
+            "description": "The blob holding the change's description, written for humans and\nagents."
           },
           "predecessors": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/RevisionId"
             },
-            "description": "The revisions this one evolves from. Two make it a convergence of\ndivergent heads."
+            "description": "The revisions this one evolves from. A revision with two of them\nconverges divergent heads."
           },
           "snapshot": {
             "$ref": "#/components/schemas/TreeId",
-            "description": "The root tree of the files."
+            "description": "The root tree of the revision's files."
           }
         }
       },
@@ -2372,7 +2372,7 @@
             "oneOf": [
               {
                 "$ref": "#/components/schemas/Inputs",
-                "description": "What the claim depended on, which lets it be promoted to revisions\nwith the same inputs."
+                "description": "What the claim depended on. Statements with inputs can be promoted to\nrevisions with the same input digest."
               },
               {
                 "type": "null"
@@ -2402,7 +2402,7 @@
             "oneOf": [
               {
                 "$ref": "#/components/schemas/StatementId",
-                "description": "The statement this one promotes: its kind, verdict, inputs and\npayload hold here too, because the input digests are equal. The\nissuer is whoever promoted it, the original's stays on the original."
+                "description": "The statement this one promotes. Its kind, verdict, inputs and\npayload also hold here, because the input digests are equal. The issuer\nis whoever promoted it; the original keeps its own issuer."
               },
               {
                 "type": "null"
@@ -2428,7 +2428,7 @@
             "oneOf": [
               {
                 "$ref": "#/components/schemas/Verdict",
-                "description": "The outcome, the only field core interprets."
+                "description": "The outcome. It is the only field origin itself interprets."
               },
               {
                 "type": "null"

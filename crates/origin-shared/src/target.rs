@@ -8,12 +8,12 @@ use crate::{AcceptanceId, TargetId};
 
 names! {
     /// The name of a target, such as `main` or `release/v3`: `/`-separated
-    /// segments of ASCII letters, digits, `.`, `_` and `-`. No segment is
-    /// empty or starts with `.`, which keeps names unambiguous in URLs and
-    /// on the command line.
+    /// segments of ASCII letters, digits, `.`, `_` and `-`. No segment is empty
+    /// or starts with `.`, so names stay unambiguous in URLs and on the command
+    /// line.
     ///
-    /// Names never become file names: a target is stored under its
-    /// [`TargetId`].
+    /// A target is stored under its [`TargetId`], so names never become file
+    /// names.
     TargetName("target name");
 }
 

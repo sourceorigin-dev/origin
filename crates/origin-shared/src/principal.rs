@@ -1,4 +1,4 @@
-//! Who wrote a record.
+//! Principals: who wrote a record.
 
 use std::fmt;
 use std::str::FromStr;
@@ -36,7 +36,7 @@ pub enum Principal {
 tagged!(Principal { User = 1, Node = 2 });
 
 impl Principal {
-    /// The prefix written before the name.
+    /// The prefix written before the name: `user` or `node`.
     fn prefix(&self) -> &'static str {
         match self {
             Self::User(_) => "user",

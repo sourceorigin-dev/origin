@@ -1,4 +1,4 @@
-//! Encoding, hashing and signing throughput of the object model.
+//! Benchmarks encoding, hashing and signing objects.
 
 use divan::counter::BytesCount;
 use divan::{Bencher, black_box};
@@ -12,7 +12,8 @@ fn main() {
     divan::main();
 }
 
-/// Hashing a blob: the cost of snapshotting a changed file.
+/// Benchmarks hashing a blob of `len` bytes, as snapshotting a changed
+/// file does.
 #[divan::bench(args = [4 * 1024, 1024 * 1024, 64 * 1024 * 1024])]
 fn hash_blob(bencher: Bencher<'_, '_>, len: usize) {
     let content = vec![0xa5_u8; len];
@@ -35,26 +36,26 @@ fn tree(len: usize) -> Tree {
         .collect()
 }
 
-/// Encoding and hashing a directory listing.
+/// Benchmarks encoding and hashing a tree of `len` entries.
 #[divan::bench(args = [16, 1024])]
 fn encode_tree(bencher: Bencher<'_, '_>, len: usize) {
     let tree = Object::Tree(tree(len));
     bencher.bench(|| black_box(&tree).encode());
 }
 
-/// Decoding a directory listing: the cost of every tree read.
+/// Benchmarks decoding a tree of `len` entries, as every tree read does.
 #[divan::bench(args = [16, 1024])]
 fn decode_tree(bencher: Bencher<'_, '_>, len: usize) {
     let encoded = Object::Tree(tree(len)).encode();
     bencher.bench(|| black_box(&encoded).decode_as::<Tree>().unwrap());
 }
 
-/// An id of any type, from a seed.
+/// Builds an id of any type by hashing `seed` as a blob.
 fn id<T: From<ObjectId>>(seed: &str) -> T {
     EncodedObject::blob(seed.as_bytes()).id().into()
 }
 
-/// A CI result with declared inputs: the most common record.
+/// Builds a CI result with declared inputs, the most common statement.
 fn statement() -> Statement {
     Statement {
         subject: RecordId::Revision(id("revision")),
@@ -76,21 +77,21 @@ fn statement() -> Statement {
     }
 }
 
-/// Encoding and hashing a statement.
+/// Benchmarks encoding and hashing a statement.
 #[divan::bench]
 fn encode_statement(bencher: Bencher<'_, '_>) {
     let statement = statement();
     bencher.bench(|| black_box(&statement).encode());
 }
 
-/// Decoding a statement: the cost of every statement read.
+/// Benchmarks decoding a statement, as every statement read does.
 #[divan::bench]
 fn decode_statement(bencher: Bencher<'_, '_>) {
     let encoded = statement().encode();
     bencher.bench(|| black_box(&encoded).decode_as::<Statement>().unwrap());
 }
 
-/// Encoding and hashing a revision.
+/// Benchmarks encoding and hashing a revision.
 #[divan::bench]
 fn encode_revision(bencher: Bencher<'_, '_>) {
     let revision = Revision {
@@ -117,7 +118,8 @@ fn acceptance() -> AcceptanceBody {
     }
 }
 
-/// Signing an acceptance: once per landing, by the target's authority.
+/// Benchmarks signing an acceptance. A target's authority signs one per
+/// landing.
 #[divan::bench]
 fn sign_acceptance(bencher: Bencher<'_, '_>) {
     let key = NodeKey::from_bytes(&[42; 32]);
@@ -127,7 +129,8 @@ fn sign_acceptance(bencher: Bencher<'_, '_>) {
         .bench_values(|body| body.sign(&key));
 }
 
-/// Verifying an acceptance: once per acceptance of every chain fetched.
+/// Benchmarks verifying an acceptance. A fetch verifies each acceptance
+/// of every chain it brings.
 #[divan::bench]
 fn verify_acceptance(bencher: Bencher<'_, '_>) {
     let key = NodeKey::from_bytes(&[42; 32]);

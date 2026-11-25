@@ -20,7 +20,7 @@ impl RepoPath {
         Self(String::new())
     }
 
-    /// Validates a `/`-separated path. Leading and trailing slashes are
+    /// Parses a `/`-separated path. Leading and trailing slashes are
     /// ignored, so `/src/` is `src`.
     ///
     /// # Errors
@@ -85,8 +85,8 @@ impl FromStr for RepoPath {
     }
 }
 
-/// Encoded as a name. Only the normalized form decodes, so each path has one
-/// encoding.
+/// Encoded as a name. Only the normalized form decodes, so each path has
+/// one encoding.
 impl Field for RepoPath {
     fn write(&self, out: &mut Vec<u8>) {
         Reader::write_str(&self.0, out);

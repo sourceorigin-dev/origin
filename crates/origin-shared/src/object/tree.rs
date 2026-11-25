@@ -8,9 +8,9 @@ use crate::{ObjectId, TreeId};
 
 names! {
     /// The name of an entry in a tree: one path component. It isn't empty,
-    /// `.` or `..`, and contains no `/` or NUL byte. The names of repository
+    /// `.` or `..`, and contains no `/` or NUL byte. Names of repository
     /// metadata directories are reserved, compared case-insensitively so they
-    /// cannot be smuggled in on case-insensitive file systems.
+    /// can't slip in on case-insensitive file systems.
     EntryName("file name");
 }
 
@@ -25,8 +25,8 @@ impl EntryName {
             && !Self::is_reserved(name)
     }
 
-    /// Whether a name belongs to repository metadata, which working copies
-    /// skip and trees cannot contain.
+    /// Whether a name is reserved for repository metadata. Working copies
+    /// skip such names, and trees cannot contain them.
     #[must_use]
     pub fn is_reserved(name: &str) -> bool {
         Self::RESERVED
@@ -50,7 +50,7 @@ pub enum EntryKind {
 }
 
 impl EntryKind {
-    /// The kind a tag byte encodes, as in tree encodings.
+    /// Returns the kind a tag byte encodes in a tree.
     ///
     /// # Errors
     ///
@@ -136,7 +136,7 @@ impl TreeEntry {
 /// A directory listing, sorted by name.
 ///
 /// Encoded as its entries in order, each `kind:u8 name 0x00 id:[u8; 32]`,
-/// up to the end of the object: a tree is never a field of another record.
+/// up to the end of the object. A tree is never a field of another record.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Tree {
     entries: BTreeMap<EntryName, TreeEntry>,

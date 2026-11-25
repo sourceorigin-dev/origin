@@ -32,7 +32,7 @@ macro_rules! ids {
                 hex::string(&self.0)
             }
 
-            /// An abbreviated id for display to humans.
+            /// The first 12 hex digits of the id, for display to humans.
             #[must_use]
             pub fn short(&self) -> String {
                 let mut hex = self.to_hex();
@@ -76,9 +76,9 @@ macro_rules! ids {
     )*};
 }
 
-/// Defines ids of objects of one kind. They convert to and from
-/// [`ObjectId`]: converting from one vouches for the kind, which reading the
-/// object checks.
+/// Defines ids of objects of one kind, which convert to and from
+/// [`ObjectId`]. Converting from an [`ObjectId`] doesn't check the kind;
+/// reading the object does.
 macro_rules! object_ids {
     ($($(#[$meta:meta])* $name:ident $(=> $record:ty)?;)*) => {
         ids! { $($(#[$meta])* $name(32);)* }
@@ -105,16 +105,16 @@ macro_rules! object_ids {
 ids! {
     /// Identifies an object by the BLAKE3 hash of its encoding.
     ///
-    /// The typed ids ([`TreeId`], [`RevisionId`], ...) name objects of one
-    /// kind, and convert to and from this one.
+    /// The typed ids ([`TreeId`], [`RevisionId`], ...) identify objects of one
+    /// kind and convert to and from this one.
     ObjectId(32);
 
-    /// Identifies a change across all its revisions: random, so two changes
-    /// never share one, whoever creates them and wherever.
+    /// Identifies a change across all its revisions. It is random, so two
+    /// changes never share one.
     ChangeId(16);
 
-    /// Identifies a target: the hash of its name, so user-chosen names never
-    /// become file names.
+    /// Identifies a target by the hash of its name. Targets are stored under
+    /// their id, so user-chosen names never become file names.
     TargetId(32);
 
     /// A BLAKE3 hash of something that isn't an object, such as a check's
@@ -128,7 +128,8 @@ object_ids! {
     /// Identifies an attachment: a revision's description or a statement's
     /// payload.
     AttachmentId;
-    /// Identifies a tree, the root of which is a snapshot.
+    /// Identifies a tree. A snapshot is identified by the id of its root
+    /// tree.
     TreeId => Tree;
     /// Identifies a revision.
     RevisionId => Revision;
@@ -138,14 +139,15 @@ object_ids! {
     AcceptanceId => Acceptance;
 }
 
-/// The id of a record of one type, which reading the record returns.
+/// An id of a record of one known type: reading it returns a
+/// [`TypedId::Record`].
 pub trait TypedId: Copy + Into<ObjectId> {
     /// The record the id names.
     type Record: Record;
 }
 
 impl ObjectId {
-    /// Hashes an object encoding.
+    /// Hashes an object's encoding into its id.
     pub(crate) fn hash(encoded: &[u8]) -> Self {
         Self(*blake3::hash(encoded).as_bytes())
     }
@@ -173,8 +175,8 @@ impl Digest {
 }
 
 impl TargetId {
-    /// The BLAKE3 key derivation context, which keeps target ids apart from
-    /// every other hash.
+    /// The BLAKE3 key derivation context for target ids, which keeps them
+    /// apart from every other hash.
     const CONTEXT: &str = "origin 2026-10 target name";
 
     /// The id of the target named `name`.
@@ -193,22 +195,22 @@ pub struct ParseIdError {
     pub input: String,
 }
 
-/// Lowercase hex.
+/// Lowercase hex encoding and decoding.
 pub(crate) mod hex {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
 
     /// Number of hex digits a short id has.
     pub const SHORT_LEN: usize = 12;
 
-    /// `bytes` as a string of lowercase hex.
+    /// Encodes `bytes` as a string of lowercase hex.
     pub fn string(bytes: &[u8]) -> String {
         let mut hex = vec![0; 2 * bytes.len()];
         encode(bytes, &mut hex);
         hex.into_iter().map(char::from).collect()
     }
 
-    /// Writes the two digits of each byte of `bytes` to `out`, which is
-    /// twice as long.
+    /// Writes each byte of `bytes` to `out` as two lowercase hex digits.
+    /// `out` must be twice as long as `bytes`.
     pub fn encode(bytes: &[u8], out: &mut [u8]) {
         for (byte, pair) in bytes.iter().zip(out.as_chunks_mut::<2>().0) {
             *pair = [
@@ -231,7 +233,8 @@ pub(crate) mod hex {
             .collect()
     }
 
-    /// Parses exactly `2 * N` hex digits, in either case.
+    /// Parses exactly `2 * N` hex digits, in either case. Returns `None` for
+    /// anything else.
     pub fn decode<const N: usize>(input: &str) -> Option<[u8; N]> {
         let input = input.as_bytes();
         if input.len() != 2 * N {

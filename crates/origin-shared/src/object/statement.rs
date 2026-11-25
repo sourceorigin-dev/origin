@@ -23,20 +23,20 @@ pub struct Statement {
     pub subject: RecordId,
     /// What kind of claim it is.
     pub kind: Kind,
-    /// The outcome, the only field core interprets.
+    /// The outcome. It is the only field origin itself interprets.
     pub verdict: Option<Verdict>,
     /// Who makes the claim.
     pub issuer: Principal,
-    /// What the claim depended on, which lets it be promoted to revisions
-    /// with the same inputs.
+    /// What the claim depended on. Statements with inputs can be promoted to
+    /// revisions with the same input digest.
     pub inputs: Option<Inputs>,
     /// Free-form details, defined by whoever owns the kind.
     pub payload: Option<AttachmentId>,
     /// A statement from the same issuer that this one replaces.
     pub supersedes: Option<StatementId>,
-    /// The statement this one promotes: its kind, verdict, inputs and
-    /// payload hold here too, because the input digests are equal. The
-    /// issuer is whoever promoted it, the original's stays on the original.
+    /// The statement this one promotes. Its kind, verdict, inputs and
+    /// payload also hold here, because the input digests are equal. The issuer
+    /// is whoever promoted it; the original keeps its own issuer.
     pub promoted_from: Option<StatementId>,
 }
 
@@ -56,13 +56,15 @@ impl Record for Statement {
 }
 
 impl Statement {
-    /// Given the claims about one record that nothing superseded, drops
-    /// each promotion whose original's kind and issuer the record also has
-    /// a statement of that isn't a promotion, a result or a withdrawal,
-    /// whichever came first: a result that ran there wins. `pair` gives a
-    /// claim's statement, and the one whose claim it makes: itself, or a
-    /// promotion's original. A superseded statement must not be among
-    /// `claims`, or it would drop a promotion that still holds.
+    /// Removes the promotions that a direct statement replaces. `claims` are
+    /// the unsuperseded statements about one record. Each promotion is removed
+    /// if `claims` also holds a statement that isn't a promotion (a result or a
+    /// withdrawal) with the kind and issuer of the promotion's original: a
+    /// result that ran on the record wins over one promoted to it.
+    ///
+    /// `pair` returns a claim's statement and the statement whose claim it
+    /// makes: itself, or a promotion's original. `claims` must not hold a
+    /// superseded statement, or a promotion that still holds could be removed.
     pub fn drop_replaced_promotions<T>(
         claims: &mut Vec<T>,
         pair: impl Fn(&T) -> (&Statement, &Statement),
@@ -80,24 +82,27 @@ impl Statement {
         });
     }
 
-    /// The BLAKE3 key derivation context of promotion groups.
+    /// The BLAKE3 key derivation context for promotion groups.
     const GROUP_CONTEXT: &str = "origin 2026-10 promotion group";
 
-    /// Whether the statement takes back the one it supersedes, claiming
-    /// nothing instead: it has no verdict, and its kind isn't a reserved
-    /// one, whose statements have none.
+    /// Whether the statement withdraws the one it supersedes, claiming
+    /// nothing instead: it supersedes a statement and has no verdict. A
+    /// statement of a reserved kind is never a withdrawal, since those have no
+    /// verdict anyway.
     #[must_use]
     pub fn withdraws(&self) -> bool {
         self.verdict.is_none() && self.supersedes.is_some() && !self.kind.is_reserved()
     }
 
-    /// Whether the statement can be promoted to other records: it declares
-    /// inputs and depends on nothing outside them, its subject has a
-    /// snapshot to take the input digest of (it isn't a statement), it
-    /// isn't itself a promotion, whose original is promoted instead, nor a
-    /// withdrawal, which claims nothing, and its kind isn't reserved:
-    /// abandonments, conflicts and divergence are about one revision,
-    /// whatever its inputs.
+    /// Whether the statement can be promoted to other records. It must:
+    ///
+    /// - declare inputs that aren't `external`;
+    /// - not be about a statement, which has no snapshot to take the input
+    ///   digest of;
+    /// - not be a promotion (its original is promoted instead) or a withdrawal
+    ///   (it claims nothing);
+    /// - not have a reserved kind: abandonments, conflicts and divergence are
+    ///   about one revision, whatever its inputs.
     #[must_use]
     pub fn is_promotable(&self) -> bool {
         self.promoted_from.is_none()
@@ -107,11 +112,12 @@ impl Statement {
             && self.inputs.as_ref().is_some_and(|inputs| !inputs.external)
     }
 
-    /// Identifies the statements this one is interchangeable with when
-    /// promoting, if it's promotable: those of its kind, from its issuer,
-    /// declaring the same inputs. A record needs only one result of a
-    /// group. It hashes the [`Inputs::spec`], then the kind and the issuer
-    /// as they're encoded.
+    /// The digest of the group of statements this one is interchangeable
+    /// with when promoting: those of its kind, from its issuer, declaring the
+    /// same inputs. A record needs only one result per group. Returns `None` if
+    /// the statement isn't promotable.
+    ///
+    /// It hashes the [`Inputs::spec`], then the encoded kind and issuer.
     #[must_use]
     pub fn promotion_group(&self) -> Option<Digest> {
         let inputs = self.inputs.as_ref().filter(|_| self.is_promotable())?;
@@ -139,7 +145,8 @@ pub enum RecordId {
 }
 
 impl RecordId {
-    /// The record, by kind and short id, for humans: `revision 3f1c9a2e07b4`.
+    /// Describes the record for humans by kind and short id, such as
+    /// `revision 3f1c9a2e07b4`.
     #[must_use]
     pub fn describe(&self) -> String {
         let (kind, id) = match self {
@@ -218,21 +225,23 @@ tagged!(RecordId {
 });
 
 names! {
-    /// The kind of a statement, namespaced by its owner: `ci.test`,
-    /// `review`, `core.conflict`. Dot-separated segments of lowercase ASCII
+    /// The kind of a statement, namespaced by its owner, such as `ci.test`,
+    /// `review` or `core.conflict`: dot-separated segments of lowercase ASCII
     /// letters, digits, `_` and `-`.
     Kind("statement kind");
 }
 
 impl Kind {
-    /// The author gave the change up. The payload says why.
+    /// The author gave up the change. The payload says why.
     pub const ABANDON: Self = Self(Cow::Borrowed("core.abandon"));
-    /// A landing could not rebase. The payload lists the conflicting paths.
+    /// A landing could not rebase the change. The payload lists the
+    /// conflicting paths.
     pub const CONFLICT: Self = Self(Cow::Borrowed("core.conflict"));
     /// The change has more than one head.
     pub const DIVERGENT: Self = Self(Cow::Borrowed("core.divergent"));
 
-    /// Whether the kind is reserved for origin itself: `core.` and below.
+    /// Whether the kind is reserved for origin itself: it starts with
+    /// `core.`.
     #[must_use]
     pub fn is_reserved(&self) -> bool {
         self.0.starts_with("core.")
@@ -314,7 +323,7 @@ impl Field for Verdict {
 /// same input digest.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
 pub struct Inputs {
-    /// The files and directories read, each covering everything under it.
+    /// The files and directories read. Each covers everything under it.
     pub paths: Vec<RepoPath>,
     /// The files and directories to read from the state of the record's target
     /// rather than from its snapshot, such as the definition of the checks in
@@ -323,12 +332,13 @@ pub struct Inputs {
     /// own target.
     #[serde(default)]
     pub target_paths: Vec<RepoPath>,
-    /// The check's command and configuration.
+    /// The hash of the check's command and configuration.
     pub definition: Digest,
-    /// The tools that ran it, such as the hash of `rustc -V`.
+    /// The hash of the tools that ran the check, such as the output of
+    /// `rustc -V`.
     pub toolchain: Digest,
-    /// Whether the claim also depended on things outside the snapshot, such
-    /// as the network, which makes it never promotable.
+    /// Whether the claim also depended on something outside the snapshot,
+    /// such as the network. Such a statement is never promoted.
     pub external: bool,
 }
 
