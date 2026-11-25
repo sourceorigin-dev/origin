@@ -10,6 +10,7 @@ publish = false
 [dependencies]
 anyhow.workspace = true
 origin-src = { workspace = true, features = ["fixture"] }
+sourceorigin-standard.workspace = true
 
 [lints]
 workspace = true

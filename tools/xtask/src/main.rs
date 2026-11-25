@@ -5,22 +5,26 @@
 //!   tree is a synthetic fixture of N files, or a copy of PATH.
 //! - `edit DIR COUNT`: appends a line to COUNT files spread across DIR. The
 //!   benchmarks use it to change files between runs.
+//! - `standard [--fix | report | rules | skills]`: checks the engineering
+//!   standard's rules ([`standard`]).
+
+mod standard;
 
 use std::fmt::Write as _;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitCode, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{env, iter};
 
 use anyhow::{Context, Result, bail, ensure};
 use origin_src::fixture::FixtureTree;
 
-fn main() -> Result<()> {
+fn main() -> Result<ExitCode> {
     let mut args = env::args().skip(1);
     match args.next().as_deref() {
-        Some("bench-git") => BenchGit::parse(args)?.run(),
+        Some("bench-git") => BenchGit::parse(args)?.run()?,
         Some("edit") => {
             let (Some(dir), Some(count)) = (args.next(), args.next()) else {
                 bail!("usage: cargo xtask edit DIR COUNT");
@@ -28,10 +32,19 @@ fn main() -> Result<()> {
             edit(
                 Path::new(&dir),
                 count.parse().context("COUNT must be a number")?,
-            )
+            )?;
         }
-        _ => bail!("usage: cargo xtask <bench-git [--files N] [--tree PATH] | edit DIR COUNT>"),
+        Some("standard") => return standard::Standard::parse(args)?.run(&root()),
+        _ => bail!(
+            "usage: cargo xtask <bench-git [--files N] [--tree PATH] | edit DIR COUNT | standard [--fix | report | rules | skills]>"
+        ),
     }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// The repository's root, two directories above this crate.
+fn root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
 /// Appends a line to `count` files spread evenly across `dir`, so that both
@@ -100,7 +113,7 @@ impl BenchGit {
         run(Command::new("hyperfine")
             .arg("--version")
             .stdout(Stdio::null()))?;
-        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let workspace = root();
         run(Command::new(env!("CARGO"))
             .args([
                 "build",
