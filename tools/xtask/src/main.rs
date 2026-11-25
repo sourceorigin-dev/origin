@@ -113,7 +113,6 @@ impl BenchGit {
     }
 
     fn run(&self) -> Result<()> {
-        // Fail before the slow build and setup if hyperfine is missing.
         run(Command::new("hyperfine")
             .arg("--version")
             .stdout(Stdio::null()))?;
@@ -128,7 +127,6 @@ impl BenchGit {
                 "origin",
             ])
             .current_dir(&workspace))?;
-        // Cargo resolves a relative target directory from where it runs.
         let target = workspace.join(env::var_os("CARGO_TARGET_DIR").unwrap_or("target".into()));
 
         let base = target.join("bench-git");
