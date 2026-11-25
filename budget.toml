@@ -2,7 +2,7 @@
 # README.
 [expect]
 origin-ci = 6
-origin-platform = 2
+origin-platform = 5
 origin-shared = 9
 origin-src = 11
 

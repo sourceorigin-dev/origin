@@ -36,6 +36,7 @@ conformance!(
     groups_never_hold_files_they_do_not_hold,
 );
 
+#[cfg(test)]
 mod suite {
     use std::env;
     use std::fs;
@@ -57,7 +58,7 @@ mod suite {
     /// them on several threads too, then checks that each file reads back and
     /// that no temporary file is left.
     pub fn batches_survive_reopen(platform: &impl Platform) {
-        let root = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().expect("a temporary directory is created");
         let path = |file: usize| root.path().join(format!("objects/{:02x}/{file}", file % 4));
         let files: Vec<usize> = (0..512).collect();
         let write = DurableWrite::new(platform);
@@ -68,77 +69,94 @@ mod suite {
                     for &file in chunk {
                         write
                             .stage(path(file), file.to_string().as_bytes())
-                            .unwrap();
+                            .expect("the file is staged");
                     }
                 });
             }
         });
-        write.commit().unwrap();
+        write.commit().expect("the write commits");
 
         for &file in &files {
-            assert_eq!(fs::read(path(file)).unwrap(), file.to_string().as_bytes());
+            assert_eq!(
+                fs::read(path(file)).expect("the file reads"),
+                file.to_string().as_bytes()
+            );
         }
         let published = fs::read_dir(root.path().join("objects"))
-            .unwrap()
-            .flat_map(|shard| fs::read_dir(shard.unwrap().path()).unwrap())
+            .expect("the directory lists")
+            .flat_map(|shard| {
+                fs::read_dir(shard.expect("the directory lists").path())
+                    .expect("the directory lists")
+            })
             .count();
         assert_eq!(published, files.len(), "no temporary file is left");
     }
 
     pub fn empty_batches_succeed(platform: &impl Platform) {
-        DurableWrite::new(platform).commit().unwrap();
+        DurableWrite::new(platform)
+            .commit()
+            .expect("the write commits");
     }
 
     pub fn syncing_a_missing_directory_fails(platform: &impl Platform) {
-        let root = tempfile::tempdir().unwrap();
-        let error = platform.sync_dir(&root.path().join("missing")).unwrap_err();
+        let root = tempfile::tempdir().expect("a temporary directory is created");
+        let error = platform
+            .sync_dir(&root.path().join("missing"))
+            .expect_err("the operation fails");
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
     }
 
     pub fn syncing_a_missing_file_in_a_batch_fails(platform: &impl Platform) {
-        let root = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().expect("a temporary directory is created");
         let missing = root.path().join("missing");
-        let error = platform.sync_batch([missing.as_path()]).unwrap_err();
+        let error = platform
+            .sync_batch([missing.as_path()])
+            .expect_err("the operation fails");
         assert_eq!(error.path, missing);
         assert_eq!(error.source.kind(), io::ErrorKind::NotFound);
     }
 
     pub fn exclusive_locks_exclude_everyone(platform: &impl Platform) {
-        let root = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().expect("a temporary directory is created");
         let path = root.path().join("lock");
-        let held = LockedFile::open(platform, &path, LockMode::Exclusive).unwrap();
+        let held =
+            LockedFile::open(platform, &path, LockMode::Exclusive).expect("the lock is taken");
         for mode in [LockMode::Exclusive, LockMode::Shared] {
-            let other = LockedFile::try_open(platform, &path, mode).unwrap();
+            let other = LockedFile::try_open(platform, &path, mode).expect("the lock is taken");
             assert!(other.is_none(), "{mode:?} lock taken while held");
         }
         drop(held);
         assert!(
             LockedFile::try_open(platform, &path, LockMode::Exclusive)
-                .unwrap()
+                .expect("the lock attempt does not fail")
                 .is_some()
         );
     }
 
     pub fn shared_locks_coexist(platform: &impl Platform) {
-        let root = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().expect("a temporary directory is created");
         let path = root.path().join("lock");
-        let _first = LockedFile::open(platform, &path, LockMode::Shared).unwrap();
-        let second = LockedFile::try_open(platform, &path, LockMode::Shared).unwrap();
+        let _first =
+            LockedFile::open(platform, &path, LockMode::Shared).expect("the lock is taken");
+        let second =
+            LockedFile::try_open(platform, &path, LockMode::Shared).expect("the lock is taken");
         assert!(second.is_some());
-        let exclusive = LockedFile::try_open(platform, &path, LockMode::Exclusive).unwrap();
+        let exclusive =
+            LockedFile::try_open(platform, &path, LockMode::Exclusive).expect("the lock is taken");
         assert!(exclusive.is_none());
     }
 
-    #[expect(clippy::expect_used, reason = "A test helper fails by panicking.")]
     pub fn blocking_locks_wait_for_release(platform: &impl Platform) {
-        let root = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().expect("a temporary directory is created");
         let path = root.path().join("lock");
-        let held = LockedFile::open(platform, &path, LockMode::Exclusive).unwrap();
+        let held =
+            LockedFile::open(platform, &path, LockMode::Exclusive).expect("the lock is taken");
         let (locked, waiter) = mpsc::channel();
         thread::scope(|scope| {
             scope.spawn(|| {
-                let _lock = LockedFile::open(platform, &path, LockMode::Exclusive).unwrap();
-                locked.send(()).unwrap();
+                let _lock = LockedFile::open(platform, &path, LockMode::Exclusive)
+                    .expect("the lock is taken");
+                locked.send(()).expect("the receiver is alive");
             });
             assert!(
                 waiter.recv_timeout(Duration::from_millis(100)).is_err(),
@@ -160,48 +178,52 @@ mod suite {
     /// child as a crash would, and checks that the lock is released.
     pub fn locks_are_released_when_the_holder_dies(platform: &impl Platform) {
         if let Some(path) = env::var_os(HOLDER) {
-            let _held = LockedFile::open(platform, Path::new(&path), LockMode::Exclusive).unwrap();
+            let _held = LockedFile::open(platform, Path::new(&path), LockMode::Exclusive)
+                .expect("the lock is taken");
             println!("{HELD}");
             // wall-clock: bounded, so the child cannot outlive a failed parent for long.
             thread::sleep(Duration::from_secs(60));
             return;
         }
 
-        let root = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().expect("a temporary directory is created");
         let path = root.path().join("lock");
-        let mut child = Command::new(env::current_exe().unwrap())
+        let mut child = Command::new(env::current_exe().expect("the test binary has a path"))
             .args(["locks_are_released_when_the_holder_dies", "--nocapture"])
             .env(HOLDER, &path)
             .stdout(Stdio::piped())
             .spawn()
-            .unwrap();
-        let output = BufReader::new(child.stdout.take().unwrap());
+            .expect("the child starts");
+        let output = BufReader::new(child.stdout.take().expect("stdout is piped"));
         assert!(
-            output.lines().any(|line| line.unwrap() == HELD),
+            output
+                .lines()
+                .any(|line| line.expect("the child writes valid lines") == HELD),
             "the child never held the lock"
         );
-        let other = LockedFile::try_open(platform, &path, LockMode::Exclusive).unwrap();
+        let other =
+            LockedFile::try_open(platform, &path, LockMode::Exclusive).expect("the lock is taken");
         assert!(other.is_none(), "locked while the child holds it");
 
-        child.kill().unwrap();
-        child.wait().unwrap();
-        let other = LockedFile::try_open(platform, &path, LockMode::Exclusive).unwrap();
+        child.kill().expect("the child is killed");
+        child.wait().expect("the child is reaped");
+        let other =
+            LockedFile::try_open(platform, &path, LockMode::Exclusive).expect("the lock is taken");
         assert!(other.is_some(), "the lock outlived its holder");
     }
 
     /// Clones a file and checks that the clone is independent of the
     /// original. On a file system that cannot clone, checks that the clone
     /// fails with `Unsupported` and leaves no file behind.
-    #[expect(clippy::panic, reason = "A test helper fails by panicking.")]
     pub fn clones_are_independent_or_unsupported(platform: &impl Platform) {
-        let root = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().expect("a temporary directory is created");
         let (from, to) = (root.path().join("from"), root.path().join("to"));
-        fs::write(&from, b"original").unwrap();
+        fs::write(&from, b"original").expect("the file is written");
         match platform.clone_file(&from, &to) {
             Ok(()) => {
-                assert_eq!(fs::read(&to).unwrap(), b"original");
-                fs::write(&to, b"changed").unwrap();
-                assert_eq!(fs::read(&from).unwrap(), b"original");
+                assert_eq!(fs::read(&to).expect("the file reads"), b"original");
+                fs::write(&to, b"changed").expect("the file is written");
+                assert_eq!(fs::read(&from).expect("the file reads"), b"original");
             }
             Err(CloneError::Unsupported { .. }) => {
                 assert!(!to.exists(), "a failed clone left a file behind");
@@ -214,34 +236,47 @@ mod suite {
     /// not `Unsupported`: callers copy on `Unsupported`, which would hide the
     /// failure.
     pub fn clone_failures_are_not_unsupported(platform: &impl Platform) {
-        let root = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().expect("a temporary directory is created");
         let (from, to) = (root.path().join("from"), root.path().join("to"));
-        let error = platform.clone_file(&from, &to).unwrap_err();
+        let error = platform
+            .clone_file(&from, &to)
+            .expect_err("the operation fails");
         assert!(
             matches!(error, CloneError::Io { .. }),
             "missing source: {error}"
         );
 
-        fs::write(&from, b"new").unwrap();
-        fs::write(&to, b"existing").unwrap();
-        let error = platform.clone_file(&from, &to).unwrap_err();
+        fs::write(&from, b"new").expect("the file is written");
+        fs::write(&to, b"existing").expect("the file is written");
+        let error = platform
+            .clone_file(&from, &to)
+            .expect_err("the operation fails");
         assert!(
             matches!(error, CloneError::Io { .. }),
             "existing target: {error}"
         );
-        assert_eq!(fs::read(&to).unwrap(), b"existing");
+        assert_eq!(fs::read(&to).expect("the file reads"), b"existing");
     }
 
     pub fn temp_dirs_are_local(platform: &impl Platform) {
-        let root = tempfile::tempdir().unwrap();
-        assert_eq!(platform.file_system(root.path()).unwrap(), FsKind::Local);
-        platform.check_writable(root.path()).unwrap();
+        let root = tempfile::tempdir().expect("a temporary directory is created");
+        assert_eq!(
+            platform
+                .file_system(root.path())
+                .expect("the path is inspected"),
+            FsKind::Local
+        );
+        platform
+            .check_writable(root.path())
+            .expect("the path is writable");
     }
 
     pub fn inspecting_a_missing_path_fails(platform: &impl Platform) {
-        let root = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().expect("a temporary directory is created");
         let missing = root.path().join("missing");
-        let error = platform.check_writable(&missing).unwrap_err();
+        let error = platform
+            .check_writable(&missing)
+            .expect_err("the operation fails");
         assert!(
             matches!(error, WritableError::Io(Error { op: Op::Inspect, ref path, .. }) if *path == missing),
             "{error:?}"
@@ -249,18 +284,20 @@ mod suite {
     }
 
     pub fn positioned_reads_share_a_file(platform: &impl Platform) {
-        let root = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().expect("a temporary directory is created");
         let path = root.path().join("pack");
         let contents: Vec<u8> = (0..=u8::MAX).collect();
-        fs::write(&path, &contents).unwrap();
-        let file = fs::File::open(&path).unwrap();
+        fs::write(&path, &contents).expect("the file is written");
+        let file = fs::File::open(&path).expect("the file opens");
         thread::scope(|scope| {
             for offset in [0_usize, 100, 200] {
                 let (file, contents) = (&file, &contents);
                 scope.spawn(move || {
                     let mut bytes = [0; 56];
-                    let at = u64::try_from(offset).unwrap();
-                    platform.read_exact_at(file, &mut bytes, at).unwrap();
+                    let at = u64::try_from(offset).expect("the offset fits");
+                    platform
+                        .read_exact_at(file, &mut bytes, at)
+                        .expect("the read succeeds");
                     assert_eq!(bytes, contents[offset..][..56]);
                 });
             }
@@ -268,7 +305,7 @@ mod suite {
         let mut past_the_end = [0; 2];
         let error = platform
             .read_exact_at(&file, &mut past_the_end, 255)
-            .unwrap_err();
+            .expect_err("the operation fails");
         assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
     }
 
