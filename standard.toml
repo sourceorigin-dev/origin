@@ -86,11 +86,6 @@ paths = [
     "crates/origin-platform/src/durability/mod.rs",
     "crates/origin-platform/src/durability/tests.rs",
     "crates/origin-platform/tests/conformance.rs",
-    "crates/origin-shared/src/object/encoding.rs",
-    "crates/origin-shared/src/object/statement.rs",
-    "crates/origin-shared/src/object/tests.rs",
-    "crates/origin-shared/src/object/tree.rs",
-    "crates/origin-shared/src/pack.rs",
 ]
 
 [deviations.doc-length]

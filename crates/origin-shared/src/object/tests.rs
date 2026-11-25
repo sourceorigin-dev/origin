@@ -124,8 +124,6 @@ fn acceptances_verify_only_against_their_signer() {
     assert_eq!(public.to_string().parse::<NodePublicKey>().unwrap(), public);
     assert!("ab".parse::<NodePublicKey>().is_err());
 
-    // Any change to the body breaks the signature: here the sequence
-    // number, right after the kind and the target id.
     let mut bytes = acceptance.encode().into_bytes();
     bytes[1 + 32] += 1;
     let tampered: Acceptance = EncodedObject::hash(bytes).decode_as().unwrap();
@@ -141,7 +139,6 @@ fn decode_rejects_non_canonical_fields() {
         edit(&mut bytes);
         EncodedObject::hash(bytes).decode_as::<Statement>()
     };
-    // The subject's tag is the byte after the kind.
     assert_eq!(
         decode(&|bytes| bytes[1] = 9),
         Err(DecodeError::UnknownTag {
@@ -149,8 +146,6 @@ fn decode_rejects_non_canonical_fields() {
             tag: 9
         })
     );
-    // `external` is the last byte before the payload, supersedes and
-    // the promoted statement.
     let external = encoded.bytes().len() - 2 * (1 + ObjectId::LEN) - 1 - 1;
     assert_eq!(
         decode(&|bytes| bytes[external] = 2),

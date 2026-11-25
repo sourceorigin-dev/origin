@@ -59,7 +59,6 @@ impl Pack {
         let mut seen = HashSet::new();
         while reader.remaining() > 0 {
             let id = ObjectId::from_bytes(reader.array()?);
-            // A length past the address space is past the end of the pack.
             let len = usize::try_from(reader.u64()?).unwrap_or(usize::MAX);
             let object = EncodedObject::verify(id, reader.take(len)?.to_vec())?;
             if seen.insert(id) {

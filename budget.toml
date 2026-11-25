@@ -4,3 +4,6 @@
 origin-platform = 2
 origin-shared = 3
 origin-src = 8
+
+[invariant]
+origin-shared = 1

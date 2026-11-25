@@ -216,7 +216,6 @@ mod tests {
     fn decode_rejects_non_canonical_trees() {
         let tree = Object::Tree(sample_tree()).encode();
         let entry_len = 1 + "a".len() + 1 + ObjectId::LEN;
-        // Move the first entry ("a") after the others.
         let mut swapped = vec![ObjectKind::Tree as u8];
         swapped.extend_from_slice(&tree.bytes()[1 + entry_len..]);
         swapped.extend_from_slice(&tree.bytes()[1..=entry_len]);
