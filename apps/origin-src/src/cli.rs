@@ -1,5 +1,6 @@
-//! The `origin` command line: argument parsing. The commands themselves are
-//! methods of [`Workspace`], which print their output.
+//! The `origin` command line's argument parsing. The commands themselves
+//! are methods of [`Workspace`] and [`ServerConfig`], which print their
+//! output.
 
 use std::convert::Infallible;
 use std::env;
@@ -14,6 +15,7 @@ use origin_shared::{Digest, Inputs, Kind, RepoPath, TargetName, Verdict};
 
 use crate::config::UserConfig;
 use crate::oplog::Actor;
+use crate::server::ServerConfig;
 use crate::workspace::{Annotated, Payload, Workspace};
 
 /// A modern, git-compatible source control system.
@@ -32,8 +34,30 @@ enum Command {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
+    /// Serve repositories over HTTP, acting as their authority.
+    Serve {
+        /// The server configuration file.
+        #[arg(short, long, default_value = "origin-server.toml")]
+        config: PathBuf,
+    },
+    /// Manage the repositories a server hosts.
+    #[command(subcommand)]
+    Repo(RepoCommand),
     #[command(flatten)]
     Workspace(WorkspaceCommand),
+}
+
+#[derive(Debug, Subcommand)]
+enum RepoCommand {
+    /// Create a repository with no working copy, for a server to host. The
+    /// server's node becomes the authority of `policy` and `main`.
+    Create {
+        /// Where to create it.
+        path: PathBuf,
+        /// The server configuration file.
+        #[arg(short, long, default_value = "origin-server.toml")]
+        config: PathBuf,
+    },
 }
 
 /// Commands run in the repository containing the current directory. Those
@@ -424,6 +448,13 @@ impl Cli {
     ///
     /// Fails if the command fails; the error is meant for the user.
     pub fn run(self) -> Result<()> {
+        match self.command {
+            Command::Serve { config } => return ServerConfig::load(&config)?.serve(),
+            Command::Repo(RepoCommand::Create { path, config }) => {
+                return ServerConfig::load(&config)?.create_repo(&path);
+            }
+            Command::Init { .. } | Command::Workspace(_) => {}
+        }
         let config = UserConfig::load()?;
         // The op log records the command line, without the program's name,
         // as text: an argument that isn't UTF-8, such as a path, is never
@@ -438,6 +469,7 @@ impl Cli {
                 Workspace::init(&path, config, &actor)?;
             }
             Command::Workspace(command) => command.run(config, &actor)?,
+            Command::Serve { .. } | Command::Repo(_) => unreachable!("run above"),
         }
         Ok(())
     }
