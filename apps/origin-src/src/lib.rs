@@ -1,5 +1,5 @@
-//! The origin command line and server. Both share the repository logic in
-//! this library; `main.rs` only parses arguments and dispatches.
+//! The origin command line and server. Both use the repository logic in
+//! this library; `main.rs` only parses arguments and runs the command.
 
 pub mod ancestry;
 pub mod annotations;

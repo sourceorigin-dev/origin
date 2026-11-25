@@ -35,7 +35,7 @@ pub struct Cli {
 enum Command {
     /// Create a repository, with the targets `policy` and `main`.
     Init {
-        /// Where to create it.
+        /// The directory to create it in.
         #[arg(default_value = ".")]
         path: PathBuf,
     },
@@ -77,7 +77,7 @@ enum RepoCommand {
     /// Create a repository with no working copy, for a server to host. The
     /// server's node becomes the authority of `policy` and `main`.
     Create {
-        /// Where to create it.
+        /// The directory to create it in.
         path: PathBuf,
         /// The server configuration file.
         #[arg(short, long, default_value = "origin-server.toml")]
@@ -114,16 +114,16 @@ enum TokenCommand {
     },
 }
 
-/// Commands run in the repository containing the current directory. Those
-/// that read the working copy snapshot it first. Changes are named by a
-/// unique prefix of their id, or `@` for the working copy's.
+/// Commands that run in the repository containing the current directory.
+/// Commands that read the working copy snapshot it first. A change is
+/// named by a unique prefix of its id, or by `@` for the working copy's.
 #[derive(Debug, Subcommand)]
 enum WorkspaceCommand {
     /// Show the working copy's change and the files it changes.
     Status,
     /// Show the working copy's changes, line by line.
     Diff,
-    /// Show a change and its diff: the working copy's by default.
+    /// Show a change and its diff (the working copy's change by default).
     Show {
         /// The change.
         change: Option<String>,
@@ -137,7 +137,7 @@ enum WorkspaceCommand {
         #[arg(long)]
         on: Option<TargetName>,
     },
-    /// Describe what the current change is for.
+    /// Set the description of the current change.
     Describe {
         /// The description.
         description: String,
@@ -147,16 +147,17 @@ enum WorkspaceCommand {
         /// The change.
         change: String,
     },
-    /// Give a change up, keeping it and the reason for others to see.
+    /// Abandon a change, recording why. The change stays visible to others.
     Abandon {
-        /// The change: the working copy's by default, which then starts a
-        /// new change where it started.
+        /// The change (the working copy's by default). Abandoning the working
+        /// copy's change starts a new change on the same base.
         change: Option<String>,
-        /// Why it was given up.
+        /// Why the change was abandoned.
         #[arg(long)]
         reason: String,
     },
-    /// End a change's divergence, with a revision evolving from every head.
+    /// End a change's divergence with a new revision that evolves from all
+    /// its heads.
     Converge {
         /// The change.
         change: String,
@@ -167,7 +168,8 @@ enum WorkspaceCommand {
         #[arg(required = true)]
         paths: Vec<RepoPath>,
     },
-    /// Show the working copy's changes and the target they're on.
+    /// Show the working copy's stack of changes and the history of the
+    /// target it's on.
     Log {
         /// Show this target's history instead.
         target: Option<TargetName>,
@@ -186,8 +188,9 @@ enum WorkspaceCommand {
     Index(IndexCommand),
     /// Issue a statement about a revision, such as a check result or a
     /// review, or with `--on`, about another statement, such as a `flaky`
-    /// mark on a failed check, superseding your previous one of the same
-    /// kind about it, or withdraw that one.
+    /// mark on a failed check. It supersedes your previous statement of the
+    /// same kind about the same subject. `--withdraw` takes that one back
+    /// instead.
     #[command(
         override_usage = "origin annotate [OPTIONS] <--pass|--fail|--neutral|--withdraw> \
                                 <REV> <KIND>\n       origin annotate [OPTIONS] \
@@ -323,16 +326,17 @@ enum TargetCommand {
 
 #[derive(Debug, Args)]
 struct AnnotateArgs {
-    /// The revision, `@`, a change for its head, or a revision; with
-    /// `--on`, the kind instead.
+    /// The revision (`@`, a change for its head, or a revision), or with
+    /// `--on`, the kind.
     #[arg(value_name = "REV|KIND")]
     first: String,
-    /// What kind of statement, such as `ci.test` or `review`, after a
-    /// revision.
+    /// The kind of statement, such as `ci.test` or `review`, when the first
+    /// argument is a revision.
     #[arg(value_name = "KIND")]
     kind: Option<String>,
-    /// The statement it's about instead of a revision, by a unique prefix
-    /// of its id. It's never promoted, so it declares no inputs.
+    /// The statement to annotate instead of a revision, by a unique prefix
+    /// of its id. A statement about a statement is never promoted, so it
+    /// takes no inputs.
     #[arg(
         long,
         value_name = "STATEMENT",
@@ -341,8 +345,8 @@ struct AnnotateArgs {
     on: Option<String>,
     #[command(flatten)]
     verdict: VerdictArgs,
-    /// Instead of a verdict, take back your current statement of this kind
-    /// about the revision or statement: the details may say why.
+    /// Take back your current statement of this kind about the subject
+    /// instead of giving a verdict. The details may say why.
     #[arg(
         long,
         group = "VerdictArgs",
@@ -353,15 +357,14 @@ struct AnnotateArgs {
     /// to revisions on the same target where they are the same.
     #[arg(long, num_args = 1..)]
     inputs: Vec<RepoPath>,
-    /// The check's command and configuration: text, or the hex digest of
-    /// it.
+    /// The check's command and configuration, as text or as its hex digest.
     #[arg(long, requires = "inputs")]
     definition: Option<DigestArg>,
-    /// The tools that ran it, such as the output of `rustc -V`: text, or the
-    /// hex digest of it.
+    /// The tools that ran the check, such as the output of `rustc -V`, as
+    /// text or as its hex digest.
     #[arg(long, requires = "inputs")]
     toolchain: Option<DigestArg>,
-    /// The claim also depended on things outside the inputs, such as the
+    /// The result also depended on things outside the inputs, such as the
     /// network, so it is never promoted.
     #[arg(long, requires = "inputs")]
     external: bool,
@@ -369,14 +372,14 @@ struct AnnotateArgs {
     payload: PayloadArgs,
 }
 
-/// At most one source of details.
+/// The statement's details, from at most one source.
 #[derive(Debug, Args)]
 #[group(multiple = false)]
 struct PayloadArgs {
     /// Details as text, such as a review's message.
     #[arg(short, long)]
     message: Option<String>,
-    /// A file holding details, such as a log, or `-` to read them from
+    /// A file holding the details, such as a log, or `-` to read them from
     /// standard input.
     #[arg(long)]
     payload: Option<PathBuf>,
@@ -389,7 +392,7 @@ impl PayloadArgs {
     }
 }
 
-/// Exactly one verdict.
+/// The statement's verdict: exactly one is required.
 #[derive(Debug, Args)]
 #[group(required = true, multiple = false)]
 struct VerdictArgs {
@@ -399,7 +402,7 @@ struct VerdictArgs {
     /// The check failed, or you object.
     #[arg(long)]
     fail: bool,
-    /// Neither: informational.
+    /// Neither: the statement is informational.
     #[arg(long)]
     neutral: bool,
 }
@@ -415,13 +418,13 @@ impl VerdictArgs {
 }
 
 impl AnnotateArgs {
-    /// What the statement is about, and its kind: the revision, then the
-    /// kind, or with `--on`, the kind alone.
+    /// Returns what the statement is about and its kind. Without `--on`, the
+    /// arguments are the revision, then the kind; with `--on`, just the kind.
     ///
     /// # Errors
     ///
-    /// Fails, as parsing does, if the arguments aren't one of those, or the
-    /// kind isn't a valid one.
+    /// Returns a clap error if the arguments match neither form, or the kind
+    /// is invalid.
     fn subject(&self) -> Result<(Annotated<'_>, Kind), clap::Error> {
         let (annotated, kind) = match (&self.on, &self.kind) {
             (Some(on), None) => (Annotated::Statement(on), &self.first),
@@ -445,13 +448,13 @@ impl AnnotateArgs {
         Ok((annotated, kind))
     }
 
-    /// The verdict, or `None` to withdraw.
+    /// The verdict, or `None` for `--withdraw`.
     fn verdict(&self) -> Option<Verdict> {
         (!self.withdraw).then(|| self.verdict.verdict())
     }
 
-    /// The inputs declared, if any. Without a definition or toolchain, they
-    /// are the digest of nothing.
+    /// The declared inputs, or `None` without `--inputs`. A missing
+    /// definition or toolchain is the digest of empty input.
     fn inputs(&self) -> Option<Inputs> {
         let digest = |arg: &Option<DigestArg>| arg.map_or_else(|| Digest::of(b""), |arg| arg.0);
         (!self.inputs.is_empty()).then(|| Inputs {
@@ -464,7 +467,8 @@ impl AnnotateArgs {
     }
 }
 
-/// A digest given as its hex, or as the text it's the digest of.
+/// A digest argument: valid hex is parsed as a digest, and any other
+/// text is hashed.
 #[derive(Clone, Copy, Debug)]
 struct DigestArg(Digest);
 
@@ -506,13 +510,13 @@ enum WorkspacesCommand {
 }
 
 impl Cli {
-    /// Parses the command line, then checks what parsing can't: an
-    /// `annotate`'s arguments, whose meaning depends on `--on`. Exits as a
-    /// parse error does on either, with the usage.
+    /// Parses the command line, then checks the `annotate` arguments, which
+    /// clap can't check because their meaning depends on `--on`. On an
+    /// error, prints it with the usage and exits, as clap does.
     ///
     /// # Panics
     ///
-    /// Never: `annotate` is a subcommand.
+    /// Never: `annotate` is always a subcommand.
     #[must_use]
     #[expect(clippy::expect_used, reason = "`annotate` is a subcommand.")]
     pub fn parse_checked() -> Self {
@@ -533,7 +537,8 @@ impl Cli {
     ///
     /// # Errors
     ///
-    /// Fails if the command fails; the error is meant for the user.
+    /// Fails if the configuration cannot be loaded or the command fails. The
+    /// error is meant for the user.
     pub fn run(self) -> Result<()> {
         match self.command {
             Command::Serve { config } => return ServerConfig::load(&config)?.serve(),

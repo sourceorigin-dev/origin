@@ -83,12 +83,12 @@ pub struct Workspace {
     lock: Option<LockedFile>,
 }
 
-/// The working copy as of a snapshot.
+/// The working copy as found by a snapshot.
 struct WorkingCopy {
     id: RevisionId,
     revision: Revision,
-    /// The revision's record, if recording the draft made a new revision,
-    /// which is not written yet.
+    /// The encoded new revision, if recording the draft made one and it is
+    /// not written yet.
     unsaved: Option<EncodedObject>,
     /// The revision's unresolved conflicts. The files still have them, unless the
     /// working copy is behind its change.
@@ -96,8 +96,8 @@ struct WorkingCopy {
     /// The record index as of the snapshot. Once the draft is saved, it has the new
     /// revision.
     index: Index,
-    /// The files as the snapshot found them: the draft, which is the
-    /// revision's snapshot once recorded.
+    /// The files the snapshot found: the draft. Once recorded, this is the
+    /// revision's snapshot.
     files: TreeId,
     /// The stat cache of the snapshot, which tells whether files were edited since.
     cache: StatCache,
@@ -170,8 +170,8 @@ impl fmt::Display for Moving {
 }
 
 impl WorkingCopy {
-    /// The change `prefix` names: `@` for the working copy's, or a unique
-    /// prefix of its id.
+    /// Finds the change `prefix` names: `@` for the working copy's change,
+    /// or a unique prefix of its id.
     fn find_change(&self, prefix: &str) -> Result<ChangeId, FindChangeError> {
         if prefix == "@" {
             return Ok(self.revision.change);
@@ -202,9 +202,9 @@ impl Workspace {
     /// copy holds locked.
     const LOCK: &str = "lock";
 
-    /// `origin init`: creates a repository in `root`, with the `policy`
-    /// target naming this node the authority of `policy` and `main`, an
-    /// empty `main`, and a first change on top of it.
+    /// `origin init`: creates a repository in `root` with a `policy` target
+    /// that makes this node the authority of `policy` and `main`, an empty
+    /// `main`, and a first change on top of `main`.
     ///
     /// # Errors
     ///
@@ -433,8 +433,8 @@ impl Workspace {
         })
     }
 
-    /// Snapshots the working copy into a draft, recording nothing, for the
-    /// commands that only read it.
+    /// Snapshots the working copy into a draft without recording it, for
+    /// commands that only read the working copy.
     fn snapshot(&mut self) -> Result<WorkingCopy, WorkspaceError> {
         let held = self.store.hold_objects()?;
         let revision: Revision = self.store.get(self.revision)?;
@@ -979,8 +979,8 @@ impl Workspace {
         )
     }
 
-    /// `origin show [<change>]`: prints a change's head, or each of them if
-    /// it diverged, and its diff. Shows the working copy by default.
+    /// `origin show [<change>]`: prints a change's head (or each head, if it
+    /// diverged) and its diff. Shows the working copy's change by default.
     ///
     /// # Errors
     ///
@@ -1087,7 +1087,7 @@ impl Workspace {
     }
 
     /// `origin describe <description>`: replaces the current change's
-    /// description, with a new revision.
+    /// description by saving a new revision.
     ///
     /// # Errors
     ///
@@ -1348,13 +1348,14 @@ impl Workspace {
     }
 
     /// `origin log [<target>]`: prints the working copy's stack of changes
-    /// down to the target it's on, then the target's acceptances, newest
-    /// first. With a target, prints that target's acceptances instead,
-    /// under the stack if it's on that target.
+    /// down to the target it's on, then that target's acceptances, newest
+    /// first. Given a target, prints that target's acceptances instead,
+    /// under the stack only if the stack is on that target. `limit` caps
+    /// the number of acceptances.
     ///
     /// # Errors
     ///
-    /// Fails if the target doesn't exist, or a record cannot be read.
+    /// Fails if the target doesn't exist or a record cannot be read.
     pub fn log(
         &mut self,
         target: Option<TargetName>,
@@ -1448,7 +1449,7 @@ impl Workspace {
         Ok(())
     }
 
-    /// `origin index rebuild`: reconstructs the index from the store.
+    /// `origin index rebuild`: rebuilds the index from the store.
     ///
     /// # Errors
     ///
@@ -1459,7 +1460,7 @@ impl Workspace {
         Ok(())
     }
 
-    /// The head of a change that didn't diverge.
+    /// Returns the head of a change, or an error if the change diverged.
     fn single_head(index: &Index, change: ChangeId) -> Result<RevisionId, WorkspaceError> {
         match index.heads(change)[..] {
             [head] => Ok(head),
@@ -1493,7 +1494,7 @@ impl Workspace {
         })
     }
 
-    /// A revision's change and summary.
+    /// A revision's change and summary, on one line.
     fn headline(&self, revision: &Revision) -> Result<String, WorkspaceError> {
         Ok(format!(
             "{} {}",
@@ -1502,7 +1503,8 @@ impl Workspace {
         ))
     }
 
-    /// Marks a divergent or abandoned change.
+    /// Returns the marks for a change, ` (divergent)` and ` (abandoned)`,
+    /// or an empty string if neither applies.
     fn flags(&self, index: &Index, change: ChangeId) -> Result<String, WorkspaceError> {
         let heads = index.heads(change);
         let mut flags = String::new();
@@ -1547,7 +1549,8 @@ impl Workspace {
         Ok(abandonments)
     }
 
-    /// Explains a divergent change's heads, and how to converge them.
+    /// Prints a divergent change's heads and how to converge them. Prints
+    /// nothing if the change has one head.
     fn print_divergence(index: &Index, change: ChangeId) {
         let heads = index.heads(change);
         if heads.len() > 1 {
@@ -1580,7 +1583,7 @@ impl Workspace {
         }
     }
 
-    /// A target and position, such as `main #3`.
+    /// Describes an acceptance by its target and position, such as `main #3`.
     fn describe_acceptance(&self, id: AcceptanceId) -> Result<String, WorkspaceError> {
         let acceptance = self.store.get(id)?;
         let body = acceptance.body();
@@ -1613,7 +1616,7 @@ pub enum WorkspaceError {
     Divergent {
         /// The change.
         change: ChangeId,
-        /// Its heads.
+        /// The change's heads.
         heads: Vec<RevisionId>,
     },
     /// The working copy is behind its change, and the command would build on it.
@@ -1648,7 +1651,7 @@ pub enum WorkspaceError {
     /// A change id prefix doesn't name one change.
     #[error(transparent)]
     FindChange(#[from] FindChangeError),
-    /// The working copy file isn't a revision id.
+    /// The `workspace` file doesn't hold a revision id.
     #[error("{} is not a revision id", .0.display())]
     Malformed(PathBuf),
     /// A workspace's creation never finished.
@@ -1680,7 +1683,7 @@ pub enum WorkspaceError {
         /// The underlying error.
         source: io::Error,
     },
-    /// The operating system has no randomness for a change id.
+    /// The operating system cannot supply randomness for a change id.
     #[error("cannot generate a change id")]
     Random(#[source] getrandom::Error),
     /// The user's configuration is unusable.
@@ -1698,7 +1701,8 @@ pub enum WorkspaceError {
     /// A statement id prefix doesn't name one statement.
     #[error(transparent)]
     FindStatement(#[from] FindError<StatementId>),
-    /// A prefix names a change and another revision than its head.
+    /// A prefix names both a change and a revision other than the change's
+    /// head.
     #[error(
         "`{prefix}` names both change {} and revision {}: give more of either id",
         change.short(),
@@ -1720,8 +1724,8 @@ pub enum WorkspaceError {
         .0.display()
     )]
     UnreadableMove(PathBuf),
-    /// `annotate --withdraw` found only a promotion of the user's
-    /// statement, which they withdraw about the revision it's about.
+    /// `annotate --withdraw` found only a promotion of the user's statement.
+    /// The user must withdraw the original, on the revision it is about.
     #[error(
         "your `{kind}` result about revision {} is promoted from statement {}, about revision {}: \
          withdraw it there, with `origin annotate {} {kind} --withdraw`",
@@ -1733,14 +1737,14 @@ pub enum WorkspaceError {
     WithdrawPromoted {
         /// The kind.
         kind: Kind,
-        /// The revision it's promoted to.
+        /// The revision the statement was promoted to.
         revision: RevisionId,
-        /// The user's statement it promotes.
+        /// The user's original statement.
         original: StatementId,
-        /// The revision that one is about.
+        /// The revision the original statement is about.
         from: RevisionId,
     },
-    /// Only origin itself issues statements of `core.` kinds.
+    /// Statements of `core.` kinds are issued only by origin itself.
     #[error("`{0}` is a reserved kind: only origin itself issues `core.` statements")]
     ReservedKind(Kind),
     /// A statement cannot be issued.

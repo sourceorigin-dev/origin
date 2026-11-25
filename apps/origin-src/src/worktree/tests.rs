@@ -27,7 +27,7 @@ impl Fixture {
         fs::write(path, content).unwrap();
     }
 
-    /// Takes a snapshot, returning the cache to use next.
+    /// Takes a snapshot, returning the root tree and the cache to use next.
     fn snapshot(&self, cache: &StatCache) -> (TreeId, StatCache) {
         let (root, next) = self.worktree().snapshot(cache).unwrap();
         (root, next.unwrap_or_else(|| cache.clone()))
