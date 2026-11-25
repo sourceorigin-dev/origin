@@ -91,7 +91,6 @@ paths = [
     "crates/origin-shared/src/object/tests.rs",
     "crates/origin-shared/src/object/tree.rs",
     "crates/origin-shared/src/pack.rs",
-    "tools/xtask/src/main.rs",
 ]
 
 [deviations.doc-length]

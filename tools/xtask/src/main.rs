@@ -118,7 +118,6 @@ impl BenchGit {
     }
 
     fn run(&self) -> Result<()> {
-        // Fail before the slow build and setup if hyperfine is missing.
         run(Command::new("hyperfine")
             .arg("--version")
             .stdout(Stdio::null()))?;
@@ -133,7 +132,6 @@ impl BenchGit {
                 "origin",
             ])
             .current_dir(&workspace))?;
-        // Cargo resolves a relative target directory from where it runs.
         let target = workspace.join(env::var_os("CARGO_TARGET_DIR").unwrap_or("target".into()));
         let origin = target.join("release/origin").canonicalize()?;
         let xtask = env::current_exe()?;
@@ -164,7 +162,6 @@ impl BenchGit {
                             git: (Option<String>, String)| {
             let markdown = base.join("scenario.md");
             let mut hyperfine = Command::new("hyperfine");
-            // The commands are shell syntax, which hyperfine 2 makes explicit.
             hyperfine
                 .args(runs)
                 .arg("--shell=sh")
@@ -183,8 +180,6 @@ impl BenchGit {
             anyhow::Ok(())
         };
 
-        // Origin has no commit: `new` records the working copy into the
-        // current change and starts the next one, the closest operation.
         scenario(
             "First commit of the whole tree (`origin new`)",
             &["--runs", "5"],
