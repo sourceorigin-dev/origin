@@ -30,7 +30,8 @@ to a hot path (hashing, storage, snapshots, transfer) should come with a
 benchmark, and its numbers in the pull request.
 
 - `just bench`: the divan micro-benchmarks (encoding, store writes,
-  snapshots, input digests and promotion, landing, reading events).
+  snapshots, input digests and promotion, landing, reading events, and the
+  server's request latency and long-poll wakeups).
 - `just bench-git`: times origin against git on a 20,000-file tree with
   hyperfine, and rewrites `docs/benchmarks.md`.
 

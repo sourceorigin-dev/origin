@@ -50,6 +50,10 @@ name = "land"
 harness = false
 
 [[bench]]
+name = "server"
+harness = false
+
+[[bench]]
 name = "snapshot"
 harness = false
 
