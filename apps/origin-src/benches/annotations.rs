@@ -2,6 +2,8 @@
 //! the promotion search over many statements, with and without their
 //! digests cached in the index.
 
+#![expect(clippy::expect_used, reason = "A benchmark fails by panicking.")]
+
 use std::fs;
 
 use divan::Bencher;
@@ -25,9 +27,9 @@ fn main() {
 
 /// An initialized store in a new temporary directory.
 fn store() -> (tempfile::TempDir, Store) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("`tempfile::tempdir()` succeeds");
     let store = Store::new(dir.path().join(".origin"), Native::default());
-    store.init().unwrap();
+    store.init().expect("`init()` succeeds");
     (dir, store)
 }
 
@@ -35,7 +37,7 @@ fn inputs(paths: &[&str], definition: &str) -> Inputs {
     Inputs {
         paths: paths
             .iter()
-            .map(|path| RepoPath::new(path).unwrap())
+            .map(|path| RepoPath::new(path).expect("`RepoPath::new(path)` succeeds"))
             .collect(),
         target_paths: Vec::new(),
         definition: Digest::of(definition.as_bytes()),
@@ -56,10 +58,10 @@ fn digest_store() -> (tempfile::TempDir, Store, TreeId, Inputs) {
     )
     .unwrap();
     let store = Store::new(dir.path().join(".origin"), Native::default());
-    store.init().unwrap();
+    store.init().expect("`init()` succeeds");
     let (snapshot, _) = Worktree::new(dir.path(), &store)
         .snapshot(&StatCache::default())
-        .unwrap();
+        .expect("`snapshot(&StatCache::default())` succeeds");
     let inputs = inputs(
         &["dir0", "dir5/sub3", "dir12/sub7/file7820.rs", "missing"],
         "cargo test",
@@ -168,12 +170,15 @@ fn snapshot(version: usize, docs: usize) -> Vec<EncodedObject> {
         ("docs", format!("# Guide {docs}")),
     ] {
         let (blob, entry) = file(content);
-        let tree: Tree = [(EntryName::new("a").unwrap(), entry)]
-            .into_iter()
-            .collect();
+        let tree: Tree = [(
+            EntryName::new("a").expect("`EntryName::new()` succeeds"),
+            entry,
+        )]
+        .into_iter()
+        .collect();
         let tree = tree.encode();
         root.push((
-            EntryName::new(dir).unwrap(),
+            EntryName::new(dir).expect("`EntryName::new(dir)` succeeds"),
             TreeEntry {
                 kind: EntryKind::Tree,
                 id: tree.id(),
@@ -183,7 +188,10 @@ fn snapshot(version: usize, docs: usize) -> Vec<EncodedObject> {
     }
     for (name, content) in [("Cargo.toml", "[package]"), ("README.md", "# Readme")] {
         let (blob, entry) = file(content.to_owned());
-        root.push((EntryName::new(name).unwrap(), entry));
+        root.push((
+            EntryName::new(name).expect("`EntryName::new(name)` succeeds"),
+            entry,
+        ));
         objects.push(blob);
     }
     objects.push(root.into_iter().collect::<Tree>().encode());
@@ -209,8 +217,10 @@ fn promotion_store() -> (tempfile::TempDir, Store, RevisionId) {
     store.write_all(std::slice::from_ref(&main)).unwrap();
     let revision = |store: &Store, change: usize, version: usize, docs: usize| {
         let objects = snapshot(version, docs);
-        let root = TreeId::from(objects.last().unwrap().id());
-        store.write_all(&objects).unwrap();
+        let root = TreeId::from(objects.last().expect("`last()` yields a value").id());
+        store
+            .write_all(&objects)
+            .expect("`write_all(&objects)` succeeds");
         let mut id = [0; 16];
         id[..8].copy_from_slice(&(change as u64).to_le_bytes());
         let encoded = Revision {
@@ -220,10 +230,12 @@ fn promotion_store() -> (tempfile::TempDir, Store, RevisionId) {
             deps: Vec::new(),
             snapshot: root,
             description: EncodedObject::blob(b"").id().into(),
-            author: "user:bench".parse().unwrap(),
+            author: "user:bench".parse().expect("`parse()` succeeds"),
         }
         .encode();
-        store.write_all(std::slice::from_ref(&encoded)).unwrap();
+        store
+            .write_all(std::slice::from_ref(&encoded))
+            .expect("`write_all(std::slice::from_ref(&encoded))` succeeds");
         RevisionId::from(encoded.id())
     };
     let revisions = STATEMENTS / CHECKS.len();
@@ -233,9 +245,9 @@ fn promotion_store() -> (tempfile::TempDir, Store, RevisionId) {
         statements.extend(CHECKS.map(|(kind, paths)| {
             Statement {
                 subject: RecordId::Revision(revision),
-                kind: Kind::new(kind).unwrap(),
+                kind: Kind::new(kind).expect("`Kind::new(kind)` succeeds"),
                 verdict: Some(Verdict::Pass),
-                issuer: "node:ci-1".parse().unwrap(),
+                issuer: "node:ci-1".parse().expect("`parse()` succeeds"),
                 inputs: Some(inputs(paths, kind)),
                 payload: None,
                 supersedes: None,
@@ -244,7 +256,9 @@ fn promotion_store() -> (tempfile::TempDir, Store, RevisionId) {
             .encode()
         }));
     }
-    store.write_all(&statements).unwrap();
+    store
+        .write_all(&statements)
+        .expect("`write_all(&statements)` succeeds");
     let target = revision(&store, revisions, 1000, 3);
     (dir, store, target)
 }
@@ -255,8 +269,8 @@ fn promotion_store() -> (tempfile::TempDir, Store, RevisionId) {
 #[divan::bench(sample_count = 20)]
 fn promotions_cached(bencher: Bencher<'_, '_>) {
     let (_dir, store, target) = promotion_store();
-    let issuer: Principal = "node:queue".parse().unwrap();
-    let mut annotations = Annotations::open(&store).unwrap();
+    let issuer: Principal = "node:queue".parse().expect("`parse()` succeeds");
+    let mut annotations = Annotations::open(&store).expect("`Annotations::open(&store)` succeeds");
     assert_eq!(
         annotations
             .promotions(RecordId::Revision(target), &issuer, |_| Ok(true))
@@ -264,7 +278,7 @@ fn promotions_cached(bencher: Bencher<'_, '_>) {
             .len(),
         9
     );
-    let index = Index::open(&store).unwrap();
+    let index = Index::open(&store).expect("`Index::open(&store)` succeeds");
     bencher
         .counter(ItemsCount::new(STATEMENTS))
         .with_inputs(|| Annotations::new(&store, index.clone()))
@@ -280,13 +294,13 @@ fn promotions_cached(bencher: Bencher<'_, '_>) {
 #[divan::bench(sample_count = 10, sample_size = 1)]
 fn promotions_uncached(bencher: Bencher<'_, '_>) {
     let (dir, store, target) = promotion_store();
-    let issuer: Principal = "node:queue".parse().unwrap();
+    let issuer: Principal = "node:queue".parse().expect("`parse()` succeeds");
     let log = dir.path().join(".origin/index/log");
     bencher
         .counter(ItemsCount::new(STATEMENTS))
         .with_inputs(|| {
-            fs::remove_file(&log).unwrap();
-            Annotations::open(&store).unwrap()
+            fs::remove_file(&log).expect("`fs::remove_file(&log)` succeeds");
+            Annotations::open(&store).expect("`Annotations::open(&store)` succeeds")
         })
         .bench_local_refs(|annotations| {
             annotations

@@ -48,6 +48,7 @@ struct Server {
 impl Server {
     const TOKENS: &str = "\"user:ada\" = \"ada-token\"\n\"user:ci\" = \"ci-token\"\n";
 
+    #[expect(clippy::expect_used, reason = "A test helper fails by panicking.")]
     async fn start() -> Self {
         let dir = tempfile::tempdir().unwrap();
         let node = Node::new("hosted".parse().unwrap(), NodeKey::from_bytes(&[7; 32]));
@@ -68,13 +69,15 @@ impl Server {
             Box::new(tokens),
         ));
         for (name, policy) in [("demo", open), ("strict", strict)] {
-            let service =
-                OriginService::create(dir.path().join(name), node.clone(), &policy).unwrap();
-            repositories.insert(name.parse().unwrap(), service);
+            let service = OriginService::create(dir.path().join(name), node.clone(), &policy)
+                .expect("`OriginService::create()` succeeds");
+            repositories.insert(name.parse().expect("`parse()` succeeds"), service);
         }
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("`tokio::net::TcpListener::bind()` succeeds");
+        let address = listener.local_addr().expect("`local_addr()` succeeds");
         tokio::spawn(async move { axum::serve(listener, Api::router(repositories)).await });
         let anonymous = Client::new(&format!("http://{address}"));
         let client = anonymous.clone().with_token("ada-token");
@@ -99,6 +102,7 @@ struct Made {
 }
 
 impl Made {
+    #[expect(clippy::expect_used, reason = "A test helper fails by panicking.")]
     fn revision(
         change: ChangeId,
         base: Base,
@@ -117,7 +121,10 @@ impl Made {
                     kind: EntryKind::File,
                     id: blob.id(),
                 };
-                (EntryName::new(*name).unwrap(), entry)
+                (
+                    EntryName::new(*name).expect("`EntryName::new(*name)` succeeds"),
+                    entry,
+                )
             })
             .collect();
         let tree = tree.encode();
@@ -211,10 +218,11 @@ async fn main_head(repo: &Repo) -> AcceptanceId {
     main.head.acceptance
 }
 
+#[expect(clippy::expect_used, reason = "A test helper fails by panicking.")]
 fn ci_test(subject: RevisionId, issuer: &str) -> EncodedObject {
     Statement {
         subject: RecordId::Revision(subject),
-        kind: Kind::new("ci.test").unwrap(),
+        kind: Kind::new("ci.test").expect("`Kind::new()` succeeds"),
         verdict: Some(Verdict::Pass),
         issuer: issuer.parse().unwrap(),
         inputs: None,
@@ -241,23 +249,33 @@ fn code(error: Error) -> ErrorCode {
 #[tokio::test]
 async fn hosts_several_repositories() {
     let server = Server::start().await;
-    let names: Vec<_> = server.client.repos().await.unwrap();
+    let names: Vec<_> = server.client.repos().await.expect("`repos()` succeeds");
     let names: Vec<_> = names.iter().map(|repo| repo.name.as_str()).collect();
     assert_eq!(names, ["demo", "strict"]);
 
-    let missing = server.client.repo(RepoName::new("missing").unwrap());
+    let missing = server
+        .client
+        .repo(RepoName::new("missing").expect("`RepoName::new()` succeeds"));
     assert_eq!(
-        code(missing.targets().await.unwrap_err()),
+        code(missing.targets().await.expect_err("`targets()` fails")),
         ErrorCode::NotFound
     );
 
     let made = Made::revision(change(1), main_tip(&server.demo).await, vec![], &[]);
-    server.demo.put_records(&made.pack()).await.unwrap();
+    server
+        .demo
+        .put_records(&made.pack())
+        .await
+        .expect("`put_records(&made.pack())` succeeds");
     let request = FetchRecords {
         ids: vec![made.id.into()],
     };
     assert!(server.demo.fetch_records(&request).await.is_ok());
-    let error = server.strict.fetch_records(&request).await.unwrap_err();
+    let error = server
+        .strict
+        .fetch_records(&request)
+        .await
+        .expect_err("`fetch_records(&request)` fails");
     assert_eq!(code(error), ErrorCode::NotFound);
 }
 
@@ -271,12 +289,18 @@ async fn puts_and_fetches_records() {
         vec![],
         &[("a.txt", "a"), ("b.txt", "b")],
     );
-    let stored = repo.put_records(&made.pack()).await.unwrap();
+    let stored = repo
+        .put_records(&made.pack())
+        .await
+        .expect("`put_records(&made.pack())` succeeds");
     assert_eq!(
         stored.new, 5,
         "two blobs, the tree, the description and the revision"
     );
-    let again = repo.put_records(&made.pack()).await.unwrap();
+    let again = repo
+        .put_records(&made.pack())
+        .await
+        .expect("`put_records(&made.pack())` succeeds");
     assert_eq!(
         again.new, 0,
         "records are immutable, so putting them again does nothing"
@@ -290,7 +314,7 @@ async fn puts_and_fetches_records() {
             ids: vec![revision.id()],
         })
         .await
-        .unwrap();
+        .expect("`fetch_records` succeeds");
     assert_eq!(
         fetched.pack.objects,
         [revision.clone(), description.clone()],
@@ -302,15 +326,24 @@ async fn puts_and_fetches_records() {
                 ids: vec![content.id()],
             })
             .await
-            .unwrap_err();
+            .expect_err("the operation fails");
         assert_eq!(code(error), ErrorCode::BadRequest, "content leaves by path");
     }
 
     let orphan = Made::revision(change(2), main_tip(repo).await, vec![], &[("c.txt", "c")]);
     let revision_only = Pack {
-        objects: vec![orphan.objects.last().unwrap().clone()],
+        objects: vec![
+            orphan
+                .objects
+                .last()
+                .expect("`last()` yields a value")
+                .clone(),
+        ],
     };
-    let error = repo.put_records(&revision_only).await.unwrap_err();
+    let error = repo
+        .put_records(&revision_only)
+        .await
+        .expect_err("`put_records(&revision_only)` fails");
     assert_eq!(code(error), ErrorCode::BadRequest);
     let log = repo
         .log(&LogQuery {
@@ -319,14 +352,14 @@ async fn puts_and_fetches_records() {
             limit: None,
         })
         .await
-        .unwrap();
+        .expect("`log` succeeds");
     let acceptance = log[0].acceptance.encode();
     let error = repo
         .put_records(&Pack {
             objects: vec![acceptance],
         })
         .await
-        .unwrap_err();
+        .expect_err("the operation fails");
     assert_eq!(
         code(error),
         ErrorCode::BadRequest,
@@ -340,7 +373,11 @@ async fn puts_refuse_objects_named_as_another_kind() {
     let repo = &server.demo;
     let base = main_tip(repo).await;
     let refused = |objects: Vec<EncodedObject>| async move {
-        code(repo.put_records(&Pack { objects }).await.unwrap_err())
+        code(
+            repo.put_records(&Pack { objects })
+                .await
+                .expect_err("the operation fails"),
+        )
     };
 
     let blob = EncodedObject::blob(b"not a tree");
@@ -377,7 +414,7 @@ async fn puts_refuse_objects_named_as_another_kind() {
         objects: vec![attachment.clone()],
     })
     .await
-    .unwrap();
+    .expect("`put_records` succeeds");
     let both = Revision {
         change: change(3),
         predecessors: Vec::new(),
@@ -393,8 +430,14 @@ async fn puts_refuse_objects_named_as_another_kind() {
         id: blob.id(),
     };
     let tree: Tree = [
-        (EntryName::new("a").unwrap(), entry(EntryKind::Tree)),
-        (EntryName::new("b").unwrap(), entry(EntryKind::File)),
+        (
+            EntryName::new("a").expect("`EntryName::new()` succeeds"),
+            entry(EntryKind::Tree),
+        ),
+        (
+            EntryName::new("b").expect("`EntryName::new()` succeeds"),
+            entry(EntryKind::File),
+        ),
     ]
     .into_iter()
     .collect();
@@ -441,12 +484,16 @@ async fn promotions_must_match_their_original() {
     let server = Server::start().await;
     let repo = &server.demo;
     let made = Made::revision(change(1), main_tip(repo).await, vec![], &[("a.txt", "a")]);
-    repo.put_records(&made.pack()).await.unwrap();
+    repo.put_records(&made.pack())
+        .await
+        .expect("`put_records(&made.pack())` succeeds");
     let same = Made::revision(change(3), main_tip(repo).await, vec![], &[("a.txt", "a")]);
-    repo.put_records(&same.pack()).await.unwrap();
+    repo.put_records(&same.pack())
+        .await
+        .expect("`put_records(&same.pack())` succeeds");
     let original = Statement {
         subject: RecordId::Revision(made.id),
-        kind: Kind::new("ci.test").unwrap(),
+        kind: Kind::new("ci.test").expect("`Kind::new()` succeeds"),
         verdict: Some(Verdict::Pass),
         issuer: "user:ada".parse().unwrap(),
         inputs: Some(Inputs {
@@ -474,14 +521,14 @@ async fn promotions_must_match_their_original() {
             objects: vec![original.encode(), forged.encode()],
         })
         .await
-        .unwrap_err();
+        .expect_err("the operation fails");
     assert_eq!(code(error), ErrorCode::BadRequest);
     let stored = repo
         .put_records(&Pack {
             objects: vec![promotion.encode(), original.encode()],
         })
         .await
-        .unwrap();
+        .expect("`put_records` succeeds");
     assert_eq!(stored.new, 1, "the original was stored with the forgery");
 }
 
@@ -495,7 +542,9 @@ async fn fetches_snapshots_by_walking_them() {
         vec![],
         &[("a.txt", "a"), ("b.txt", "b")],
     );
-    repo.put_records(&made.pack()).await.unwrap();
+    repo.put_records(&made.pack())
+        .await
+        .expect("`put_records(&made.pack())` succeeds");
     let [a, b, tree, description, _] = &made.objects[..] else {
         unreachable!()
     };
@@ -505,16 +554,19 @@ async fn fetches_snapshots_by_walking_them() {
         have,
         paths: paths
             .iter()
-            .map(|path| RepoPath::new(path).unwrap())
+            .map(|path| RepoPath::new(path).expect("`RepoPath::new(path)` succeeds"))
             .collect(),
         skip: 0,
     };
-    let whole = repo.fetch_snapshot(&snapshot(vec![], &[])).await.unwrap();
+    let whole = repo
+        .fetch_snapshot(&snapshot(vec![], &[]))
+        .await
+        .expect("`fetch_snapshot(&snapshot(vec![], &[]))` succeeds");
     assert_eq!(whole.pack.objects, [tree.clone(), a.clone(), b.clone()]);
     let only_b = repo
         .fetch_snapshot(&snapshot(vec![], &["b.txt"]))
         .await
-        .unwrap();
+        .expect("`fetch_snapshot()` succeeds");
     assert_eq!(only_b.pack.objects, [tree.clone(), b.clone()]);
     let edited = Made::revision(
         change(3),
@@ -522,7 +574,9 @@ async fn fetches_snapshots_by_walking_them() {
         vec![],
         &[("a.txt", "a"), ("b.txt", "c")],
     );
-    repo.put_records(&edited.pack()).await.unwrap();
+    repo.put_records(&edited.pack())
+        .await
+        .expect("`put_records(&edited.pack())` succeeds");
     let changed = repo
         .fetch_snapshot(&FetchSnapshot {
             of: RecordId::Revision(edited.id),
@@ -531,7 +585,7 @@ async fn fetches_snapshots_by_walking_them() {
             skip: 0,
         })
         .await
-        .unwrap();
+        .expect("`fetch_snapshot` succeeds");
     assert_eq!(
         changed.pack.objects,
         [edited.objects[2].clone(), edited.objects[1].clone()],
@@ -566,12 +620,17 @@ async fn reads_statements_and_revisions() {
     let statement = ci_test(first.id, "user:ada");
     let mut pack = first.pack();
     pack.objects.push(statement.clone());
-    repo.put_records(&pack).await.unwrap();
+    repo.put_records(&pack)
+        .await
+        .expect("`put_records(&pack)` succeeds");
 
     let about_first = StatementsQuery {
         subject: RecordId::Revision(first.id),
     };
-    let found = repo.statements(&about_first).await.unwrap();
+    let found = repo
+        .statements(&about_first)
+        .await
+        .expect("`statements(&about_first)` succeeds");
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].id, statement.id().into());
     assert_eq!(found[0].statement.kind.as_str(), "ci.test");
@@ -580,9 +639,14 @@ async fn reads_statements_and_revisions() {
     let left = Made::revision(change(1), base, vec![first.id], &[("a.txt", "2")]);
     let right = Made::revision(change(1), base, vec![first.id], &[("a.txt", "3")]);
     for made in [&left, &right] {
-        repo.put_records(&made.pack()).await.unwrap();
+        repo.put_records(&made.pack())
+            .await
+            .expect("`put_records(&made.pack())` succeeds");
     }
-    let revisions = repo.revisions(change(1)).await.unwrap();
+    let revisions = repo
+        .revisions(change(1))
+        .await
+        .expect("`revisions(change(1))` succeeds");
     let ids: Vec<_> = revisions.revisions.iter().map(|entry| entry.id).collect();
     assert_eq!(ids, [first.id, left.id, right.id]);
     assert_eq!(revisions.heads, [left.id, right.id]);
@@ -591,13 +655,20 @@ async fn reads_statements_and_revisions() {
         let query = StatementsQuery {
             subject: RecordId::Revision(head),
         };
-        flagged.extend(repo.statements(&query).await.unwrap());
+        flagged.extend(
+            repo.statements(&query)
+                .await
+                .expect("`statements(&query)` succeeds"),
+        );
     }
     assert_eq!(flagged.len(), 1, "one statement names both heads");
     assert_eq!(flagged[0].statement.kind, Kind::DIVERGENT);
     assert_eq!(flagged[0].statement.issuer.to_string(), "node:hosted");
 
-    let error = repo.revisions(change(9)).await.unwrap_err();
+    let error = repo
+        .revisions(change(9))
+        .await
+        .expect_err("`revisions(change(9))` fails");
     assert_eq!(code(error), ErrorCode::NotFound);
 
     let inventories = repo
@@ -624,13 +695,15 @@ async fn lands_changes_and_targets() {
     let server = Server::start().await;
     let repo = &server.demo;
     let made = Made::revision(change(1), main_tip(repo).await, vec![], &[("a.txt", "a")]);
-    repo.put_records(&made.pack()).await.unwrap();
+    repo.put_records(&made.pack())
+        .await
+        .expect("`put_records(&made.pack())` succeeds");
 
     let land = LandRequest {
         proposal: Proposal::Change(change(1)),
         onto: None,
     };
-    let landed = repo.land(&land).await.unwrap();
+    let landed = repo.land(&land).await.expect("`land(&land)` succeeds");
     assert_eq!(landed.onto, TargetName::MAIN, "the target the change is on");
     let [
         Landing::Landed {
@@ -654,40 +727,56 @@ async fn lands_changes_and_targets() {
             limit: Some(1),
         })
         .await
-        .unwrap();
+        .expect("`log` succeeds");
     assert_eq!(log.len(), 1);
     assert_eq!(log[0].id, acceptance.acceptance);
     assert_eq!(log[0].acceptance.body().landed, [Source::Revision(made.id)]);
 
-    let release = TargetName::new("release").unwrap();
+    let release = TargetName::new("release").expect("`TargetName::new()` succeeds");
     let new = NewTarget {
         name: release.clone(),
         from: TargetName::MAIN,
     };
-    assert_eq!(repo.create_target(&new).await.unwrap().seq, 0);
-    let error = repo.create_target(&new).await.unwrap_err();
+    assert_eq!(
+        repo.create_target(&new)
+            .await
+            .expect("`create_target(&new)` succeeds")
+            .seq,
+        0
+    );
+    let error = repo
+        .create_target(&new)
+        .await
+        .expect_err("`create_target(&new)` fails");
     assert_eq!(code(error), ErrorCode::Conflict, "the name is taken");
-    let targets = repo.targets().await.unwrap();
+    let targets = repo.targets().await.expect("`targets()` succeeds");
     let names: Vec<_> = targets.iter().map(|target| target.name.as_str()).collect();
     assert_eq!(names, ["main", "policy", "release"]);
     assert!(
         targets
             .iter()
-            .all(|target| target.authority == Some("hosted".parse().unwrap()))
+            .all(|target| target.authority == Some("hosted".parse().expect("`parse()` succeeds")))
     );
 
     let from_main = LandRequest {
         proposal: Proposal::Target(TargetName::MAIN),
         onto: Some(release),
     };
-    let landed = repo.land(&from_main).await.unwrap();
+    let landed = repo
+        .land(&from_main)
+        .await
+        .expect("`land(&from_main)` succeeds");
     assert!(matches!(landed.landings[..], [Landing::Unchanged(_)]));
     let nowhere = LandRequest {
         onto: None,
         ..from_main
     };
     assert_eq!(
-        code(repo.land(&nowhere).await.unwrap_err()),
+        code(
+            repo.land(&nowhere)
+                .await
+                .expect_err("`land(&nowhere)` fails")
+        ),
         ErrorCode::BadRequest
     );
     let unknown = LandRequest {
@@ -695,7 +784,11 @@ async fn lands_changes_and_targets() {
         onto: None,
     };
     assert_eq!(
-        code(repo.land(&unknown).await.unwrap_err()),
+        code(
+            repo.land(&unknown)
+                .await
+                .expect_err("`land(&unknown)` fails")
+        ),
         ErrorCode::NotFound
     );
 }
@@ -705,26 +798,34 @@ async fn landings_wait_for_evidence() {
     let server = Server::start().await;
     let repo = &server.strict;
     let made = Made::revision(change(1), main_tip(repo).await, vec![], &[("a.txt", "a")]);
-    repo.put_records(&made.pack()).await.unwrap();
+    repo.put_records(&made.pack())
+        .await
+        .expect("`put_records(&made.pack())` succeeds");
     let land = LandRequest {
         proposal: Proposal::Change(change(1)),
         onto: None,
     };
 
-    let landed = repo.land(&land).await.unwrap();
+    let landed = repo.land(&land).await.expect("`land(&land)` succeeds");
     let [Landing::Pending(pending)] = &landed.landings[..] else {
         panic!("expected a waiting landing, got {:?}", landed.landings);
     };
     assert_eq!(pending.subject, RecordId::Revision(made.id));
     assert!(matches!(&pending.blocked, Blocked::Evidence(missing) if missing.len() == 1));
-    assert_eq!(repo.landings().await.unwrap(), slice::from_ref(pending));
+    assert_eq!(
+        repo.landings().await.expect("`landings()` succeeds"),
+        slice::from_ref(pending)
+    );
 
     let query = EventsQuery {
         cursor: Some(0),
-        kind: List(vec!["check.requested".parse().unwrap()]),
+        kind: List(vec!["check.requested".parse().expect("`parse()` succeeds")]),
         ..EventsQuery::default()
     };
-    let page = repo.events(&query).await.unwrap();
+    let page = repo
+        .events(&query)
+        .await
+        .expect("`events(&query)` succeeds");
     assert!(
         matches!(&page.events[..], [event] if matches!(event.kind,
             EventKind::CheckRequested { subject, .. } if subject == RecordId::Revision(made.id))),
@@ -816,7 +917,10 @@ async fn promotes_results_by_input_digest() {
 async fn events_long_poll() {
     let server = Server::start().await;
     let repo = server.demo.clone();
-    let now = repo.events(&EventsQuery::default()).await.unwrap();
+    let now = repo
+        .events(&EventsQuery::default())
+        .await
+        .expect("`events(&EventsQuery::default())` succeeds");
     assert!(
         now.events.is_empty(),
         "without a cursor, only new events come"
@@ -825,15 +929,25 @@ async fn events_long_poll() {
     let query = EventsQuery {
         cursor: Some(now.next),
         wait: Some(Period::from_secs(30)),
-        kind: List(vec!["revision.created".parse().unwrap()]),
+        kind: List(vec![
+            "revision.created".parse().expect("`parse()` succeeds"),
+        ]),
         ..EventsQuery::default()
     };
     let start = Instant::now();
-    let poll = tokio::spawn(async move { repo.events(&query).await.unwrap() });
+    let poll = tokio::spawn(async move {
+        repo.events(&query)
+            .await
+            .expect("`events(&query)` succeeds")
+    });
     tokio::time::sleep(Duration::from_millis(100)).await;
     let made = Made::revision(change(1), main_tip(&server.demo).await, vec![], &[]);
-    server.demo.put_records(&made.pack()).await.unwrap();
-    let page = poll.await.unwrap();
+    server
+        .demo
+        .put_records(&made.pack())
+        .await
+        .expect("`put_records(&made.pack())` succeeds");
+    let page = poll.await.expect("`poll` succeeds");
     assert!(
         start.elapsed() < Duration::from_secs(10),
         "it answered once a revision came"
@@ -852,7 +966,7 @@ async fn events_long_poll() {
             ..EventsQuery::default()
         })
         .await
-        .unwrap();
+        .expect("`events` succeeds");
     assert!(
         matches!(&all.events[..], [event] if event.kind.name() == "target.advanced"),
         "the first event is `policy`'s first acceptance: {all:?}"
@@ -1136,8 +1250,12 @@ async fn refuses_malformed_requests_as_api_errors() {
 #[tokio::test]
 async fn serves_its_openapi_document() {
     let server = Server::start().await;
-    let document = server.client.openapi().await.unwrap();
-    assert_eq!(document, serde_json::to_value(Api::openapi()).unwrap());
+    let document = server.client.openapi().await.expect("`openapi()` succeeds");
+    assert_eq!(
+        document,
+        serde_json::to_value(Api::openapi())
+            .expect("`serde_json::to_value(Api::openapi())` succeeds")
+    );
 }
 
 /// Checks that `docs/openapi.json`, which documents the API for other
@@ -1146,11 +1264,17 @@ async fn serves_its_openapi_document() {
 #[test]
 fn checked_in_openapi_document_is_current() {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/openapi.json");
-    let document = format!("{}\n", Api::openapi().to_pretty_json().unwrap());
+    let document = format!(
+        "{}\n",
+        Api::openapi()
+            .to_pretty_json()
+            .expect("`to_pretty_json()` succeeds")
+    );
     if std::env::var_os("UPDATE_OPENAPI").is_some() {
-        std::fs::write(path, document).unwrap();
+        std::fs::write(path, document).expect("`std::fs::write(path, document)` succeeds");
     } else {
-        let checked_in = std::fs::read_to_string(path).unwrap();
+        let checked_in =
+            std::fs::read_to_string(path).expect("`std::fs::read_to_string(path)` succeeds");
         assert!(
             checked_in == document,
             "docs/openapi.json is stale: run `just openapi`"

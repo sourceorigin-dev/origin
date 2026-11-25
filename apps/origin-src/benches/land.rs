@@ -5,6 +5,8 @@
 //! different changes on one target at once. Run it on a real disk: syncs are
 //! most of the cost.
 
+#![expect(clippy::expect_used, reason = "A benchmark fails by panicking.")]
+
 use std::thread;
 
 use divan::Bencher;
@@ -35,9 +37,9 @@ impl Repo {
     /// Creates a repository where landing on `main` requires `require`, a TOML
     /// array.
     fn new(require: &str) -> Self {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("`tempfile::tempdir()` succeeds");
         let store = Store::new(dir.path().join(".origin"), Native::default());
-        store.init().unwrap();
+        store.init().expect("`init()` succeeds");
         let repo = Self {
             _dir: dir,
             store,
@@ -50,12 +52,18 @@ impl Repo {
              [targets.main]\nauthority = \"node:queue\"\nrequire = {require}\n",
             repo.key.public()
         );
-        repo.queue().init(&policy).unwrap();
+        repo.queue()
+            .init(&policy)
+            .expect("`init(&policy)` succeeds");
         repo
     }
 
     fn queue(&self) -> Queue<'_> {
-        Queue::new(&self.store, &self.key, PrincipalName::new("queue").unwrap())
+        Queue::new(
+            &self.store,
+            &self.key,
+            PrincipalName::new("queue").expect("`PrincipalName::new()` succeeds"),
+        )
     }
 
     fn tip(&self) -> AcceptanceId {
@@ -63,7 +71,11 @@ impl Repo {
     }
 
     fn tip_of(&self, target: &TargetName) -> AcceptanceId {
-        self.store.head(target).unwrap().unwrap().acceptance
+        self.store
+            .head(target)
+            .expect("`head(target)` succeeds")
+            .expect("the target has a head")
+            .acceptance
     }
 
     /// Writes a change made on `base`, a tip of `main`, that adds the file
@@ -71,11 +83,17 @@ impl Repo {
     fn change(&self, n: usize, base: AcceptanceId) -> ChangeId {
         let mut tree: Tree = self
             .store
-            .get(self.store.get(base).unwrap().body().state)
-            .unwrap();
+            .get(
+                self.store
+                    .get(base)
+                    .expect("`get(base)` succeeds")
+                    .body()
+                    .state,
+            )
+            .expect("`get()` succeeds");
         let content = EncodedObject::blob(format!("fn f{n}() {{}}\n").as_bytes());
         tree.insert(
-            EntryName::new(format!("file-{n}")).unwrap(),
+            EntryName::new(format!("file-{n}")).expect("the file name is valid"),
             TreeEntry {
                 kind: EntryKind::File,
                 id: content.id(),
@@ -92,7 +110,7 @@ impl Repo {
             deps: Vec::new(),
             snapshot: tree.id().into(),
             description: EncodedObject::blob(b"").id().into(),
-            author: "user:bench".parse().unwrap(),
+            author: "user:bench".parse().expect("`parse()` succeeds"),
         }
         .encode();
         let description = EncodedObject::attachment(b"");
@@ -106,11 +124,12 @@ impl Repo {
     }
 
     fn land_on(&self, change: ChangeId, onto: &TargetName) {
-        let mut annotations = Annotations::open(&self.store).unwrap();
+        let mut annotations =
+            Annotations::open(&self.store).expect("`Annotations::open(&self.store)` succeeds");
         let landings = self
             .queue()
             .land_change(&mut annotations, change, onto)
-            .unwrap();
+            .expect("`land_change(&mut annotations, change, onto)` succeeds");
         assert!(
             matches!(landings[..], [Landing::Landed { .. }]),
             "{landings:?}"
@@ -156,19 +175,22 @@ fn land_with_requirement(bencher: Bencher<'_, '_>) {
         .with_inputs(|| {
             n += 1;
             let change = repo.change(n, repo.tip());
-            let annotations = Annotations::open(&repo.store).unwrap();
+            let annotations =
+                Annotations::open(&repo.store).expect("`Annotations::open(&repo.store)` succeeds");
             let head = annotations.index().heads(change)[0];
             let result = Statement {
                 subject: RecordId::Revision(head),
-                kind: Kind::new("ci.test").unwrap(),
+                kind: Kind::new("ci.test").expect("`Kind::new()` succeeds"),
                 verdict: Some(Verdict::Pass),
-                issuer: "node:ci".parse().unwrap(),
+                issuer: "node:ci".parse().expect("`parse()` succeeds"),
                 inputs: None,
                 payload: None,
                 supersedes: None,
                 promoted_from: None,
             };
-            annotations.issue(&result, None).unwrap();
+            annotations
+                .issue(&result, None)
+                .expect("`issue(&result, None)` succeeds");
             change
         })
         .bench_local_values(|change| repo.land(change));
@@ -183,10 +205,10 @@ const HISTORY: usize = 1_000;
 #[divan::bench(sample_count = 20, sample_size = 1)]
 fn land_target_after_long_histories(bencher: Bencher<'_, '_>) {
     let repo = Repo::new("[]");
-    let feature = TargetName::new("feature").unwrap();
+    let feature = TargetName::new("feature").expect("`TargetName::new()` succeeds");
     repo.queue()
         .create_target(&feature, &TargetName::MAIN)
-        .unwrap();
+        .expect("`create_target(&feature, &TargetName::MAIN)` succeeds");
     for n in 0..HISTORY {
         repo.land(repo.change(n, repo.tip()));
         let change = repo.change(HISTORY + n, repo.tip_of(&feature));
@@ -200,11 +222,12 @@ fn land_target_after_long_histories(bencher: Bencher<'_, '_>) {
             repo.land_on(change, &feature);
         })
         .bench_local_values(|()| {
-            let mut annotations = Annotations::open(&repo.store).unwrap();
+            let mut annotations =
+                Annotations::open(&repo.store).expect("`Annotations::open(&repo.store)` succeeds");
             let landing = repo
                 .queue()
                 .land_target(&mut annotations, &feature, &TargetName::MAIN)
-                .unwrap();
+                .expect("`land_target()` succeeds");
             assert!(matches!(landing, Landing::Landed { .. }), "{landing:?}");
         });
 }

@@ -48,7 +48,7 @@ fn the_working_copy_is_a_revision_of_the_current_change() {
         format!("Working copy: {second} Rework it\nOn top of: {first} Add the library\n")
     );
     repo.write("README.md", "hello, world\n");
-    fs::remove_file(repo.path("src/old.rs")).unwrap();
+    fs::remove_file(repo.path("src/old.rs")).expect("`fs::remove_file()` succeeds");
     repo.write("src/new.rs", "new\n");
     assert!(
         repo.ok(&["status"])
@@ -109,19 +109,20 @@ fn edit_switches_the_files_to_another_change() {
     let repo = Repo::new();
     repo.write("shared", "first\n");
     repo.write("run.sh", "#!/bin/sh\n");
-    fs::set_permissions(repo.path("run.sh"), fs::Permissions::from_mode(0o755)).unwrap();
+    fs::set_permissions(repo.path("run.sh"), fs::Permissions::from_mode(0o755))
+        .expect("`fs::set_permissions()` succeeds");
     let first = repo.change();
     repo.ok(&["new"]);
     let second = repo.change();
     repo.write("shared", "second\n");
     repo.write("dir/added", "added\n");
-    fs::remove_file(repo.path("run.sh")).unwrap();
+    fs::remove_file(repo.path("run.sh")).expect("`fs::remove_file()` succeeds");
 
     repo.ok(&["edit", &first[..6]]);
     assert_eq!(repo.read("shared"), "first\n");
     assert!(!repo.path("dir").exists());
     let mode = fs::metadata(repo.path("run.sh"))
-        .unwrap()
+        .expect("`fs::metadata()` succeeds")
         .permissions()
         .mode();
     assert_eq!(mode & 0o111, 0o111, "still executable");
@@ -144,11 +145,11 @@ fn a_directory_holding_untracked_files_refuses_to_become_a_file() {
     repo.ok(&["describe", "File"]);
     let file = repo.change();
     repo.ok(&["new", "Directory"]);
-    fs::remove_file(repo.path("a")).unwrap();
+    fs::remove_file(repo.path("a")).expect("`fs::remove_file()` succeeds");
     repo.write("a/b", "in a directory\n");
     repo.ok(&["describe", "Directory"]);
     let pointer = repo.path(".origin/workspace");
-    let revision = fs::read_to_string(&pointer).unwrap();
+    let revision = fs::read_to_string(&pointer).expect("`fs::read_to_string(&pointer)` succeeds");
     repo.write("a/.git/HEAD", "ref\n");
 
     let refused = repo.fails(&["edit", &file]);
@@ -161,7 +162,10 @@ fn a_directory_holding_untracked_files_refuses_to_become_a_file() {
     assert!(!repo.path(".origin/moving").exists());
     let status = repo.ok(&["status"]);
     assert!(status.contains(" Directory\n"), "{status}");
-    assert_eq!(fs::read_to_string(&pointer).unwrap(), revision);
+    assert_eq!(
+        fs::read_to_string(&pointer).expect("`fs::read_to_string(&pointer)` succeeds"),
+        revision
+    );
 }
 
 #[test]
@@ -171,10 +175,10 @@ fn divergence_shows_until_converged() {
     repo.ok(&["describe", "Shared work"]);
     let change = repo.change();
     let pointer = repo.path(".origin/workspace");
-    let started = fs::read_to_string(&pointer).unwrap();
+    let started = fs::read_to_string(&pointer).expect("`fs::read_to_string(&pointer)` succeeds");
     repo.write("file", "left\n");
     repo.ok(&["describe", "Shared work"]);
-    fs::write(&pointer, started).unwrap();
+    fs::write(&pointer, started).expect("`fs::write(&pointer, started)` succeeds");
     repo.write("file", "right\n");
     repo.ok(&["describe", "Shared work"]);
 
@@ -198,7 +202,7 @@ fn divergence_shows_until_converged() {
         .lines()
         .filter(|line| line.ends_with(" (head)"))
         .map(|line| {
-            let revision = line.split(' ').nth(1).unwrap();
+            let revision = line.split(' ').nth(1).expect("`nth(1)` yields a value");
             repo.ok(&["statements", revision])
                 .matches(" core.divergent by node:ada")
                 .count()
@@ -244,11 +248,11 @@ fn binary_conflicts_resolve_only_when_accepted() {
     repo.ok(&["describe", "Shared work"]);
     let change = repo.change();
     let pointer = repo.path(".origin/workspace");
-    let started = fs::read_to_string(&pointer).unwrap();
+    let started = fs::read_to_string(&pointer).expect("`fs::read_to_string(&pointer)` succeeds");
     repo.write("image", "left\0");
     repo.write("text", "left\n");
     repo.ok(&["describe", "Shared work"]);
-    fs::write(&pointer, started).unwrap();
+    fs::write(&pointer, started).expect("`fs::write(&pointer, started)` succeeds");
     repo.write("image", "right\0");
     repo.write("text", "right\n");
     repo.ok(&["converge", &change]);
@@ -275,25 +279,26 @@ fn a_revision_is_published_only_after_its_conflicts() {
     repo.ok(&["describe", "Shared work"]);
     let change = repo.change();
     let pointer = repo.path(".origin/workspace");
-    let started = fs::read_to_string(&pointer).unwrap();
+    let started = fs::read_to_string(&pointer).expect("`fs::read_to_string(&pointer)` succeeds");
     repo.write("file", "left\n");
     repo.ok(&["describe", "Shared work"]);
-    fs::write(&pointer, started).unwrap();
+    fs::write(&pointer, started).expect("`fs::write(&pointer, started)` succeeds");
     repo.write("file", "right\n");
     repo.ok(&["converge", &change]);
 
     let store = Store::new(repo.path(".origin"), origin_platform::Native::default());
     let converged: RevisionId = fs::read_to_string(&pointer)
-        .unwrap()
+        .expect("`fs::read_to_string(&pointer)` succeeds")
         .trim()
         .parse()
-        .unwrap();
-    let revision: Revision = store.get(converged).unwrap();
+        .expect("`parse()` succeeds");
+    let revision: Revision = store.get(converged).expect("`get(converged)` succeeds");
     let claims = Annotations::open(&store)
-        .unwrap()
+        .expect("`Annotations::open(&store)` succeeds")
         .claims(RecordId::Revision(converged))
-        .unwrap();
-    let conflicts = Conflicts::of(&store, &claims, &revision).unwrap();
+        .expect("`claims(RecordId::Revision(converged))` succeeds");
+    let conflicts = Conflicts::of(&store, &claims, &revision)
+        .expect("`Conflicts::of(&store, &claims, &revision)` succeeds");
     let issuer = revision.author.clone();
     let described = Revision {
         predecessors: vec![converged],
@@ -306,12 +311,18 @@ fn a_revision_is_published_only_after_its_conflicts() {
     let hex = statement.encode().id().to_hex();
 
     let dir = repo.path(&format!(".origin/objects/loose/{}", &hex[..2]));
-    fs::create_dir_all(&dir).unwrap();
-    fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+    fs::create_dir_all(&dir).expect("`fs::create_dir_all(&dir)` succeeds");
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o555))
+        .expect("`fs::set_permissions()` succeeds");
     repo.fails(&["describe", "Described"]);
-    fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o755))
+        .expect("`fs::set_permissions()` succeeds");
 
-    assert!(!store.contains(described.id()).unwrap());
+    assert!(
+        !store
+            .contains(described.id())
+            .expect("`contains(described.id())` succeeds")
+    );
     let refused = repo.fails(&["land"]);
     assert!(refused.contains("unresolved conflicts"), "{refused}");
 }
@@ -342,8 +353,9 @@ fn abandoning_the_current_change_restores_its_base() {
 }
 
 /// The working copy's full revision id.
+#[expect(clippy::expect_used, reason = "A test helper fails by panicking.")]
 fn revision_of(repo: &Repo) -> RevisionId {
-    repo.revision().parse().unwrap()
+    repo.revision().parse().expect("`parse()` succeeds")
 }
 
 #[test]
@@ -352,9 +364,9 @@ fn at_names_the_working_copy_s_own_revision() {
     repo.write("file", "base\n");
     repo.ok(&["describe", "Shared work"]);
     let pointer = repo.path(".origin/workspace");
-    let started = fs::read_to_string(&pointer).unwrap();
+    let started = fs::read_to_string(&pointer).expect("`fs::read_to_string(&pointer)` succeeds");
     repo.ok(&["describe", "Elsewhere"]);
-    fs::write(&pointer, &started).unwrap();
+    fs::write(&pointer, &started).expect("`fs::write(&pointer, &started)` succeeds");
     repo.write("file", "here\n");
     repo.ok(&["describe", "Shared work"]);
     let ours = revision_of(&repo);
@@ -374,14 +386,16 @@ fn a_prefix_naming_a_change_and_another_revision_is_ambiguous() {
     let store = Store::new(repo.path(".origin"), Native::default());
     let mut change = [0; 16];
     change[..4].copy_from_slice(&ours.as_bytes()[..4]);
-    let revision: Revision = store.get(ours).unwrap();
+    let revision: Revision = store.get(ours).expect("`get(ours)` succeeds");
     let other = Revision {
         change: ChangeId::from_bytes(change),
         predecessors: Vec::new(),
         ..revision
     }
     .encode();
-    store.write_all(slice::from_ref(&other)).unwrap();
+    store
+        .write_all(slice::from_ref(&other))
+        .expect("`write_all(slice::from_ref(&other))` succeeds");
 
     let hex = ours.to_string();
     let refused = repo.fails(&["statements", &hex[..8]]);
@@ -396,9 +410,9 @@ fn a_promotion_lists_without_its_original() {
     let missing = StatementId::from(EncodedObject::blob(b"elsewhere").id());
     let promotion = Statement {
         subject: origin_shared::RecordId::Revision(revision_of(&repo)),
-        kind: Kind::new("ci.test").unwrap(),
+        kind: Kind::new("ci.test").expect("`Kind::new()` succeeds"),
         verdict: Some(Verdict::Pass),
-        issuer: "node:ada".parse().unwrap(),
+        issuer: "node:ada".parse().expect("`parse()` succeeds"),
         inputs: None,
         payload: None,
         supersedes: None,
@@ -406,7 +420,9 @@ fn a_promotion_lists_without_its_original() {
     }
     .encode();
     let store = Store::new(repo.path(".origin"), Native::default());
-    store.write_all(slice::from_ref(&promotion)).unwrap();
+    store
+        .write_all(slice::from_ref(&promotion))
+        .expect("`write_all(slice::from_ref(&promotion))` succeeds");
     let listed = repo.ok(&["statements"]);
     assert!(
         listed.contains(&format!(
@@ -424,9 +440,9 @@ fn edits_recorded_on_a_stale_revision_flag_divergence() {
     repo.ok(&["describe", "Shared work"]);
     let change = repo.change();
     let pointer = repo.path(".origin/workspace");
-    let started = fs::read_to_string(&pointer).unwrap();
+    let started = fs::read_to_string(&pointer).expect("`fs::read_to_string(&pointer)` succeeds");
     repo.ok(&["describe", "Moved on"]);
-    fs::write(&pointer, &started).unwrap();
+    fs::write(&pointer, &started).expect("`fs::write(&pointer, &started)` succeeds");
     repo.write("file", "stale\n");
     repo.ok(&["new", "Next"]);
     let evolog = repo.ok(&["evolog", &change]);
@@ -434,7 +450,7 @@ fn edits_recorded_on_a_stale_revision_flag_divergence() {
         .lines()
         .filter(|line| line.ends_with(" (head)"))
         .map(|line| {
-            let revision = line.split(' ').nth(1).unwrap();
+            let revision = line.split(' ').nth(1).expect("`nth(1)` yields a value");
             repo.ok(&["statements", revision])
                 .matches(" core.divergent by node:ada")
                 .count()
@@ -459,14 +475,14 @@ fn a_statement_takes_its_details_as_text_or_from_stdin() {
         .env("ORIGIN_CONFIG_DIR", repo.config())
         .stdin(Stdio::piped())
         .spawn()
-        .unwrap();
+        .expect("`spawn()` succeeds");
     piped
         .stdin
         .take()
-        .unwrap()
+        .expect("`take()` succeeds")
         .write_all(b"1 test failed\n")
-        .unwrap();
-    assert!(piped.wait().unwrap().success());
+        .expect("`write_all()` succeeds");
+    assert!(piped.wait().expect("`wait()` succeeds").success());
     let statements = repo.ok(&["statements", "@"]);
     assert!(
         statements.contains("    payload: 1 test failed\n"),
@@ -530,7 +546,7 @@ fn only_the_creator_of_a_change_or_admins_abandon_it() {
     assert_eq!(repo.read(".origin/workspace"), pointer);
     assert_eq!(repo.read("file"), "eve's\n");
     assert_eq!(repo.ok(&["statements"]), statements);
-    fs::write(&config, "user = \"ada\"\n").unwrap();
+    fs::write(&config, "user = \"ada\"\n").expect("`fs::write()` succeeds");
     assert!(!repo.ok(&["show", &change]).contains("bandoned"));
 
     repo.ok(&["new", "--on", "policy"]);
@@ -561,11 +577,11 @@ fn init_creates_policy_and_main_with_one_node_key() {
     let key = repo.config().join("node.key");
     let mode = fs::metadata(&key).unwrap().permissions().mode();
     assert_eq!(mode & 0o777, 0o600);
-    let before = fs::read(&key).unwrap();
-    let other = tempfile::tempdir().unwrap();
+    let before = fs::read(&key).expect("`fs::read(&key)` succeeds");
+    let other = tempfile::tempdir().expect("`tempfile::tempdir()` succeeds");
     assert!(repo.run(other.path(), &["init"]).status.success());
     assert_eq!(
-        fs::read(&key).unwrap(),
+        fs::read(&key).expect("`fs::read(&key)` succeeds"),
         before,
         "every repository shares it"
     );
@@ -577,7 +593,7 @@ fn a_lost_index_is_rebuilt() {
     repo.write("file", "content\n");
     let change = repo.change();
     repo.ok(&["new"]);
-    fs::remove_file(repo.path(".origin/index/log")).unwrap();
+    fs::remove_file(repo.path(".origin/index/log")).expect("`fs::remove_file()` succeeds");
     assert_eq!(repo.ok(&["evolog", &change]).lines().count(), 3);
     assert!(
         repo.ok(&["index", "rebuild"])
@@ -590,14 +606,15 @@ fn commands_find_the_repository_from_subdirectories() {
     let repo = Repo::new();
     repo.write("deep/nested/file", "content");
     let output = repo.run(&repo.path("deep/nested"), &["status"]);
-    let status = String::from_utf8(output.stdout).unwrap();
+    let status =
+        String::from_utf8(output.stdout).expect("`String::from_utf8(output.stdout)` succeeds");
     assert!(status.ends_with("A deep/nested/file\n"), "{status}");
 }
 
 #[test]
 fn commands_outside_a_repository_fail() {
     let repo = Repo::new();
-    let outside = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().expect("`tempfile::tempdir()` succeeds");
     let output = repo.run(outside.path(), &["status"]);
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("not in an origin repository"));
@@ -606,7 +623,7 @@ fn commands_outside_a_repository_fail() {
 #[test]
 fn a_closed_output_pipe_ends_quietly() {
     let repo = Repo::new();
-    let (reader, writer) = std::io::pipe().unwrap();
+    let (reader, writer) = std::io::pipe().expect("`std::io::pipe()` succeeds");
     drop(reader);
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_origin"))
         .arg("status")
@@ -614,15 +631,22 @@ fn a_closed_output_pipe_ends_quietly() {
         .env("ORIGIN_CONFIG_DIR", repo.config())
         .stdout(writer)
         .output()
-        .unwrap();
+        .expect("`output()` succeeds");
     assert!(output.status.success(), "{output:?}");
     assert_eq!(String::from_utf8_lossy(&output.stderr), "");
 }
 
 /// The id of the statement an `annotate` issued, parsed from its output.
+#[expect(clippy::expect_used, reason = "A test helper fails by panicking.")]
 fn issued(output: &str) -> String {
-    let rest = output.split("statement ").nth(1).unwrap();
-    rest.split(':').next().unwrap().to_owned()
+    let rest = output
+        .split("statement ")
+        .nth(1)
+        .expect("`nth(1)` yields a value");
+    rest.split(':')
+        .next()
+        .expect("`next()` yields a value")
+        .to_owned()
 }
 
 #[test]
@@ -732,7 +756,7 @@ fn a_payload_the_repository_lacks_is_unavailable() {
         &hex[..2],
         &hex[2..]
     )))
-    .unwrap();
+    .expect("the annotation payload exists to remove");
     let listed = repo.ok(&["statements"]);
     assert!(
         listed.contains("    payload: unavailable here\n"),
@@ -756,7 +780,7 @@ fn annotating_a_statement_needs_one_and_no_inputs() {
                 .count()
                 > 1
         })
-        .unwrap();
+        .expect("two of seventeen statement ids share a first hex digit");
     let ambiguous = repo.fails(&["annotate", "--on", &digit, "flaky", "--neutral"]);
     assert!(
         ambiguous.contains("could be any of the statements"),
@@ -789,7 +813,7 @@ fn annotating_a_statement_needs_one_and_no_inputs() {
     }
     let both = repo.fails(&["annotate", "--on", &ids[0], "@", "flaky", "--pass"]);
     assert!(both.contains("with --on, give the kind alone"), "{both}");
-    let outside = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().expect("`tempfile::tempdir()` succeeds");
     let bad = repo.run(outside.path(), &["annotate", "@", "Bad Kind!", "--pass"]);
     assert_eq!(bad.status.code(), Some(2));
     let error = String::from_utf8_lossy(&bad.stderr);
@@ -809,7 +833,7 @@ fn an_argument_that_is_not_utf8_is_no_panic() {
         .command(repo.root(), &["workspace", "rm"])
         .arg(path)
         .output()
-        .unwrap();
+        .expect("`output()` succeeds");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(1), "{stderr}");
     assert!(stderr.starts_with("error: "), "{stderr}");
@@ -818,17 +842,22 @@ fn an_argument_that_is_not_utf8_is_no_panic() {
 #[test]
 fn a_repository_is_one_working_copy_however_init_spells_it() {
     let repo = Repo::new();
-    let dir = tempfile::tempdir().unwrap();
-    fs::create_dir(dir.path().join("real")).unwrap();
-    std::os::unix::fs::symlink("real", dir.path().join("link")).unwrap();
+    let dir = tempfile::tempdir().expect("`tempfile::tempdir()` succeeds");
+    fs::create_dir(dir.path().join("real")).expect("`fs::create_dir()` succeeds");
+    std::os::unix::fs::symlink("real", dir.path().join("link"))
+        .expect("`std::os::unix::fs::symlink()` succeeds");
     for path in ["repo", "a/b/repo"] {
         let init = repo
             .command(dir.path(), &["init", &format!("link/{path}")])
             .output()
-            .unwrap();
+            .expect("`output()` succeeds");
         assert!(init.status.success(), "{init:?}");
-        let real = fs::canonicalize(dir.path().join("real").join(path)).unwrap();
-        let undo = repo.command(&real, &["undo"]).output().unwrap();
+        let real = fs::canonicalize(dir.path().join("real").join(path))
+            .expect("`fs::canonicalize()` succeeds");
+        let undo = repo
+            .command(&real, &["undo"])
+            .output()
+            .expect("`output()` succeeds");
         let error = String::from_utf8_lossy(&undo.stderr);
         assert!(
             error.contains("nothing to undo but the creation of"),
@@ -895,7 +924,7 @@ fn a_move_marker_that_cannot_be_read_is_kept_and_stops_moves() {
     repo.write("b", "b\n");
     repo.ok(&["describe", "Second"]);
     let marker = repo.path(".origin/moving");
-    fs::create_dir(&marker).unwrap();
+    fs::create_dir(&marker).expect("`fs::create_dir(&marker)` succeeds");
 
     let status = repo.run(repo.root(), &["status"]);
     let warning = String::from_utf8_lossy(&status.stderr);
@@ -915,7 +944,7 @@ fn a_move_marker_that_cannot_be_read_is_kept_and_stops_moves() {
         "{refused}"
     );
     assert_eq!(repo.read("b"), "b\n");
-    fs::remove_dir(&marker).unwrap();
+    fs::remove_dir(&marker).expect("`fs::remove_dir(&marker)` succeeds");
     let evolog = repo.ok(&["evolog", &second]);
     assert!(!evolog.contains("Second, still"), "{evolog}");
     repo.ok(&["describe", "Second, at last"]);
@@ -1031,20 +1060,24 @@ fn workspaces_share_the_repository_with_changes_of_their_own() {
     let repo = Repo::new();
     repo.write("shared", "base\n");
     repo.write("dir/run.sh", "#!/bin/sh\n");
-    fs::set_permissions(repo.path("dir/run.sh"), fs::Permissions::from_mode(0o755)).unwrap();
+    fs::set_permissions(repo.path("dir/run.sh"), fs::Permissions::from_mode(0o755))
+        .expect("`fs::set_permissions()` succeeds");
     repo.ok(&["describe", "Base"]);
     repo.ok(&["new", "Main work"]);
-    let others = tempfile::tempdir().unwrap();
+    let others = tempfile::tempdir().expect("`tempfile::tempdir()` succeeds");
     let ws = others.path().join("ws");
 
     let change = repo.workspace(&ws, &[]);
-    assert_eq!(fs::read_to_string(ws.join("shared")).unwrap(), "base\n");
+    assert_eq!(
+        fs::read_to_string(ws.join("shared")).expect("`fs::read_to_string()` succeeds"),
+        "base\n"
+    );
     let mode = fs::metadata(ws.join("dir/run.sh"))
-        .unwrap()
+        .expect("`fs::metadata()` succeeds")
         .permissions()
         .mode();
     assert_eq!(mode & 0o111, 0o111, "still executable");
-    fs::write(ws.join("shared"), "agent\n").unwrap();
+    fs::write(ws.join("shared"), "agent\n").expect("`fs::write()` succeeds");
     repo.ok_in(&ws.join("dir"), &["describe", "Agent work"]);
     let status = repo.ok_in(&ws, &["status"]);
     assert!(
@@ -1063,7 +1096,10 @@ fn workspaces_share_the_repository_with_changes_of_their_own() {
 
     let same = others.path().join("same");
     assert_eq!(repo.workspace(&same, &["--change", &change]), change);
-    assert_eq!(fs::read_to_string(same.join("shared")).unwrap(), "agent\n");
+    assert_eq!(
+        fs::read_to_string(same.join("shared")).expect("`fs::read_to_string()` succeeds"),
+        "agent\n"
+    );
 }
 
 #[test]
@@ -1074,14 +1110,20 @@ fn a_move_that_fails_takes_its_files_back() {
     let first = repo.change();
     repo.ok(&["new"]);
     let second = repo.change();
-    fs::remove_file(repo.path("ro/new")).unwrap();
+    fs::remove_file(repo.path("ro/new")).expect("`fs::remove_file()` succeeds");
     repo.write("extra", "extra\n");
-    if fs::metadata(repo.path("extra")).unwrap().uid() == 0 {
+    if fs::metadata(repo.path("extra"))
+        .expect("`fs::metadata()` succeeds")
+        .uid()
+        == 0
+    {
         return;
     }
-    fs::set_permissions(repo.path("ro"), fs::Permissions::from_mode(0o555)).unwrap();
+    fs::set_permissions(repo.path("ro"), fs::Permissions::from_mode(0o555))
+        .expect("`fs::set_permissions()` succeeds");
     let refused = repo.fails(&["edit", &first]);
-    fs::set_permissions(repo.path("ro"), fs::Permissions::from_mode(0o755)).unwrap();
+    fs::set_permissions(repo.path("ro"), fs::Permissions::from_mode(0o755))
+        .expect("`fs::set_permissions()` succeeds");
     assert!(refused.contains("ro/new"), "{refused}");
     assert_eq!(repo.read("extra"), "extra\n", "taken back");
     assert_eq!(repo.change(), second);
@@ -1095,16 +1137,24 @@ fn a_clean_workspace_behind_its_change_is_removed() {
     repo.write("shared", "base\n");
     repo.ok(&["describe", "Shared"]);
     let change = repo.change();
-    let others = tempfile::tempdir().unwrap();
+    let others = tempfile::tempdir().expect("`tempfile::tempdir()` succeeds");
     let (clean, edited) = (others.path().join("clean"), others.path().join("edited"));
     repo.workspace(&clean, &["--change", &change]);
     repo.workspace(&edited, &["--change", &change]);
     assert!(repo.ok(&["land"]).contains(" on main #1\n"));
 
-    repo.ok(&["workspace", "rm", clean.to_str().unwrap()]);
+    repo.ok(&[
+        "workspace",
+        "rm",
+        clean.to_str().expect("`to_str()` yields a value"),
+    ]);
     assert!(!clean.exists());
-    fs::write(edited.join("notes"), "mine\n").unwrap();
-    let refused = repo.fails(&["workspace", "rm", edited.to_str().unwrap()]);
+    fs::write(edited.join("notes"), "mine\n").expect("`fs::write()` succeeds");
+    let refused = repo.fails(&[
+        "workspace",
+        "rm",
+        edited.to_str().expect("`to_str()` yields a value"),
+    ]);
     assert!(refused.contains("`origin pull`"), "{refused}");
     assert!(edited.join("notes").exists());
 }
@@ -1112,12 +1162,16 @@ fn a_clean_workspace_behind_its_change_is_removed() {
 #[test]
 fn removing_a_workspace_keeps_its_work() {
     let repo = Repo::new();
-    let others = tempfile::tempdir().unwrap();
+    let others = tempfile::tempdir().expect("`tempfile::tempdir()` succeeds");
     let ws = others.path().join("ws");
     let change = repo.workspace(&ws, &[]);
-    fs::write(ws.join("unsaved"), "not snapshotted yet\n").unwrap();
+    fs::write(ws.join("unsaved"), "not snapshotted yet\n").expect("`fs::write()` succeeds");
 
-    let removed = repo.ok(&["workspace", "rm", ws.to_str().unwrap()]);
+    let removed = repo.ok(&[
+        "workspace",
+        "rm",
+        ws.to_str().expect("`to_str()` yields a value"),
+    ]);
     assert!(removed.starts_with(&format!("Kept its working copy: {change} ")));
     assert!(!ws.exists());
     assert_eq!(repo.ok(&["workspace", "list"]).lines().count(), 1);
@@ -1137,17 +1191,25 @@ fn removing_a_workspace_keeps_its_work() {
             .contains("is the main working copy")
     );
     assert!(
-        repo.fails(&["workspace", "rm", ws.to_str().unwrap()])
-            .contains("is not a workspace of this repository")
+        repo.fails(&[
+            "workspace",
+            "rm",
+            ws.to_str().expect("`to_str()` yields a value")
+        ])
+        .contains("is not a workspace of this repository")
     );
     assert!(
         repo.fails(&["workspace", "new", "nested"])
             .contains("is inside a working copy")
     );
-    fs::write(others.path().join("file"), "").unwrap();
+    fs::write(others.path().join("file"), "").expect("`fs::write()` succeeds");
     assert!(
-        repo.fails(&["workspace", "new", others.path().to_str().unwrap()])
-            .contains("is not empty")
+        repo.fails(&[
+            "workspace",
+            "new",
+            others.path().to_str().expect("`to_str()` yields a value")
+        ])
+        .contains("is not empty")
     );
 }
 
@@ -1210,7 +1272,7 @@ fn a_change_the_target_already_has_moves_onto_its_tip() {
     let land = repo.ok(&["land"]);
     assert!(land.contains(" would change nothing on `main`\n"), "{land}");
 
-    fs::remove_file(repo.path("f")).unwrap();
+    fs::remove_file(repo.path("f")).expect("`fs::remove_file()` succeeds");
     let land = repo.ok(&["land"]);
     assert!(land.starts_with("Landed change "), "{land}");
     assert!(!repo.path("f").exists());
@@ -1300,7 +1362,7 @@ fn landings_wait_for_the_evidence_policy_requires() {
     let key = policy
         .lines()
         .find_map(|line| line.strip_prefix("\"ada\" = "))
-        .unwrap();
+        .expect("`find_map()` succeeds");
     repo.write(
         "policy.toml",
         &policy.replace("[nodes]\n", &format!("[nodes]\nhosted = {key}\n")),
@@ -1348,9 +1410,9 @@ fn converge_merges_the_files_of_every_head() {
     repo.ok(&["describe", "Shared work"]);
     let change = repo.change();
     let pointer = repo.path(".origin/workspace");
-    let started = fs::read_to_string(&pointer).unwrap();
+    let started = fs::read_to_string(&pointer).expect("`fs::read_to_string(&pointer)` succeeds");
     for changed in ["a", "b", "c"] {
-        fs::write(&pointer, &started).unwrap();
+        fs::write(&pointer, &started).expect("`fs::write(&pointer, &started)` succeeds");
         for path in ["a", "b", "c"] {
             repo.write(
                 path,
@@ -1380,9 +1442,9 @@ fn converge_labels_the_side_holding_merged_heads() {
     repo.ok(&["describe", "Shared work"]);
     let change = repo.change();
     let pointer = repo.path(".origin/workspace");
-    let started = fs::read_to_string(&pointer).unwrap();
+    let started = fs::read_to_string(&pointer).expect("`fs::read_to_string(&pointer)` succeeds");
     for side in ["one", "two", "three"] {
-        fs::write(&pointer, &started).unwrap();
+        fs::write(&pointer, &started).expect("`fs::write(&pointer, &started)` succeeds");
         repo.write("file", &format!("{side}\n"));
         repo.ok(&["describe", "Shared work"]);
     }
@@ -1396,7 +1458,7 @@ fn commands_in_different_workspaces_run_concurrently() {
     const WORKSPACES: usize = 4;
     const EDITS: usize = 5;
     let repo = Repo::new();
-    let others = tempfile::tempdir().unwrap();
+    let others = tempfile::tempdir().expect("`tempfile::tempdir()` succeeds");
     let workspaces: Vec<_> = (0..WORKSPACES)
         .map(|i| {
             let root = others.path().join(format!("ws{i}"));
@@ -1410,7 +1472,7 @@ fn commands_in_different_workspaces_run_concurrently() {
             let repo = &repo;
             scope.spawn(move || {
                 for edit in 0..EDITS {
-                    fs::write(root.join("file"), edit.to_string()).unwrap();
+                    fs::write(root.join("file"), edit.to_string()).expect("`fs::write()` succeeds");
                     repo.ok_in(root, &["describe", "Edit"]);
                 }
             });
@@ -1443,12 +1505,12 @@ fn commands_in_one_workspace_wait_for_each_other() {
 fn workspaces_land_their_own_changes() {
     let repo = Repo::new();
     repo.write("unlanded", "main's own work\n");
-    let others = tempfile::tempdir().unwrap();
+    let others = tempfile::tempdir().expect("`tempfile::tempdir()` succeeds");
     let (one, two) = (others.path().join("one"), others.path().join("two"));
     let first = repo.workspace(&one, &[]);
     let second = repo.workspace(&two, &[]);
-    fs::write(one.join("a"), "a\n").unwrap();
-    fs::write(two.join("b"), "b\n").unwrap();
+    fs::write(one.join("a"), "a\n").expect("`fs::write()` succeeds");
+    fs::write(two.join("b"), "b\n").expect("`fs::write()` succeeds");
 
     let land = repo.ok_in(&one, &["land"]);
     assert!(
@@ -1466,7 +1528,10 @@ fn workspaces_land_their_own_changes() {
         status.ends_with("On top of: main #2\nNo changes.\n"),
         "{status}"
     );
-    assert_eq!(fs::read_to_string(two.join("a")).unwrap(), "a\n");
+    assert_eq!(
+        fs::read_to_string(two.join("a")).expect("`fs::read_to_string()` succeeds"),
+        "a\n"
+    );
     let status = repo.ok_in(&one, &["status"]);
     assert!(
         status.ends_with("On top of: main #1\nNo changes.\n"),
@@ -1487,7 +1552,7 @@ fn pull_follows_a_rebase_waiting_to_land() {
     repo.write("own", "own\n");
     repo.ok(&["describe", "Feature"]);
     let change = repo.change();
-    let others = tempfile::tempdir().unwrap();
+    let others = tempfile::tempdir().expect("`tempfile::tempdir()` succeeds");
     let other = others.path().join("other");
     repo.workspace(&other, &["--change", &change]);
     repo.ok(&["new", "--on", "main"]);
@@ -1504,7 +1569,7 @@ fn pull_follows_a_rebase_waiting_to_land() {
     repo.ok(&["edit", &change]);
     assert!(repo.ok(&["land"]).contains("waits for ci.test"));
 
-    fs::write(other.join("own"), "edited\n").unwrap();
+    fs::write(other.join("own"), "edited\n").expect("`fs::write()` succeeds");
     let status = repo.ok_in(&other, &["status"]);
     assert!(
         status.contains(&format!(
@@ -1514,10 +1579,13 @@ fn pull_follows_a_rebase_waiting_to_land() {
     );
     repo.ok_in(&other, &["pull"]);
     assert_eq!(
-        fs::read_to_string(other.join("upstream")).unwrap(),
+        fs::read_to_string(other.join("upstream")).expect("`fs::read_to_string()` succeeds"),
         "upstream\n"
     );
-    assert_eq!(fs::read_to_string(other.join("own")).unwrap(), "edited\n");
+    assert_eq!(
+        fs::read_to_string(other.join("own")).expect("`fs::read_to_string()` succeeds"),
+        "edited\n"
+    );
     let status = repo.ok_in(&other, &["status"]);
     assert!(status.contains("On top of: main #1\n"), "{status}");
     assert!(
@@ -1532,7 +1600,7 @@ fn a_workspace_follows_its_change_once_it_lands_elsewhere() {
     repo.write("shared", "base\n");
     repo.ok(&["describe", "Shared"]);
     let change = repo.change();
-    let others = tempfile::tempdir().unwrap();
+    let others = tempfile::tempdir().expect("`tempfile::tempdir()` succeeds");
     let (clean, conflicting) = (
         others.path().join("clean"),
         others.path().join("conflicting"),
@@ -1540,13 +1608,13 @@ fn a_workspace_follows_its_change_once_it_lands_elsewhere() {
     repo.workspace(&clean, &["--change", &change]);
     repo.workspace(&conflicting, &["--change", &change]);
     let pointer = clean.join(".origin/workspace");
-    let before = fs::read_to_string(&pointer).unwrap();
+    let before = fs::read_to_string(&pointer).expect("`fs::read_to_string(&pointer)` succeeds");
 
     assert!(repo.ok(&["land"]).contains(" on main #1\n"));
     repo.write("shared", "main\n");
     assert!(repo.ok(&["land"]).contains(" on main #2\n"));
 
-    fs::write(clean.join("notes"), "mine\n").unwrap();
+    fs::write(clean.join("notes"), "mine\n").expect("`fs::write()` succeeds");
     let status = repo.ok_in(&clean, &["status"]);
     assert!(
         status.contains(&format!(
@@ -1556,8 +1624,15 @@ fn a_workspace_follows_its_change_once_it_lands_elsewhere() {
         "{status}"
     );
     assert!(status.contains("A notes\n"), "{status}");
-    assert_eq!(fs::read_to_string(&pointer).unwrap(), before, "left alone");
-    assert_eq!(fs::read_to_string(clean.join("shared")).unwrap(), "base\n");
+    assert_eq!(
+        fs::read_to_string(&pointer).expect("`fs::read_to_string(&pointer)` succeeds"),
+        before,
+        "left alone"
+    );
+    assert_eq!(
+        fs::read_to_string(clean.join("shared")).expect("`fs::read_to_string()` succeeds"),
+        "base\n"
+    );
     let refused = repo.fails_in(&clean, &["describe", "More"]);
     assert!(
         refused.contains("run `origin pull` to follow it first"),
@@ -1566,19 +1641,23 @@ fn a_workspace_follows_its_change_once_it_lands_elsewhere() {
 
     let pulled = repo.ok_in(&clean, &["pull"]);
     assert!(pulled.contains("On top of: main #2\n"), "{pulled}");
-    assert_eq!(fs::read_to_string(clean.join("shared")).unwrap(), "main\n");
+    assert_eq!(
+        fs::read_to_string(clean.join("shared")).expect("`fs::read_to_string()` succeeds"),
+        "main\n"
+    );
     assert!(
         repo.ok_in(&clean, &["status"])
             .ends_with("On top of: main #2\nA notes\n")
     );
 
-    fs::write(conflicting.join("shared"), "mine\n").unwrap();
+    fs::write(conflicting.join("shared"), "mine\n").expect("`fs::write()` succeeds");
     let pulled = repo.ok_in(&conflicting, &["pull"]);
     assert!(
         pulled.contains("Conflicts: shared hold both versions"),
         "{pulled}"
     );
-    let shared = fs::read_to_string(conflicting.join("shared")).unwrap();
+    let shared =
+        fs::read_to_string(conflicting.join("shared")).expect("`fs::read_to_string()` succeeds");
     assert!(
         shared.contains("mine\n") && shared.contains("main\n") && shared.contains("<<<<<<<"),
         "{shared}"
@@ -1594,7 +1673,7 @@ fn a_workspace_follows_its_change_once_it_lands_elsewhere() {
         "{pulled}"
     );
     assert!(repo.fails_in(&conflicting, &["land"]).contains("shared"));
-    fs::write(conflicting.join("shared"), "resolved\n").unwrap();
+    fs::write(conflicting.join("shared"), "resolved\n").expect("`fs::write()` succeeds");
     assert!(
         repo.ok_in(&conflicting, &["land"])
             .contains(" on main #4\n")
@@ -1607,15 +1686,16 @@ fn a_refused_pull_writes_nothing() {
     repo.write("own", "own\n");
     repo.ok(&["describe", "Feature"]);
     let change = repo.change();
-    let others = tempfile::tempdir().unwrap();
+    let others = tempfile::tempdir().expect("`tempfile::tempdir()` succeeds");
     let other = others.path().join("other");
     repo.workspace(&other, &["--change", &change]);
     repo.ok(&["new", "--on", "main"]);
     repo.write("upstream", "upstream\n");
     assert!(repo.ok(&["land"]).contains(" on main #1\n"));
 
-    fs::write(other.join("own"), "edited\n").unwrap();
-    let socket = std::os::unix::net::UnixListener::bind(other.join("upstream")).unwrap();
+    fs::write(other.join("own"), "edited\n").expect("`fs::write()` succeeds");
+    let socket = std::os::unix::net::UnixListener::bind(other.join("upstream"))
+        .expect("`std::os::unix::net::UnixListener::bind()` succeeds");
     repo.ok_in(&other, &["describe", "Feature"]);
     let evolog = repo.ok_in(&other, &["evolog", &change]);
     let refused = repo.fails_in(&other, &["pull"]);
@@ -1624,10 +1704,13 @@ fn a_refused_pull_writes_nothing() {
         "{refused}"
     );
     assert_eq!(repo.ok_in(&other, &["evolog", &change]), evolog);
-    assert_eq!(fs::read_to_string(other.join("own")).unwrap(), "edited\n");
+    assert_eq!(
+        fs::read_to_string(other.join("own")).expect("`fs::read_to_string()` succeeds"),
+        "edited\n"
+    );
 
     drop(socket);
-    fs::remove_file(other.join("upstream")).unwrap();
+    fs::remove_file(other.join("upstream")).expect("`fs::remove_file()` succeeds");
     let pulled = repo.ok_in(&other, &["pull"]);
     assert!(pulled.contains("On top of: main #1\n"), "{pulled}");
     let status = repo.ok_in(&other, &["status"]);
@@ -1674,10 +1757,10 @@ fn undoing_a_resolution_restores_the_conflict() {
     repo.ok(&["describe", "Shared work"]);
     let change = repo.change();
     let pointer = repo.path(".origin/workspace");
-    let started = fs::read_to_string(&pointer).unwrap();
+    let started = fs::read_to_string(&pointer).expect("`fs::read_to_string(&pointer)` succeeds");
     repo.write("image", "left\0");
     repo.ok(&["describe", "Shared work"]);
-    fs::write(&pointer, started).unwrap();
+    fs::write(&pointer, started).expect("`fs::write(&pointer, started)` succeeds");
     repo.write("image", "right\0");
     repo.ok(&["converge", &change]);
     repo.ok(&["resolve", "image"]);
@@ -1691,7 +1774,7 @@ fn undoing_a_resolution_restores_the_conflict() {
 #[test]
 fn undo_moves_only_its_own_workspace() {
     let repo = Repo::new();
-    let others = tempfile::tempdir().unwrap();
+    let others = tempfile::tempdir().expect("`tempfile::tempdir()` succeeds");
     let ws = others.path().join("ws");
     repo.workspace(&ws, &[]);
     repo.ok_in(&ws, &["new", "Agent work"]);
@@ -1732,7 +1815,7 @@ fn a_move_cut_short_is_finished_without_losing_edits() {
     let revision = repo.revision();
     repo.ok(&["new", "Second"]);
     repo.write("a", "changed\n");
-    fs::remove_file(repo.path("ro/b")).unwrap();
+    fs::remove_file(repo.path("ro/b")).expect("`fs::remove_file()` succeeds");
 
     repo.crash_reading(repo.root(), b"b\n", &["edit", &first], || {
         fs::read_to_string(repo.path("a")).is_ok_and(|a| a == "a\n")
@@ -1765,7 +1848,7 @@ fn a_move_cut_short_before_its_revision_is_written_is_taken_back() {
     repo.write("own", "own\n");
     repo.ok(&["describe", "Feature"]);
     let change = repo.change();
-    let others = tempfile::tempdir().unwrap();
+    let others = tempfile::tempdir().expect("`tempfile::tempdir()` succeeds");
     let other = others.path().join("other");
     repo.workspace(&other, &["--change", &change]);
     repo.ok(&["new", "--on", "main"]);
@@ -1773,19 +1856,22 @@ fn a_move_cut_short_before_its_revision_is_written_is_taken_back() {
     repo.write("ro/b", "b\n");
     assert!(repo.ok(&["land"]).contains(" on main #1\n"));
 
-    fs::remove_file(repo.path("upstream")).unwrap();
+    fs::remove_file(repo.path("upstream")).expect("`fs::remove_file()` succeeds");
     let evolog = repo.ok_in(&other, &["evolog", &change]);
     repo.crash_reading(&other, b"upstream\n", &["pull"], || {
         fs::read_to_string(other.join("ro/b")).is_ok_and(|b| b == "b\n")
     });
     assert!(other.join(".origin/moving").exists());
-    fs::write(other.join("own"), "edited\n").unwrap();
+    fs::write(other.join("own"), "edited\n").expect("`fs::write()` succeeds");
 
     let status = repo.ok_in(&other, &["status"]);
     assert!(status.starts_with("Took back a move"), "{status}");
     assert!(!other.join("ro/b").exists());
     assert!(!other.join("upstream").exists());
-    assert_eq!(fs::read_to_string(other.join("own")).unwrap(), "edited\n");
+    assert_eq!(
+        fs::read_to_string(other.join("own")).expect("`fs::read_to_string()` succeeds"),
+        "edited\n"
+    );
     assert!(!other.join(".origin/moving").exists());
     assert_eq!(repo.ok_in(&other, &["evolog", &change]), evolog);
     let pulled = repo.ok_in(&other, &["pull"]);
@@ -1798,7 +1884,7 @@ fn an_unreadable_move_marker_leaves_the_files() {
     repo.write("a", "a\n");
     repo.ok(&["describe", "First"]);
     let first = repo.revision();
-    fs::write(repo.path(".origin/moving"), b"").unwrap();
+    fs::write(repo.path(".origin/moving"), b"").expect("`fs::write()` succeeds");
     repo.write("a", "half checked out\n");
     let status = repo.ok(&["status"]);
     assert!(
@@ -1810,7 +1896,7 @@ fn an_unreadable_move_marker_leaves_the_files() {
     assert!(!repo.path(".origin/moving").exists());
     assert_eq!(
         fs::read_dir(repo.path(".origin/oplog/writers"))
-            .unwrap()
+            .expect("`fs::read_dir()` succeeds")
             .count(),
         0,
         "every write is done, and durable"
@@ -1819,10 +1905,12 @@ fn an_unreadable_move_marker_leaves_the_files() {
 
 /// Makes the stored object holding `content` unreadable, or readable again.
 /// Writers still skip writing it, because the store already has it.
+#[expect(clippy::expect_used, reason = "A test helper fails by panicking.")]
 fn unreadable_object(repo: &Repo, content: &[u8], unreadable: bool) {
     let stored = repo.stored_object(content);
     let mode = if unreadable { 0o000 } else { 0o444 };
-    fs::set_permissions(stored, fs::Permissions::from_mode(mode)).unwrap();
+    fs::set_permissions(stored, fs::Permissions::from_mode(mode))
+        .expect("`fs::set_permissions()` succeeds");
 }
 
 #[test]
@@ -1832,7 +1920,7 @@ fn a_refused_move_cut_short_is_taken_back() {
     repo.ok(&["describe", "File"]);
     let file = repo.change();
     repo.ok(&["new", "Directory"]);
-    fs::remove_file(repo.path("a")).unwrap();
+    fs::remove_file(repo.path("a")).expect("`fs::remove_file()` succeeds");
     repo.write("a/b", "in a directory\n");
     repo.write("only here", "only here\n");
     repo.ok(&["describe", "Directory"]);
@@ -1861,7 +1949,7 @@ fn a_move_that_cannot_be_finished_leaves_the_files() {
     let first = repo.change();
     repo.ok(&["new", "Second"]);
     repo.write("a", "changed\n");
-    fs::remove_file(repo.path("ro/b")).unwrap();
+    fs::remove_file(repo.path("ro/b")).expect("`fs::remove_file()` succeeds");
     repo.ok(&["status"]);
 
     repo.crash_reading(repo.root(), b"b\n", &["edit", &first], || {
@@ -1884,15 +1972,18 @@ fn a_move_that_cannot_be_finished_leaves_the_files() {
 #[test]
 fn watch_prints_events_from_a_cursor_or_as_they_happen() {
     let repo = Repo::new();
-    let line =
-        |receive: &mpsc::Receiver<String>| receive.recv_timeout(Duration::from_secs(20)).unwrap();
+    let line = |receive: &mpsc::Receiver<String>| {
+        receive
+            .recv_timeout(Duration::from_secs(20))
+            .expect("`recv_timeout(Duration::from_secs(20))` succeeds")
+    };
     let (mut all, receive) = repo.spawn(&["watch", "--since", "0"]);
     let policy = line(&receive);
     assert!(
         policy.contains(" target.advanced target=policy seq=0 "),
         "{policy}"
     );
-    all.kill().unwrap();
+    all.kill().expect("`kill()` succeeds");
 
     let (mut checks, receive) = repo.spawn(&["watch", "--kind", "ci.*"]);
     // wall-clock: the command reads the log in the background, which nothing signals.
@@ -1900,7 +1991,7 @@ fn watch_prints_events_from_a_cursor_or_as_they_happen() {
     repo.ok(&["describe", "Work"]);
     repo.ok(&["annotate", "@", "ci.test", "--pass"]);
     let issued = line(&receive);
-    checks.kill().unwrap();
+    checks.kill().expect("`kill()` succeeds");
     let fields: Vec<_> = issued.split(' ').collect();
     assert!(fields[0].parse::<u64>().is_ok(), "a cursor first: {issued}");
     assert_eq!(fields[1], "statement.issued");

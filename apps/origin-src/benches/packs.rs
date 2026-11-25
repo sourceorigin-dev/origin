@@ -2,6 +2,8 @@
 //! packed, compacting them, and finding objects across several packs. Run
 //! on a real disk: syncs cost nothing on a RAM-backed file system.
 
+#![expect(clippy::expect_used, reason = "A benchmark fails by panicking.")]
+
 use std::path::PathBuf;
 use std::sync::{LazyLock, OnceLock};
 
@@ -12,8 +14,9 @@ use origin_shared::{EncodedObject, Kind, ObjectId, Record, RecordId, Statement, 
 use origin_src::store::Store;
 
 fn main() {
-    let root = tempfile::tempdir().unwrap();
-    ROOT.set(root.path().to_owned()).unwrap();
+    let root = tempfile::tempdir().expect("`tempfile::tempdir()` succeeds");
+    ROOT.set(root.path().to_owned())
+        .expect("`set(root.path().to_owned())` succeeds");
     divan::main();
 }
 
@@ -30,9 +33,9 @@ fn statements(seed: usize, count: usize) -> Vec<EncodedObject> {
         .map(|seed| {
             Statement {
                 subject: RecordId::Revision(EncodedObject::blob(&seed.to_le_bytes()).id().into()),
-                kind: Kind::new("ci.test").unwrap(),
+                kind: Kind::new("ci.test").expect("`Kind::new()` succeeds"),
                 verdict: Some(Verdict::Pass),
-                issuer: "node:ci-1".parse().unwrap(),
+                issuer: "node:ci-1".parse().expect("`parse()` succeeds"),
                 inputs: None,
                 payload: None,
                 supersedes: None,
@@ -50,16 +53,19 @@ type Fixture = (tempfile::TempDir, Store);
 
 /// An initialized store in a new temporary directory.
 fn store() -> Fixture {
-    let dir = tempfile::tempdir_in(ROOT.get().unwrap()).unwrap();
+    let dir = tempfile::tempdir_in(ROOT.get().expect("`get()` yields a value"))
+        .expect("the packs root is set before it is used");
     let store = Store::new(dir.path().join(".origin"), Native::default());
-    store.init().unwrap();
+    store.init().expect("`init()` succeeds");
     (dir, store)
 }
 
 /// A store holding the million statements as loose objects.
 fn loose() -> Fixture {
     let (dir, store) = store();
-    store.write_all(&STATEMENTS_1M).unwrap();
+    store
+        .write_all(&STATEMENTS_1M)
+        .expect("`write_all(&STATEMENTS_1M)` succeeds");
     (dir, store)
 }
 
@@ -78,13 +84,20 @@ fn packed(packs: u32) -> Fixture {
         };
         store
             .write_all(&STATEMENTS_1M[written..written + count])
-            .unwrap();
-        store.compact().unwrap();
+            .expect("`write_all()` succeeds");
+        store.compact().expect("`compact()` succeeds");
         written += count;
     }
     let files = std::fs::read_dir(dir.path().join(".origin/objects/packs"))
-        .unwrap()
-        .filter(|entry| entry.as_ref().unwrap().path().extension() == Some("pack".as_ref()))
+        .expect("`std::fs::read_dir()` succeeds")
+        .filter(|entry| {
+            entry
+                .as_ref()
+                .expect("`as_ref()` succeeds")
+                .path()
+                .extension()
+                == Some("pack".as_ref())
+        })
         .count();
     assert_eq!(
         files, packs as usize,
@@ -119,7 +132,11 @@ fn write_loose(bencher: Bencher<'_, '_>) {
     bencher
         .counter(ItemsCount::new(STATEMENTS))
         .with_inputs(store)
-        .bench_local_refs(|(_, store)| store.write_all(&STATEMENTS_1M).unwrap());
+        .bench_local_refs(|(_, store)| {
+            store
+                .write_all(&STATEMENTS_1M)
+                .expect("`write_all(&STATEMENTS_1M)` succeeds")
+        });
 }
 
 /// Compacting a million loose statements into one pack.
@@ -128,7 +145,7 @@ fn compact(bencher: Bencher<'_, '_>) {
     bencher
         .counter(ItemsCount::new(STATEMENTS))
         .with_inputs(loose)
-        .bench_local_refs(|(_, store)| store.compact().unwrap());
+        .bench_local_refs(|(_, store)| store.compact().expect("`compact()` succeeds"));
 }
 
 /// Reading every statement of a million back, in id order, from one thread,
@@ -143,7 +160,7 @@ fn read_all(bencher: Bencher<'_, '_>, layout: &str) {
     ids.sort_unstable();
     bencher.counter(ItemsCount::new(STATEMENTS)).bench(|| {
         for &id in &ids {
-            black_box(store.read(id).unwrap());
+            black_box(store.read(id).expect("`read(id)` succeeds"));
         }
     });
 }
@@ -158,8 +175,12 @@ fn read_one(bencher: Bencher<'_, '_>, packs: u32) {
         packed_store(packs)
     };
     let id = STATEMENTS_1M[STATEMENTS - 1].id();
-    store.read(id).unwrap();
-    bencher.bench(|| store.read(black_box(id)).unwrap());
+    store.read(id).expect("`read(id)` succeeds");
+    bencher.bench(|| {
+        store
+            .read(black_box(id))
+            .expect("`read(black_box(id))` succeeds")
+    });
 }
 
 /// Looking up an object the store doesn't have, among a million statements
@@ -173,5 +194,11 @@ fn contains_absent(bencher: Bencher<'_, '_>, packs: u32) {
         packed_store(packs)
     };
     let id = EncodedObject::blob(b"absent").id();
-    bencher.bench(|| assert!(!store.contains(black_box(id)).unwrap()));
+    bencher.bench(|| {
+        assert!(
+            !store
+                .contains(black_box(id))
+                .expect("`contains(black_box(id))` succeeds")
+        );
+    });
 }

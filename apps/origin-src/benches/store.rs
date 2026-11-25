@@ -3,6 +3,8 @@
 //! log. Run it on a real disk: syncs cost nothing on a RAM-backed file
 //! system.
 
+#![expect(clippy::expect_used, reason = "A benchmark fails by panicking.")]
+
 use std::fs::File;
 use std::io;
 use std::path::Path;
@@ -44,9 +46,9 @@ fn store() -> (tempfile::TempDir, Store) {
 
 /// An initialized store on `platform` in a new temporary directory.
 fn store_on<P: Platform>(platform: P) -> (tempfile::TempDir, Store<P>) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("`tempfile::tempdir()` succeeds");
     let store = Store::new(dir.path().join(".origin"), platform);
-    store.init().unwrap();
+    store.init().expect("`init()` succeeds");
     (dir, store)
 }
 
@@ -62,7 +64,11 @@ fn write_unbatched(bencher: Bencher<'_, '_>, len: usize) {
             seed += 1;
             EncodedObject::blob(&content(len, seed))
         })
-        .bench_local_refs(|object| store.write_all(slice::from_ref(object)).unwrap());
+        .bench_local_refs(|object| {
+            store
+                .write_all(slice::from_ref(object))
+                .expect("`write_all(slice::from_ref(object))` succeeds")
+        });
 }
 
 /// Writing `count` new 4 KiB objects in one batch, staged from every core,
@@ -75,7 +81,11 @@ fn write_batch(bencher: Bencher<'_, '_>, count: usize) {
     bencher
         .counter(ItemsCount::new(count))
         .with_inputs(store)
-        .bench_local_refs(|(_, store)| store.write_all(&objects).unwrap());
+        .bench_local_refs(|(_, store)| {
+            store
+                .write_all(&objects)
+                .expect("`write_all(&objects)` succeeds")
+        });
 }
 
 /// Walking a store of 20k objects for the temporary files crashed writes
@@ -86,8 +96,14 @@ fn remove_stale_temps(bencher: Bencher<'_, '_>) {
     let objects: Vec<_> = (0..20_000)
         .map(|seed| EncodedObject::blob(&content(64, seed)))
         .collect();
-    store.write_all(&objects).unwrap();
-    bencher.bench(|| store.remove_stale_temps().unwrap());
+    store
+        .write_all(&objects)
+        .expect("`write_all(&objects)` succeeds");
+    bencher.bench(|| {
+        store
+            .remove_stale_temps()
+            .expect("`remove_stale_temps()` succeeds");
+    });
 }
 
 /// Writing objects the store already has, the common case when
@@ -99,10 +115,14 @@ fn write_existing(bencher: Bencher<'_, '_>, count: usize) {
     let objects: Vec<_> = (0..count)
         .map(|seed| EncodedObject::blob(&content(4 * 1024, seed)))
         .collect();
-    store.write_all(&objects).unwrap();
-    bencher
-        .counter(ItemsCount::new(count))
-        .bench(|| store.write_all(black_box(&objects)).unwrap());
+    store
+        .write_all(&objects)
+        .expect("`write_all(&objects)` succeeds");
+    bencher.counter(ItemsCount::new(count)).bench(|| {
+        store
+            .write_all(black_box(&objects))
+            .expect("`write_all(black_box(&objects))` succeeds")
+    });
 }
 
 /// Reading, decompressing and verifying an object, as checkouts do.
@@ -110,10 +130,14 @@ fn write_existing(bencher: Bencher<'_, '_>, count: usize) {
 fn read(bencher: Bencher<'_, '_>, len: usize) {
     let (_dir, store) = store();
     let object = EncodedObject::blob(&content(len, 0));
-    store.write_all(slice::from_ref(&object)).unwrap();
-    bencher
-        .counter(BytesCount::new(len))
-        .bench(|| store.read(black_box(object.id())).unwrap());
+    store
+        .write_all(slice::from_ref(&object))
+        .expect("`write_all(slice::from_ref(&object))` succeeds");
+    bencher.counter(BytesCount::new(len)).bench(|| {
+        store
+            .read(black_box(object.id()))
+            .expect("`read(black_box(object.id()))` succeeds")
+    });
 }
 
 /// Appending an acceptance to a target, the durable step of every landing.
@@ -124,7 +148,7 @@ fn append(bencher: Bencher<'_, '_>) {
     let main = TargetName::MAIN;
     let state = TreeId::from(Tree::default().encode().id());
     bencher.bench_local(|| {
-        let head = store.head(&main).unwrap();
+        let head = store.head(&main).expect("`head(&main)` succeeds");
         let acceptance = AcceptanceBody {
             target: main.id(),
             seq: head.map_or(0, |head| head.seq + 1),
@@ -135,7 +159,9 @@ fn append(bencher: Bencher<'_, '_>) {
             policy: None,
         }
         .sign(&key);
-        store.append(&main, &acceptance).unwrap()
+        store
+            .append(&main, &acceptance)
+            .expect("`append(&main, &acceptance)` succeeds")
     });
 }
 
@@ -152,13 +178,15 @@ fn records(count: usize) -> Vec<EncodedObject> {
             if i % 10 == 0 {
                 let change = i / 10 % heads.len();
                 let encoded = Revision {
-                    change: ChangeId::from_bytes([u8::try_from(change).unwrap(); 16]),
+                    change: ChangeId::from_bytes(
+                        [u8::try_from(change).expect("`u8::try_from(change)` succeeds"); 16],
+                    ),
                     predecessors: heads[change].into_iter().collect(),
                     base: Base::Acceptance(EncodedObject::blob(b"main").id().into()),
                     deps: Vec::new(),
                     snapshot,
                     description: EncodedObject::blob(&content(64, i)).id().into(),
-                    author: "user:bench".parse().unwrap(),
+                    author: "user:bench".parse().expect("`parse()` succeeds"),
                 }
                 .encode();
                 heads[change] = Some(encoded.id().into());
@@ -166,10 +194,10 @@ fn records(count: usize) -> Vec<EncodedObject> {
                 encoded
             } else {
                 Statement {
-                    subject: RecordId::Revision(revision.unwrap()),
-                    kind: Kind::new(format!("ci.check-{i}")).unwrap(),
+                    subject: RecordId::Revision(revision.expect("`revision` yields a value")),
+                    kind: Kind::new(format!("ci.check-{i}")).expect("the kind is valid"),
                     verdict: Some(Verdict::Pass),
-                    issuer: "node:ci-1".parse().unwrap(),
+                    issuer: "node:ci-1".parse().expect("`parse()` succeeds"),
                     inputs: None,
                     payload: None,
                     supersedes: None,
@@ -243,7 +271,11 @@ fn write_records<P: Platform + Default, const INDEXED: bool>(
     bencher
         .counter(ItemsCount::new(count))
         .with_inputs(|| store_on(P::default()))
-        .bench_local_refs(|(_, store)| store.write_all(&objects).unwrap());
+        .bench_local_refs(|(_, store)| {
+            store
+                .write_all(&objects)
+                .expect("`write_all(&objects)` succeeds")
+        });
 }
 
 /// Opening the index of 20k records written in batches of a hundred.
@@ -251,21 +283,23 @@ fn write_records<P: Platform + Default, const INDEXED: bool>(
 fn open_index(bencher: Bencher<'_, '_>) {
     let (_dir, store) = store();
     for batch in records(20_000).chunks(100) {
-        store.write_all(batch).unwrap();
+        store.write_all(batch).expect("`write_all(batch)` succeeds");
     }
     bencher
         .counter(ItemsCount::new(20_000_usize))
-        .bench(|| Index::open(&store).unwrap());
+        .bench(|| Index::open(&store).expect("`Index::open(&store)` succeeds"));
 }
 
 /// Rebuilding the index of 20k records from the store.
 #[divan::bench(sample_count = 10)]
 fn rebuild_index(bencher: Bencher<'_, '_>) {
     let (_dir, store) = store();
-    store.write_all(&records(20_000)).unwrap();
+    store
+        .write_all(&records(20_000))
+        .expect("`write_all(&records(20_000))` succeeds");
     bencher
         .counter(ItemsCount::new(20_000_usize))
-        .bench(|| Index::rebuild(&store).unwrap());
+        .bench(|| Index::rebuild(&store).expect("`Index::rebuild(&store)` succeeds"));
 }
 
 /// Reads the events of 10k records, each written in its own batch as issuing
@@ -274,12 +308,16 @@ fn rebuild_index(bencher: Bencher<'_, '_>) {
 fn read_events(bencher: Bencher<'_, '_>) {
     let (_dir, store) = store_on(NoSync);
     for record in records(10_000) {
-        store.write_all(slice::from_ref(&record)).unwrap();
+        store
+            .write_all(slice::from_ref(&record))
+            .expect("`write_all(slice::from_ref(&record))` succeeds");
     }
     let events = Events::new(&store);
-    bencher
-        .counter(ItemsCount::new(10_000_usize))
-        .bench(|| events.after(0, &Filter::default(), usize::MAX).unwrap());
+    bencher.counter(ItemsCount::new(10_000_usize)).bench(|| {
+        events
+            .after(0, &Filter::default(), usize::MAX)
+            .expect("`after(0, &Filter::default(), usize::MAX)` succeeds")
+    });
 }
 
 /// Polls for events when there are none, as `watch` does every 50 ms.
@@ -287,9 +325,15 @@ fn read_events(bencher: Bencher<'_, '_>) {
 fn poll_events(bencher: Bencher<'_, '_>) {
     let (_dir, store) = store_on(NoSync);
     for record in records(10_000) {
-        store.write_all(slice::from_ref(&record)).unwrap();
+        store
+            .write_all(slice::from_ref(&record))
+            .expect("`write_all(slice::from_ref(&record))` succeeds");
     }
     let events = Events::new(&store);
-    let end = events.end().unwrap();
-    bencher.bench(|| events.after(end, &Filter::default(), usize::MAX).unwrap());
+    let end = events.end().expect("`end()` succeeds");
+    bencher.bench(|| {
+        events
+            .after(end, &Filter::default(), usize::MAX)
+            .expect("`after(end, &Filter::default(), usize::MAX)` succeeds")
+    });
 }
