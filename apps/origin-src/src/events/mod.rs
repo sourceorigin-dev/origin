@@ -1,29 +1,14 @@
-//! Events: what happened on this node, for plugins and agents to react to.
-//! They are derived from the [op log](crate::oplog), the records its entries
-//! name, and the queues' waiting landings, so nothing extra is stored. The
-//! events are:
+//! Events: what happened on this node, for plugins and agents to react to. They
+//! are derived from the [op log](crate::oplog), the records its entries name, and
+//! the queues' waiting landings, so nothing extra is stored. They are
+//! `statement.issued`, `revision.created`, `target.advanced` and
+//! `check.requested`.
 //!
-//! - `statement.issued`, for every statement written, including conflicts,
-//!   divergence and promotions: its subject, kind, verdict and issuer;
-//! - `revision.created`, for every revision written;
-//! - `target.advanced`, for every acceptance appended to a target;
-//! - `check.requested`, for each statement a waiting landing lacks.
-//!
-//! An event's cursor is the sequence number of the op log entry it comes from.
-//! It never changes, even across restarts and index rebuilds, and is never
-//! reused. Reading the events after a cursor returns the next cursor to read
-//! from.
-//!
-//! Events are delivered in the op log's order, at least once: reading from an
-//! earlier cursor delivers its events again, and the events of one entry are
-//! always delivered together. Consumers deduplicate by the [`EventKind`],
-//! which is the whole event except its cursor.
-//!
-//! An entry whose write is in progress holds back the events after it until
-//! the write is published. An entry whose writer crashed delivers what that
-//! write published (see [`OpLog::settled`](crate::oplog::OpLog::settled)).
-//! Entries lost to damage deliver nothing, and the damage is reported on
-//! stderr.
+//! An event's cursor is the sequence number of the op log entry it comes from. It
+//! never changes and is never reused. Events are delivered in the op log's order,
+//! at least once: consumers deduplicate by the [`EventKind`], which is the whole
+//! event except its cursor. What each event means, and what an entry in progress
+//! or lost to damage delivers, is in `docs/design.md`, under "Events".
 
 use std::thread;
 use std::time::{Duration, Instant};

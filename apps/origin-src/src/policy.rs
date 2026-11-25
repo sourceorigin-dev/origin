@@ -96,23 +96,18 @@ impl Policy {
     /// The file holding the policy, at the root of the `policy` target.
     pub const FILE: &str = "policy.toml";
 
-    /// Returns the acceptance of `policy` whose `policy.toml` governs the
-    /// acceptance `id`, with body `body`: the policy that says who must have
-    /// signed it and what it had to meet.
+    /// Returns the acceptance of `policy` whose `policy.toml` governs the acceptance
+    /// `id`, with body `body`: the policy that says who must have signed it.
     ///
-    /// - An acceptance of `policy` is governed by the one before it, which it
-    ///   must name, so a policy never authorizes its own landing. The first
-    ///   one, with none before it, governs itself.
-    /// - Any other acceptance is governed by the policy it names. The caller
-    ///   must check that this policy is on `policy`'s chain.
-    ///
-    /// The landing queue checks what it signs against this policy, and so must
-    /// anything that verifies a chain.
+    /// - An acceptance of `policy` is governed by the one before it, which it must
+    ///   name, so a policy never authorizes its own landing; the first governs itself.
+    /// - Any other is governed by the policy it names; the caller checks it is on
+    ///   `policy`'s chain.
     ///
     /// # Errors
     ///
-    /// Fails if the acceptance names a different policy than these rules
-    /// require, or names none.
+    /// Fails if the acceptance names a different policy than these rules require, or
+    /// names none.
     pub fn governing(id: AcceptanceId, body: &AcceptanceBody) -> Result<AcceptanceId, PolicyError> {
         if body.target != TargetName::POLICY.id() {
             return body.policy.ok_or(PolicyError::Unnamed(body.seq));

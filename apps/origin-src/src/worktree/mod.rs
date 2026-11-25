@@ -317,15 +317,9 @@ impl<'a, P: Platform> Worktree<'a, P> {
     /// Snapshots every file into the store. Returns the root tree, and the
     /// updated stat cache if it changed.
     ///
-    /// It runs three parallel phases: list directories one depth at a time;
-    /// examine every file (one `lstat`, plus reading and hashing the files
-    /// the cache can't vouch for); and build trees one depth at a time,
-    /// deepest first. Then it writes the new blobs and trees in one batch.
-    ///
-    /// If a crash cuts the batch short, a tree may be stored without a blob
-    /// it names. Nothing refers to that tree yet, and the next snapshot
-    /// rewrites the blob, because the updated stat cache is only returned
-    /// once the batch commits.
+    /// It lists directories, examines every file (hashing those the cache
+    /// can't vouch for) and builds trees, each in parallel, then writes the new
+    /// blobs and trees in one batch, before it returns the cache.
     ///
     /// # Errors
     ///
@@ -521,29 +515,16 @@ impl<'a, P: Platform> Worktree<'a, P> {
         (!tree.is_empty()).then(|| tree.encode())
     }
 
-    /// Makes the files match a snapshot, given `changes`, how they differ from
-    /// it. Removes the files `changes` removes, then writes the files it adds or
-    /// modifies, in parallel. Removes directories left empty. Once it returns,
-    /// the files and directories it changed are durable, at the cost of one
-    /// batch sync.
-    ///
-    /// With `unchanged`, the stat cache of the snapshot `changes` starts from,
-    /// it first checks that no file it changes was edited since, and changes
-    /// nothing if one was. A file counts as edited if it was created where the
-    /// checkout writes one, or if it is removed or replaced and its metadata
-    /// changed (unless its content didn't). It checks each file again just
-    /// before replacing it, and stops at a file edited in between, or at a
-    /// directory, where it writes a file, that holds untracked files.
-    ///
-    /// A file that one of `sources` has unmodified is cloned from it, or copied
-    /// where the file system cannot clone. Other files are written from the
-    /// store.
+    /// Makes the files match a snapshot, given `changes`, how they differ from it,
+    /// durably, at the cost of one batch sync. A file one of `sources` has
+    /// unmodified is cloned from it, or copied; others come from the store. With
+    /// `unchanged`, the stat cache `changes` starts from, a file edited since
+    /// changes nothing (see "Workspaces" in `docs/design.md`).
     ///
     /// # Errors
     ///
-    /// Fails with [`SnapshotError::Edited`] if a file changed since the
-    /// snapshot. Also fails if a file's content cannot be read from the store,
-    /// or a file cannot be removed, written or synced.
+    /// Fails with [`SnapshotError::Edited`] if a file was edited, or if a file
+    /// cannot be read from the store, removed, written or synced.
     pub fn checkout(
         &self,
         changes: &[FileChange],

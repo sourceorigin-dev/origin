@@ -112,13 +112,9 @@ impl<'a, P: Platform> Annotations<'a, P> {
     /// Issues `statement` so that it supersedes its issuer's
     /// [current](Self::current) statement of the same kind about the same
     /// subject, and returns it with its id. A statement without a verdict, of a
-    /// kind that isn't reserved, withdraws the current one.
-    ///
-    /// It rereads the index, finds the current statement and issues under a
-    /// lock, so two statements issued at once in this store never supersede the
-    /// same one: the second supersedes the first. Statements issued in other
-    /// stores and synced here may still both supersede the same one. Afterwards,
-    /// the index these annotations hold doesn't include the new statement.
+    /// kind that isn't reserved, withdraws the current one. It issues under a
+    /// lock, so two issued at once in this store never supersede the same one;
+    /// afterwards, these annotations' index lacks the new statement.
     ///
     /// # Errors
     ///

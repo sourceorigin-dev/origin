@@ -1234,12 +1234,10 @@ impl Workspace {
     }
 
     /// `origin converge <change>`: ends a change's divergence with a revision that
-    /// evolves from all its heads. It merges their files one by one, from the
-    /// latest revision they all evolve from. It keeps the base and the description
-    /// of the working copy if it is one of the heads, or else of the newest head.
-    /// Where heads changed the same text file, the file holds each version between
-    /// conflict markers, and a `core.conflict` statement lists those files, so the
-    /// revision can't land until a later revision changes those files (see
+    /// evolves from all its heads. It merges their files one by one, from the latest
+    /// revision they all evolve from, and keeps the base and description of the
+    /// working copy if it is one of the heads, or else of the newest head. Where
+    /// heads changed the same text file, the revision gets a `core.conflict` (see
     /// [`conflict`](crate::conflict)).
     ///
     /// # Errors

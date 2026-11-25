@@ -1,7 +1,6 @@
 //! Provides `OriginService`, the one API over a repository. The HTTP routes
-//! translate requests into its methods, and the command line calls them
-//! in-process, so a local repository and a remote one answer the same way.
-//! Plugins use it in the same two ways.
+//! translate requests into its methods, and the command line and plugins call
+//! them in-process, so a local repository and a remote one answer the same way.
 //!
 //! A service lives as long as its process; its calls run concurrently, up to
 //! [`OriginService::MAX_INDEXES`] (see "The landing queue" in `docs/design.md`).

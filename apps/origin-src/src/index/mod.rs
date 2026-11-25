@@ -1,37 +1,14 @@
-//! The record index: what reading every record would tell, without reading
-//! them. It knows each change's revisions and heads (more than one head means
-//! the change diverged), the statements about each record and the statements
-//! they claim to supersede, the promotable statements by kind, issuer and
-//! declared inputs, and the order this node received its records in. It also
-//! caches the input digests of promotable statements, which take reading their
-//! subjects' trees to compute.
+//! The record index: what reading every record would tell, without reading them:
+//! each change's revisions and heads, the statements about each record and the
+//! statements they supersede, the promotable statements, the order this node
+//! received its records in, and their cached input digests.
 //!
-//! The index is derived from the store and never trusted over it. A missing or
-//! corrupt index is rebuilt from the store's records ([`Index::rebuild`]). A
-//! rebuild skips the objects that are corrupt or don't decode, and reports
-//! them ([`Skipped`]).
-//!
-//! On disk it is one append-only file of [frames](crate::frames), `index/log`.
-//! A frame holds either the records of some op log entries, with the sequence
-//! number of the last of them, or input digests.
-//!
-//! Writers don't update the index. Each [op log](crate::oplog) entry holds
-//! what the index keeps of the records it wrote. Opening the index catches up:
-//! it reads the op log entries after the last one indexed, adds the records
-//! that are published, and appends them to `index/log` without syncing.
-//! Records of entries that haven't settled yet, because their write is still
-//! in progress, are kept in memory only, and appended once their entry
-//! settles. A frame lost to a crash is caught up again from the op log. The
-//! index is rebuilt if the op log no longer has the entries it needs, or if
-//! `index/log` is damaged other than by a partial last frame.
-//!
-//! A rebuild holds `index/lock` exclusively and starts from the op log's last
-//! settled entry, so it misses no record. It keeps the arrival order the old
-//! log knew, and puts other records after them.
-//!
-//! The directory also holds `index/supersession`, a separate lock:
-//! [`Annotations::supersede`](crate::annotations::Annotations::supersede)
-//! holds it to read an issuer's current statement and issue the next.
+//! The index is derived from the store and never trusted over it: a missing or
+//! corrupt index is rebuilt ([`Index::rebuild`]), skipping and reporting
+//! ([`Skipped`]) the objects that are corrupt or don't decode. It is one
+//! append-only file of [frames](crate::frames), `index/log`, which opening
+//! catches up from the [op log](crate::oplog). See "Record index" in
+//! `docs/design.md`, which also covers the `index/supersession` lock.
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};

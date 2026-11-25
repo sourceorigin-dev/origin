@@ -82,21 +82,3 @@ paths = [
     "apps/origin-src/tests/cli.rs",
     "apps/origin-src/tests/http.rs",
 ]
-
-[deviations.doc-length]
-reason = "32 files of findings, fixed in follow-ups"
-paths = [
-    "apps/origin-src/src/annotations/mod.rs",
-    "apps/origin-src/src/conflict/mod.rs",
-    "apps/origin-src/src/events/mod.rs",
-    "apps/origin-src/src/frames.rs",
-    "apps/origin-src/src/index/mod.rs",
-    "apps/origin-src/src/policy.rs",
-    "apps/origin-src/src/queue/mod.rs",
-    "apps/origin-src/src/store/mod.rs",
-    "apps/origin-src/src/store/packs/mod.rs",
-    "apps/origin-src/src/targets/mod.rs",
-    "apps/origin-src/src/workspace/mod.rs",
-    "apps/origin-src/src/workspace/ops.rs",
-    "apps/origin-src/src/worktree/mod.rs",
-]

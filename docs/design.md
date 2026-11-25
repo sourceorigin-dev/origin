@@ -181,6 +181,22 @@ the exact content written there.
   revision without its conflicts, even after a crash.
 - The landing queue refuses a revision with unresolved paths.
 - Markers are only an editing aid. Origin never scans files for them.
+- A merge writes both versions of a text file between markers naming the
+  sides, for example:
+
+  ```text
+  <<<<<<< 3f1c9a2e07b4
+  our version
+  =======
+  their version
+  >>>>>>> 8d02e5b1c4f9
+  ```
+
+  For a binary file, or a path that is a directory on either side, it keeps
+  one side instead. The statement's author is the merging user, or the node
+  for the landing queue. A path stays unresolved while a revision still has
+  that entry there. A queue's own `core.conflict` only blocks landing on that
+  target; each retry merges again.
 
 ### Behind
 
@@ -478,7 +494,9 @@ lands them in order. A stack lands bottom first, one acceptance per change,
 and stops at the first one that waits.
 
 1. **Refuse** what can never land as it is: divergent changes, abandoned
-   changes, and revisions with unresolved conflicts.
+   changes (by their creator), and revisions with unresolved conflicts. If a
+   change waits, the queue keeps the whole stack waiting, so a retry lands the
+   rest once that change can land.
 2. **Rebase** the revision onto the target's tip with a three-way merge at
    path level, recursing into directories. A revision already based on the
    tip lands as it is. Any other becomes a new revision of the same change,
@@ -498,10 +516,13 @@ and stops at the first one that waits.
    blocked. Nothing fails, and landing again retries it.
 4. **Check the policy** in force *now*:
    - this node must be the target's authority;
+   - on `policy`, the policy is that of the acceptance before, never the one
+     landing;
    - the submitter must be allowed to land there, and must be able to write
      every path the landing changes;
    - the required statements must be present, promoted from the same target
-     where the input digest matches.
+     where the input digest matches. A valid promotion claims what its
+     original does, as the original's issuer.
 5. **If evidence is missing,** keep the landing waiting, durably, and request
    the checks (`check.requested` events). It resumes by itself when
    statements about its subject arrive, and when the server starts. A landing
@@ -558,7 +579,8 @@ advances. It is never synced, and it serves three purposes:
 
 Events are derived from the log when they're read:
 - `statement.issued` fires for every statement this node stores, fetched and
-  promoted ones included.
+  promoted ones included, and conflicts and divergence: it carries the
+  subject, kind, verdict and issuer.
 - `revision.created` fires for every revision.
 - `target.advanced` fires when a target's head moves.
 - `check.requested` fires once per missing requirement of a waiting landing.
@@ -580,6 +602,19 @@ Events are delivered at least once, and consumers deduplicate by record id.
 
 A cursor belongs to one node. Two nodes may deliver the same events in a
 different order.
+
+An event's cursor is the sequence number of the op log entry it comes from.
+It never changes, even across restarts and index rebuilds, and is never
+reused. Reading the events after a cursor returns the next cursor to read
+from. Events are delivered in the op log's order, and the events of one entry
+are always delivered together. An event's identity is everything but its
+cursor, and `statement.issued` carries the statement's subject, kind, verdict
+and issuer.
+
+An entry whose write is in progress holds back the events after it until the
+write is published. An entry whose writer crashed delivers what that write
+published. Entries lost to damage deliver nothing, and the damage is reported
+on stderr.
 
 ## Plugins
 
@@ -896,6 +931,17 @@ of that cursor.
     statements before the revisions they are about. Promotions come last: each
     is checked against its original, once the original and both subjects are
     stored. A `core.divergent` statement is issued for each change the new
+  - It accepts only well-formed records whose references exist, in the
+    repository or the same upload, and have the right kind: a tree's
+    entries (trees or blobs, as each says), a revision's snapshot (a tree),
+    description, base and dependencies, and a statement's subject and the
+    statements it supersedes or promotes. So no record it holds is unusable.
+    It refuses acceptances: only a target's authority writes them, by
+    landing.
+  - It makes blobs and trees durable before the records that refer to them,
+    and statements before the revisions they are about. Promotions come
+    last, each checked against its original once the original and both
+    subjects are stored. It issues `core.divergent` for each change the new
     revisions made diverge.
 - **`fetch`** fetches each held target's chain after the last acceptance this
   node has, and verifies it. It then fetches the changes the remote's events
@@ -1098,6 +1144,11 @@ Until a user syncs, they get the rights of whoever cloned the repository.
   they never synced.
 - When the remote lets the user read more, a fetch restores the files they
   can now read.
+A working copy is always on a revision of the current change, and a workspace
+logs every move of it in the op log, in an entry made durable together with
+the `workspace` file that names the new revision. Records are written before
+anything refers to them: the snapshot's objects, then the statements a new
+revision needs, then the revision, then `workspace`.
 
 Checkouts are crash-safe:
 - Before any working-copy move that changes files, Origin durably writes a
@@ -1106,7 +1157,10 @@ Checkouts are crash-safe:
 - The checked-out files are made durable before the workspace pointer moves.
 - A checkout never overwrites a file edited after the command's snapshot. It
   checks each file again just before replacing it, and if one changed, the
-  move is refused and undone.
+  move is refused and undone. A file counts as edited if it was created
+  where the checkout writes one, or if it is removed or replaced and its
+  metadata changed (unless its content didn't). The checkout also stops at a
+  directory, where it writes a file, that holds untracked files.
 - After a crash, the next command finishes the move or takes it back. It only
   touches files that still match one side, so unrecorded edits survive.
 
@@ -1248,15 +1302,100 @@ Another workspace's `.origin/` holds only `workspace`, `state`, `moving`,
 - **Local filesystems only.** Writers refuse network file systems. A shared
   folder is a remote, never a live repository.
 
+### Frames
+
+The record index and the op log are append-only files of checked frames. A
+file is a header naming its format and version, followed by frames. A frame
+is its payload's length as a `u32`, the payload, the first 8 bytes of the
+payload's BLAKE3 hash, and the length again. The trailing length lets a
+reader check the last frame from the end without reading the rest.
+
+Appenders hold an exclusive lock and write whole frames at the end. A crash
+during an append can leave part of a frame at the end: a partial tail.
+Readers skip it, and the next append cuts it off first, so a partial frame is
+only ever last. Anything else that fails its check is damage, and each format
+decides how to handle it. A frame whose length runs past the end of the file
+is damage too when a complete frame ends the file, since an interrupted
+append never leaves one after it.
+
+### Packs
+
+Many small objects are stored together in a few large files, so a store of a
+million statements holds a handful of files instead of a million.
+`objects/packs/` holds, with all integers little endian:
+
+- `<id>.pack`: `Pack::MAGIC`, then each object as the `u32` length of its
+  compressed encoding followed by the encoding, compressed as in a loose
+  file. A pack can be read on its own, from start to end.
+- `<id>.idx`: `Pack::INDEX_MAGIC`, the pack's object ids in ascending order,
+  then for each object a `u64` offset and a `u32` length of its compressed
+  encoding in the pack, and a `u64` time in seconds since the Unix epoch:
+  when this node stored the object (the modification time of its loose
+  file). The pack's id is the hash of its object ids; opening the pack
+  checks it.
+- `manifest`: the ids of the packs in use, one hex id per line, largest
+  first. Replacing this file adds and retires packs in one step.
+- `lock`: held by the compactor, so only one runs at a time.
+
+Compaction gathers the small loose objects into a new pack, and merges into
+it every pack smaller than twice what the new pack holds so far. A store thus
+keeps a logarithmic number of packs, and each object is rewritten a
+logarithmic number of times. It writes the pack and its index durably, then
+the manifest, and only then removes the loose files and the merged packs. A
+crash loses nothing: the next compaction removes the files the manifest does
+not name. A long-running process compacts once enough loose objects pile up.
+
+Readers look in the packs they loaded last, and reload the manifest when an
+object is not there. An object that is neither loose nor in the current
+manifest's packs is not in the store. An open pack stays readable after it is
+retired, so readers also reload the manifest every few seconds to close the
+packs it no longer names.
+
+### Loose objects
+
+Each loose object is a zstd-compressed file at
+`objects/loose/<first 2 hex digits>/<remaining hex digits>`. Objects are
+written in batches: each file is staged next to its destination, then the
+whole batch is synced, renamed into place, and its directories are synced.
+Once the batch commits, the objects survive a crash, so records that refer to
+them can be published. Readers never see a partial object, and concurrent
+writers of the same object do no harm. Writers that crash leave temporary
+files behind, which garbage collection removes. Reads look in the loose
+objects first, then in the packs. Committing a batch also appends its new
+records to the op log.
+
+### Target chains
+
+A target lives in `targets/<id>/`, where the id is the hash of its name, so
+names never become file names:
+
+- `name`: the target's name.
+- `log`: the id of each acceptance in hex, one line each, append-only.
+  Appenders hold an exclusive lock on it, which the kernel releases if the
+  process dies, and it is never replaced, so the lock always protects it.
+- `head`: `<seq> <id>`, the latest published acceptance, replaced atomically.
+
+Appending writes the acceptance durably, then appends its id to the log and
+syncs it, and only then publishes the new head. Readers go by the head, so
+they only ever see durable acceptances. If a crash leaves the log ahead of
+the head, or a partial line at its end, the next append repairs it first,
+syncing the log before publishing what it holds.
+
+### Landing queue
+
+Each target's queue lives in `queue/<target id>/`. It holds a `lock`, taken
+while landing so landings on one target never race, and a file for each
+waiting landing, `change-<id>` or `target-<target id>`, so waiting landings
+can be listed and retried.
+
 ### Op log
 
-The op log is the ordered list of everything this node applied. It is local,
-never synced with other nodes, and every workspace of the repository shares
-it, so each entry names the workspace and the command it came from. An entry
-records one of:
+The op log is local, never synced with other nodes, and every workspace of
+the repository shares it, so each entry names the workspace and the command
+it came from. An entry records one of:
 
-- records written (revisions, statements and acceptances), with what the index
-  keeps of them;
+- records written (revisions, statements and acceptances), with what the
+  index keeps of them;
 - a target advancing to a new acceptance;
 - a landing left waiting in a queue;
 - a working copy moving, by recording a draft or by a command.
@@ -1303,6 +1442,49 @@ first reader to find damage in the last segment starts a new segment, so
 appends continue past it. When the damage is at the end of the last segment,
 the next append skips as many sequence numbers as the damaged bytes could
 hold, so none is reused.
+
+```
+.origin/oplog/
+  lock                       held exclusively while appending
+  writers/<n>                held by each writer while it writes
+  <first sequence number>    segments of entries, 16 hex digits each
+```
+
+### Record index
+
+The index knows what reading every record would tell, without reading them:
+each change's revisions and heads (more than one head means the change
+diverged), the statements about each record and the statements they claim to
+supersede, the promotable statements by kind, issuer and declared inputs, and
+the order this node received its records in. It also caches the input digests
+of promotable statements, which take reading their subjects' trees to
+compute.
+
+The index is derived from the store and never trusted over it. A missing or
+corrupt index is rebuilt from the store's records. A rebuild skips the
+objects that are corrupt or don't decode, and reports them.
+
+On disk it is one append-only file of frames, `index/log`. A frame holds
+either the records of some op log entries, with the sequence number of the
+last of them, or input digests.
+
+Writers don't update the index. Each op log entry holds what the index keeps
+of the records it wrote. Opening the index catches up: it reads the op log
+entries after the last one indexed, adds the records that are published, and
+appends them to `index/log` without syncing. Records of entries that haven't
+settled yet, because their write is still in progress, are kept in memory
+only, and appended once their entry settles. A frame lost to a crash is
+caught up again from the op log. The index is rebuilt if the op log no longer
+has the entries it needs, or if `index/log` is damaged other than by a
+partial last frame.
+
+A rebuild holds `index/lock` exclusively and starts from the op log's last
+settled entry, so it misses no record. It keeps the arrival order the old log
+knew, and puts other records after them.
+
+The directory also holds `index/supersession`, a separate lock: issuing a
+statement that supersedes holds it to read an issuer's current statement and
+issue the next.
 
 ## Command line
 

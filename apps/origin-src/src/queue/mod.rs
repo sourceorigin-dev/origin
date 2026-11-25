@@ -1,54 +1,10 @@
-//! The landing queue: how a target's authority lands changes and other
-//! targets on the target, one acceptance at a time.
-//!
-//! Landing a change lands its stack: the head of each change below it that
-//! the target does not have yet, from the bottom up, each with its own
-//! acceptance. A change that is divergent, abandoned by its creator, or
-//! whose head has unresolved conflicts (see [`conflict`](crate::conflict))
-//! is refused. If a change waits, the queue keeps the whole stack waiting,
-//! so a retry lands the rest once that change can land. For each revision:
-//!
-//! 1. **Rebase.** The changes the revision made to its base are merged onto
-//!    the target's tip, file by file ([`Store::merge`]). A revision made on
-//!    the tip lands as it is; this node rebases any other into a new
-//!    revision of its change, on the tip. If the merge would leave the
-//!    target unchanged, nothing lands: the target already has the change.
-//! 2. **Conflicts.** If both sides changed a path, a `core.conflict`
-//!    statement about the revision lists the paths, and the change waits
-//!    until a new revision of it merges.
-//! 3. **Policy.** The policy in force must name this node as the target's
-//!    authority. The submitter must also have write access to every path
-//!    the landing changes on the target, whatever it lands, so landing a
-//!    revision made on an old acceptance, or another target, never reverts
-//!    or deletes what they may not change. On `policy`, the policy is that
-//!    of the acceptance before, never the one landing
-//!    ([`Policy::governing`]). Each of the target's requirements needs a
-//!    [claim](crate::annotations::Claim) about the revision that lands.
-//!    Results about the target's revisions with the same input digest are
-//!    promoted to it first, and a valid promotion claims what its original
-//!    does, as the original's issuer.
-//! 4. **Missing evidence.** The landing waits until the statements are
-//!    issued and the landing is retried. It is retried for its submitter,
-//!    under the policy in force then. The [service](crate::service) retries
-//!    it whenever statements about its subject arrive.
-//! 5. **Otherwise** this node signs an acceptance naming what landed, the
-//!    evidence and the policy, and appends it to the target's chain.
-//!
-//! Landing another target works the same way. The source's tip is merged
-//! from the newest acceptances both targets' histories share, and the
-//! requirements apply to the merge: a revision this node makes on the
-//! target's tip, as for a rebase. So results about the same merge on
-//! another target, whose checks may differ, never count here. If the merge
-//! changes nothing and either tip is in the other's history, nothing lands:
-//! the target already has the source's tip, or the source has nothing new.
-//! Otherwise even a merge that changes nothing lands, with no evidence
-//! needed, so that the target's history records the source's tip and later
-//! merges start from it.
-//!
-//! Each target's queue lives in `queue/<target id>/`. It holds a `lock`,
-//! taken while landing so landings on one target never race, and a file for
-//! each waiting landing, `change-<id>` or `target-<target id>`, which names
-//! its submitter, so waiting landings can be listed and retried.
+//! The landing queue: how a target's authority lands changes and other targets
+//! on the target, one acceptance at a time. Landing a change lands its stack,
+//! bottom first; each revision is rebased onto the tip ([`Store::merge`]),
+//! waits on conflicts or missing evidence, is checked against the policy in
+//! force ([`Policy::governing`]), and lands in an acceptance this node signs.
+//! The "Landing queue" section of `docs/design.md` has the details, the queue's
+//! files included.
 
 mod pending;
 mod session;

@@ -1,19 +1,13 @@
 //! The op log commands: `op log`, `undo` and `watch`.
 //!
-//! `undo` takes back the latest operation of its workspace that moved the
-//! working copy, other than recording a draft. It moves the working copy back
-//! to the revision it was on before, and checks it out. It does nothing else.
-//! Records stay, since others may already have them: an undone `abandon` still
-//! abandoned the change, and an undone `land` still landed. `undo` never takes
-//! back operations from other workspaces, and never moves their working copies.
-//! Running it again takes back the operation before, and so on. An `undo` is
-//! never undone itself.
-//!
-//! Recorded drafts stay revisions of their change. If the revision `undo` moves
-//! back to is no longer a head of its change, because the operation made a
-//! newer revision of it, as `describe` does, the working copy becomes a new
-//! revision with its files that evolves from the change's heads, so the change
-//! doesn't diverge.
+//! `undo` takes back the latest operation of its workspace that moved the working
+//! copy, other than recording a draft: it moves the working copy back to the
+//! revision it was on before, and checks it out. Records stay, since others may
+//! already have them: an undone `abandon` still abandoned the change. It never
+//! touches other workspaces, and running it again takes back the operation
+//! before. An `undo` is never undone. If the revision it moves back to is no
+//! longer a head of its change, the working copy becomes a new revision evolving
+//! from the change's heads, so the change doesn't diverge.
 
 use std::collections::{BTreeMap, HashSet};
 
