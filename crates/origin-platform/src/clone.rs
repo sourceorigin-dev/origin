@@ -22,8 +22,6 @@ pub trait CloneFile {
     /// cannot be created.
     fn clone_file(&self, from: &Path, to: &Path) -> Result<(), CloneError> {
         reflink_copy::reflink(from, to).map_err(|source| {
-            // reflink-copy reports a source that isn't a regular file as
-            // `InvalidInput`, which can also mean the file system can't clone.
             let unsupported = self.cannot_clone(&source) && from.is_file();
             let (from, to) = (from.to_owned(), to.to_owned());
             if unsupported {
