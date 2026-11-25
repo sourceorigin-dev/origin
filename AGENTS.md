@@ -13,10 +13,13 @@ review bots read and write at the same time, written in Rust.
   refusing network file systems), behind traits. It is the only place whose
   code differs by target OS. `std::os::unix`, which every supported platform
   has, may be used anywhere.
-- `crates/origin-client`: the HTTP client, generated from the server's OpenAPI
-  document. Never edit generated code by hand.
+- `crates/origin-client`: the SDK, a typed client for origin servers. Each
+  endpoint is one line of its `endpoints!` macro, over the `origin-shared`
+  types; no reqwest type is exposed.
 - `apps/origin-src`: the `origin` binary, both the command line and the
-  server.
+  server. `OriginService` (`service.rs`) is the one API over a repository:
+  the HTTP routes (`http.rs`) and the command line's commands that the API
+  offers only translate into its calls, so neither duplicates the other.
 - `tools/xtask`: development tasks, run with `cargo xtask`, such as timing
   origin against git (`just bench-git`).
 
@@ -33,6 +36,8 @@ benchmark, and its numbers in the pull request.
 
 End-to-end tests run the `origin` binary with `ORIGIN_CONFIG_DIR` set to a
 temporary directory, which holds the user's `config.toml` and node key.
+The HTTP tests drive every SDK method against a real server. One fails
+while `docs/openapi.json` is stale: `just openapi` rewrites it.
 
 ## Commits & Pull Requests
 
