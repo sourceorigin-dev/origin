@@ -22,7 +22,9 @@ fn repo() -> Repo {
 fn all(events: &Events<'_>, mut cursor: u64, filter: &Filter) -> Vec<Event> {
     let mut all = Vec::new();
     loop {
-        let page = events.after(cursor, filter, 1).unwrap();
+        let page = events
+            .after(cursor, filter, 1)
+            .expect("`after(cursor, filter, 1)` succeeds");
         if page.next == cursor {
             return all;
         }
@@ -51,7 +53,7 @@ fn summary(events: &[Event]) -> Vec<(&'static str, Option<String>)> {
 fn every_statement_revision_landing_and_request_fires_an_event() {
     let repo = repo();
     let events = Events::new(&repo.store);
-    let start = events.end().unwrap();
+    let start = events.end().expect("`end()` succeeds");
 
     let code = repo.change_on_main(1, &[("src/lib.rs", "a")]);
     let docs = repo.change_on_main(2, &[("docs/guide.md", "# Guide")]);
@@ -62,8 +64,11 @@ fn every_statement_revision_landing_and_request_fires_an_event() {
         summary(&requested).last(),
         Some(&("check.requested", Some("ci.test".to_owned())))
     );
-    let annotations = Annotations::open(&repo.store).unwrap();
-    annotations.issue(&ci_test(code, "node:ci"), None).unwrap();
+    let annotations =
+        Annotations::open(&repo.store).expect("`Annotations::open(&repo.store)` succeeds");
+    annotations
+        .issue(&ci_test(code, "node:ci"), None)
+        .expect("`issue()` succeeds");
     repo.land(1);
     repo.land(2);
     repo.land(3);
@@ -71,9 +76,12 @@ fn every_statement_revision_landing_and_request_fires_an_event() {
     repo.revision(2, &[docs], base, &[("docs/guide.md", "left")]);
     repo.revision(2, &[docs], base, &[("docs/guide.md", "right")]);
     Annotations::open(&repo.store)
-        .unwrap()
-        .flag_divergence(ChangeId::from_bytes([2; 16]), "node:queue".parse().unwrap())
-        .unwrap();
+        .expect("`Annotations::open(&repo.store)` succeeds")
+        .flag_divergence(
+            ChangeId::from_bytes([2; 16]),
+            "node:queue".parse().expect("`parse()` succeeds"),
+        )
+        .expect("`flag_divergence` succeeds");
 
     let all = all(&events, start, &Filter::default());
     let summary = summary(&all);
@@ -101,7 +109,7 @@ fn every_statement_revision_landing_and_request_fires_an_event() {
     let conflict = all
         .iter()
         .find(|event| summary_kind(event) == Some("core.conflict"))
-        .unwrap();
+        .expect("`find()` succeeds");
     assert_eq!(
         conflict.kind.subject(),
         Subject::Record(RecordId::Revision(clash))
@@ -121,16 +129,16 @@ fn cursors_survive_index_rebuilds_and_filters_select() {
     let events = Events::new(&repo.store);
     let code = repo.change_on_main(1, &[("src/lib.rs", "a")]);
     Annotations::open(&repo.store)
-        .unwrap()
+        .expect("`Annotations::open(&repo.store)` succeeds")
         .issue(&ci_test(code, "node:ci"), None)
-        .unwrap();
+        .expect("`issue()` succeeds");
     let before = all(&events, 0, &Filter::default());
-    fs::remove_dir_all(repo.store.root().join("index")).unwrap();
-    Index::rebuild(&repo.store).unwrap();
+    fs::remove_dir_all(repo.store.root().join("index")).expect("`fs::remove_dir_all()` succeeds");
+    Index::rebuild(&repo.store).expect("`Index::rebuild(&repo.store)` succeeds");
     assert_eq!(all(&events, 0, &Filter::default()), before);
 
     let kinds = |pattern: &str| Filter {
-        kinds: vec![pattern.parse().unwrap()],
+        kinds: vec![pattern.parse().expect("`parse()` succeeds")],
         ..Filter::default()
     };
     assert_eq!(
@@ -148,7 +156,12 @@ fn cursors_survive_index_rebuilds_and_filters_select() {
         all(&events, 0, &about(format!("revision:{}", &code_hex[..8]))).len(),
         2
     );
-    let change = repo.store.get(code).unwrap().change.to_hex();
+    let change = repo
+        .store
+        .get(code)
+        .expect("`get(code)` succeeds")
+        .change
+        .to_hex();
     let created = all(&events, 0, &about(format!("change:{}", &change[..8])));
     assert_eq!(summary(&created), [("revision.created", None)]);
     assert_eq!(all(&events, 0, &about("main".to_owned())).len(), 1);
@@ -167,12 +180,12 @@ fn unpublished_entries_hold_back_later_events_while_writes_are_in_progress() {
         .store
         .oplog()
         .append_in_progress(&Effect::Wrote(vec![missing]))
-        .unwrap();
+        .expect("`append_in_progress(&Effect::Wrote(vec![missing]))` succeeds");
     repo.change_on_main(1, &[("a", "a")]);
 
     let held = events
         .after(crashed - 1, &Filter::default(), usize::MAX)
-        .unwrap();
+        .expect("`after()` succeeds");
     assert_eq!(
         held,
         Page {
@@ -182,11 +195,15 @@ fn unpublished_entries_hold_back_later_events_while_writes_are_in_progress() {
         },
         "it may be in progress"
     );
-    assert_eq!(events.end().unwrap(), crashed - 1, "no cursor passes it");
+    assert_eq!(
+        events.end().expect("`end()` succeeds"),
+        crashed - 1,
+        "no cursor passes it"
+    );
     drop(writing);
     let page = events
         .after(crashed - 1, &Filter::default(), usize::MAX)
-        .unwrap();
+        .expect("`after()` succeeds");
     assert_eq!(summary(&page.events), [("revision.created", None)]);
     assert!(page.next > crashed);
 }
@@ -198,19 +215,26 @@ fn a_landing_waiting_again_after_a_conflict_requests_its_checks() {
     let code = repo.change_on_main(1, &[("src/lib.rs", "a")]);
     let clash = repo.change_on_main(2, &[("src/lib.rs", "b")]);
     Annotations::open(&repo.store)
-        .unwrap()
+        .expect("`Annotations::open(&repo.store)` succeeds")
         .issue(&ci_test(code, "node:ci"), None)
-        .unwrap();
+        .expect("`issue()` succeeds");
     repo.land(1);
     repo.land(2);
-    let start = events.end().unwrap();
+    let start = events.end().expect("`end()` succeeds");
     let again = Effect::Waiting {
         onto: TargetName::MAIN,
         proposal: origin_shared::landing::Proposal::Change(ChangeId::from_bytes([2; 16])),
     };
-    let (_, writing) = repo.store.oplog().append_in_progress(&again).unwrap();
+    let (_, writing) = repo
+        .store
+        .oplog()
+        .append_in_progress(&again)
+        .expect("`append_in_progress(&again)` succeeds");
     assert_eq!(
-        events.after(start, &Filter::default(), 10).unwrap().next,
+        events
+            .after(start, &Filter::default(), 10)
+            .expect("`after(start, &Filter::default(), 10)` succeeds")
+            .next,
         start
     );
     drop(writing);
@@ -230,10 +254,10 @@ fn a_landing_waiting_again_after_a_conflict_requests_its_checks() {
 fn waiting_returns_as_soon_as_an_event_arrives() {
     let repo = repo();
     let events = Events::new(&repo.store);
-    let end = events.end().unwrap();
+    let end = events.end().expect("`end()` succeeds");
     let empty = events
         .wait(end, &Filter::default(), 10, Events::<Native>::POLL)
-        .unwrap();
+        .expect("`wait()` succeeds");
     assert_eq!(
         empty,
         Page {
@@ -249,7 +273,7 @@ fn waiting_returns_as_soon_as_an_event_arrives() {
         });
         let page = events
             .wait(end, &Filter::default(), 10, Duration::from_secs(10))
-            .unwrap();
+            .expect("`wait()` succeeds");
         assert_eq!(summary(&page.events), [("revision.created", None)]);
     });
 }

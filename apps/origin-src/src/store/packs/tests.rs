@@ -18,15 +18,26 @@ fn objects(seed: u32, count: u32) -> Vec<EncodedObject> {
 
 fn assert_readable<P: Platform>(store: &Store<P>, objects: &[EncodedObject]) {
     for object in objects {
-        assert_eq!(&store.read(object.id()).unwrap(), object);
+        assert_eq!(
+            &store
+                .read(object.id())
+                .expect("`read(object.id())` succeeds"),
+            object
+        );
     }
 }
 
 /// The files of the packs directory, sorted.
 fn pack_files<P: Platform>(store: &Store<P>) -> Vec<String> {
     let mut names: Vec<_> = fs::read_dir(store.packs_dir())
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .expect("`fs::read_dir(store.packs_dir())` succeeds")
+        .map(|entry| {
+            entry
+                .expect("`entry` succeeds")
+                .file_name()
+                .into_string()
+                .expect("`into_string()` succeeds")
+        })
         .collect();
     names.sort();
     names
@@ -41,10 +52,17 @@ fn packs_small_objects_and_leaves_large_ones_loose() {
             .flat_map(|i| *Digest::of(&i.to_le_bytes()).as_bytes())
             .collect::<Vec<_>>(),
     );
-    store.write_all(&small).unwrap();
-    store.write_all(slice::from_ref(&large)).unwrap();
+    store
+        .write_all(&small)
+        .expect("`write_all(&small)` succeeds");
+    store
+        .write_all(slice::from_ref(&large))
+        .expect("`write_all(slice::from_ref(&large))` succeeds");
 
-    let compaction = store.compact().unwrap().unwrap();
+    let compaction = store
+        .compact()
+        .expect("`compact()` succeeds")
+        .expect("`compact()` yields a value");
     assert_eq!(
         compaction,
         Compaction {
@@ -63,26 +81,42 @@ fn packs_small_objects_and_leaves_large_ones_loose() {
 
     let reopened = Store::new(&store.root, Native::default());
     assert_readable(&reopened, &small);
-    assert!(reopened.contains(small[0].id()).unwrap());
+    assert!(
+        reopened
+            .contains(small[0].id())
+            .expect("`contains(small[0].id())` succeeds")
+    );
     assert!(
         !reopened
             .contains(EncodedObject::blob(b"absent").id())
-            .unwrap()
+            .expect("`contains()` succeeds")
     );
     assert_eq!(
-        reopened.write_all(&small).unwrap(),
+        reopened
+            .write_all(&small)
+            .expect("`write_all(&small)` succeeds"),
         0,
         "packed objects aren't written again"
     );
-    assert_eq!(reopened.read(large.id()).unwrap(), large);
+    assert_eq!(
+        reopened
+            .read(large.id())
+            .expect("`read(large.id())` succeeds"),
+        large
+    );
 }
 
 #[test]
 fn merges_packs_geometrically() {
     let (_dir, store) = store();
     let compact = |seed, count| {
-        store.write_all(&objects(seed, count)).unwrap();
-        let compaction = store.compact().unwrap().unwrap();
+        store
+            .write_all(&objects(seed, count))
+            .expect("`write_all(&objects(seed, count))` succeeds");
+        let compaction = store
+            .compact()
+            .expect("`compact()` succeeds")
+            .expect("`compact()` yields a value");
         let packs: Vec<_> = store.packs.loaded().iter().map(|pack| pack.len()).collect();
         (compaction.merged, packs)
     };
@@ -99,24 +133,38 @@ fn merges_packs_geometrically() {
 fn removes_loose_duplicates_of_packed_objects() {
     let (_dir, store) = store();
     let objects = objects(0, 10);
-    store.write_all(&objects).unwrap();
+    store
+        .write_all(&objects)
+        .expect("`write_all(&objects)` succeeds");
 
     let unaware = Store::new(&store.root, Native::default());
     let batch = unaware.batch();
-    assert!(batch.write(&EncodedObject::blob(b"first")).unwrap());
-    store.compact().unwrap();
+    assert!(
+        batch
+            .write(&EncodedObject::blob(b"first"))
+            .expect("`write()` succeeds")
+    );
+    store.compact().expect("`compact()` succeeds");
     for object in &objects[..3] {
-        assert!(batch.write(object).unwrap());
+        assert!(batch.write(object).expect("`write(object)` succeeds"));
     }
-    batch.commit().unwrap();
-    let compaction = store.compact().unwrap().unwrap();
+    batch.commit().expect("`commit()` succeeds");
+    let compaction = store
+        .compact()
+        .expect("`compact()` succeeds")
+        .expect("`compact()` yields a value");
     assert_eq!(compaction.duplicates, 3);
     assert_eq!(compaction.packed, 1);
     assert!(!store.path(objects[0].id()).exists());
     assert_readable(&store, &objects);
 
     let fresh = Store::new(&store.root, Native::default());
-    assert_eq!(fresh.write_all(&objects).unwrap(), 0);
+    assert_eq!(
+        fresh
+            .write_all(&objects)
+            .expect("`write_all(&objects)` succeeds"),
+        0
+    );
     assert!(!store.path(objects[0].id()).exists());
 }
 
@@ -124,12 +172,23 @@ fn removes_loose_duplicates_of_packed_objects() {
 fn lets_go_of_packs_another_process_retired() {
     let (_dir, store) = store();
     let first = objects(0, 10);
-    store.write_all(&first).unwrap();
-    store.compact().unwrap();
+    store
+        .write_all(&first)
+        .expect("`write_all(&first)` succeeds");
+    store.compact().expect("`compact()` succeeds");
     let other = Store::new(&store.root, Native::default());
     assert_readable(&other, &first);
-    store.write_all(&objects(10, 10)).unwrap();
-    assert_eq!(store.compact().unwrap().unwrap().merged, 1);
+    store
+        .write_all(&objects(10, 10))
+        .expect("`write_all(&objects(10, 10))` succeeds");
+    assert_eq!(
+        store
+            .compact()
+            .expect("`compact()` succeeds")
+            .expect("`compact()` yields a value")
+            .merged,
+        1
+    );
 
     let ids =
         |store: &Store| -> Vec<_> { store.packs.loaded().iter().map(|pack| pack.id).collect() };
@@ -144,29 +203,47 @@ fn lets_go_of_packs_another_process_retired() {
 fn compacts_once_enough_loose_objects_pile_up() {
     let (_dir, store) = store();
     let few = objects(0, 100);
-    store.write_all(&few).unwrap();
-    assert_eq!(store.compact_if_due().unwrap(), None);
+    store.write_all(&few).expect("`write_all(&few)` succeeds");
+    assert_eq!(
+        store.compact_if_due().expect("`compact_if_due()` succeeds"),
+        None
+    );
     let many = objects(
         100,
-        u32::try_from(3 * Store::<Native>::COMPACT_AFTER).unwrap(),
+        u32::try_from(3 * Store::<Native>::COMPACT_AFTER)
+            .expect("`u32::try_from(3 * Store::<Native>::COMPACT_AFTER)` succeeds"),
     );
-    store.write_all(&many).unwrap();
-    let compaction = store.compact_if_due().unwrap().unwrap();
+    store.write_all(&many).expect("`write_all(&many)` succeeds");
+    let compaction = store
+        .compact_if_due()
+        .expect("`compact_if_due()` succeeds")
+        .expect("`compact_if_due()` yields a value");
     assert_eq!(compaction.packed, few.len() + many.len());
-    assert_eq!(store.compact_if_due().unwrap(), None, "nothing left loose");
+    assert_eq!(
+        store.compact_if_due().expect("`compact_if_due()` succeeds"),
+        None,
+        "nothing left loose"
+    );
 }
 
 #[test]
 fn rewriting_a_packed_object_syncs_the_manifest() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("`tempfile::tempdir()` succeeds");
     let store = Store::new(dir.path().join(".origin"), Recorder::default());
-    store.init().unwrap();
+    store.init().expect("`init()` succeeds");
     let objects = objects(0, 10);
-    store.write_all(&objects).unwrap();
-    store.compact().unwrap();
+    store
+        .write_all(&objects)
+        .expect("`write_all(&objects)` succeeds");
+    store.compact().expect("`compact()` succeeds");
     store.platform.0.lock().clear();
 
-    assert_eq!(store.write_all(&objects[..1]).unwrap(), 0);
+    assert_eq!(
+        store
+            .write_all(&objects[..1])
+            .expect("`write_all(&objects[..1])` succeeds"),
+        0
+    );
     let packs = store.packs_dir();
     assert_eq!(
         store.platform.0.into_inner(),
@@ -178,45 +255,67 @@ fn rewriting_a_packed_object_syncs_the_manifest() {
 fn removes_packed_objects_and_keeps_when_each_was_stored() {
     let (_dir, store) = store();
     let first = objects(0, 10);
-    store.write_all(&first).unwrap();
+    store
+        .write_all(&first)
+        .expect("`write_all(&first)` succeeds");
     let secs = |id| {
         store
             .stored_at(id)
-            .unwrap()
+            .expect("`stored_at(id)` succeeds")
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .expect("`duration_since(UNIX_EPOCH)` succeeds")
             .as_secs()
     };
     let stored = secs(first[0].id());
-    store.compact().unwrap();
-    store.write_all(&objects(10, 10)).unwrap();
-    assert_eq!(store.compact().unwrap().unwrap().merged, 1);
+    store.compact().expect("`compact()` succeeds");
+    store
+        .write_all(&objects(10, 10))
+        .expect("`write_all(&objects(10, 10))` succeeds");
+    assert_eq!(
+        store
+            .compact()
+            .expect("`compact()` succeeds")
+            .expect("`compact()` yields a value")
+            .merged,
+        1
+    );
     assert_eq!(secs(first[0].id()), stored, "packing keeps it, merging too");
 
     let loose = EncodedObject::blob(b"loose");
-    store.write_all(slice::from_ref(&loose)).unwrap();
+    store
+        .write_all(slice::from_ref(&loose))
+        .expect("`write_all(slice::from_ref(&loose))` succeeds");
     let doomed = [first[0].id(), first[1].id(), loose.id()];
-    assert!(store.remove(&doomed).unwrap() > 0);
+    assert!(store.remove(&doomed).expect("`remove(&doomed)` succeeds") > 0);
     let fresh = Store::new(&store.root, Native::default());
     for id in doomed {
-        assert!(!fresh.contains(id).unwrap(), "{id}");
+        assert!(
+            !fresh.contains(id).expect("`contains(id)` succeeds"),
+            "{id}"
+        );
     }
     assert_readable(&fresh, &first[2..]);
     assert_readable(&fresh, &objects(10, 10));
     assert_eq!(pack_files(&store).len(), 4, "the old pack is removed");
-    assert_eq!(store.remove(&doomed).unwrap(), 0, "already gone");
+    assert_eq!(
+        store.remove(&doomed).expect("`remove(&doomed)` succeeds"),
+        0,
+        "already gone"
+    );
 }
 
 #[test]
 fn unreadable_objects_fail_the_compaction() {
     let (_dir, store) = store();
     let objects = objects(0, 10);
-    store.write_all(&objects).unwrap();
+    store
+        .write_all(&objects)
+        .expect("`write_all(&objects)` succeeds");
     let unreadable = store.path(objects[3].id());
-    fs::remove_file(&unreadable).unwrap();
-    fs::create_dir(&unreadable).unwrap();
+    fs::remove_file(&unreadable).expect("`fs::remove_file(&unreadable)` succeeds");
+    fs::create_dir(&unreadable).expect("`fs::create_dir(&unreadable)` succeeds");
 
-    let error = store.compact().unwrap_err();
+    let error = store.compact().expect_err("`compact()` fails");
     assert!(
         matches!(&error, StoreError::Io { path, .. } if *path == unreadable),
         "{error}"
@@ -229,24 +328,29 @@ fn unreadable_objects_fail_the_compaction() {
 fn one_compactor_at_a_time() {
     let (_dir, store) = store();
     let lock = store.packs_dir().join(Store::<Native>::LOCK);
-    let _held = LockedFile::open(&store.platform, &lock, LockMode::Exclusive).unwrap();
-    assert_eq!(store.compact().unwrap(), None);
+    let _held = LockedFile::open(&store.platform, &lock, LockMode::Exclusive)
+        .expect("`LockedFile::open()` succeeds");
+    assert_eq!(store.compact().expect("`compact()` succeeds"), None);
 }
 
 #[test]
 fn rejects_corrupt_indexes() {
     let (_dir, store) = store();
     let objects = objects(0, 10);
-    store.write_all(&objects).unwrap();
-    store.compact().unwrap();
+    store
+        .write_all(&objects)
+        .expect("`write_all(&objects)` succeeds");
+    store.compact().expect("`compact()` succeeds");
     let index = Pack::file_path(&store.packs_dir(), store.packs.loaded()[0].id, "idx");
-    let mut bytes = fs::read(&index).unwrap();
+    let mut bytes = fs::read(&index).expect("`fs::read(&index)` succeeds");
     let ids = Pack::INDEX_MAGIC.len()..Pack::INDEX_MAGIC.len() + 2 * ObjectId::LEN;
     bytes[ids].rotate_left(ObjectId::LEN);
-    fs::write(&index, bytes).unwrap();
+    fs::write(&index, bytes).expect("`fs::write(&index, bytes)` succeeds");
 
     let reopened = Store::new(&store.root, Native::default());
-    let error = reopened.read(objects[0].id()).unwrap_err();
+    let error = reopened
+        .read(objects[0].id())
+        .expect_err("`read(objects[0].id())` fails");
     assert!(
         matches!(&error, StoreError::Malformed(path) if *path == index),
         "{error}"
@@ -305,14 +409,18 @@ impl CloneFile for Crashing {
 
 #[test]
 fn a_failed_compaction_loses_nothing() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("`tempfile::tempdir()` succeeds");
     let store = Store::new(dir.path().join(".origin"), Crashing::default());
-    store.init().unwrap();
+    store.init().expect("`init()` succeeds");
     let first = objects(0, 10);
-    store.write_all(&first).unwrap();
-    store.compact().unwrap();
+    store
+        .write_all(&first)
+        .expect("`write_all(&first)` succeeds");
+    store.compact().expect("`compact()` succeeds");
     let second = objects(10, 10);
-    store.write_all(&second).unwrap();
+    store
+        .write_all(&second)
+        .expect("`write_all(&second)` succeeds");
 
     store.platform.crash_after(1);
     assert!(store.compact().is_err());
@@ -321,7 +429,10 @@ fn a_failed_compaction_loses_nothing() {
     assert_readable(&fresh, &second);
     assert_eq!(pack_files(&store).len(), 6, "an unpublished pack is left");
 
-    let compaction = store.compact().unwrap().unwrap();
+    let compaction = store
+        .compact()
+        .expect("`compact()` succeeds")
+        .expect("`compact()` yields a value");
     assert_eq!((compaction.packed, compaction.merged), (10, 1));
     assert_eq!(pack_files(&store).len(), 4, "and removed by the next one");
     assert_readable(&fresh, &first);
@@ -341,15 +452,22 @@ fn readers_never_miss_an_object_during_compaction() {
                 while published.load(Ordering::SeqCst) < written.len() {
                     let available = published.load(Ordering::SeqCst);
                     for object in written[..available].iter().flatten() {
-                        assert_eq!(&reader.read(object.id()).unwrap(), object);
+                        assert_eq!(
+                            &reader
+                                .read(object.id())
+                                .expect("`read(object.id())` succeeds"),
+                            object
+                        );
                     }
                 }
             });
         }
         for objects in &written {
-            store.write_all(objects).unwrap();
+            store
+                .write_all(objects)
+                .expect("`write_all(objects)` succeeds");
             published.fetch_add(1, Ordering::SeqCst);
-            store.compact().unwrap();
+            store.compact().expect("`compact()` succeeds");
         }
     });
     assert!(store.packs.loaded().len() < 6, "merged as it went");
@@ -359,15 +477,17 @@ fn readers_never_miss_an_object_during_compaction() {
 fn listing_never_misses_an_object_during_compaction() {
     let (_dir, store) = store();
     let written = objects(0, 4000);
-    store.write_all(&written).unwrap();
+    store
+        .write_all(&written)
+        .expect("`write_all(&written)` succeeds");
     let compacted = AtomicBool::new(false);
     thread::scope(|scope| {
         scope.spawn(|| {
             while !compacted.load(Ordering::SeqCst) {
-                assert_eq!(store.ids().unwrap().len(), written.len());
+                assert_eq!(store.ids().expect("`ids()` succeeds").len(), written.len());
             }
         });
-        store.compact().unwrap();
+        store.compact().expect("`compact()` succeeds");
         compacted.store(true, Ordering::SeqCst);
     });
 }

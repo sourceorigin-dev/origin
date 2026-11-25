@@ -10,9 +10,9 @@ use super::*;
 use crate::oplog::FramePart;
 
 fn store() -> (tempfile::TempDir, Store) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("`tempfile::tempdir()` succeeds");
     let store = Store::new(dir.path().join(".origin"), Native::default());
-    store.init().unwrap();
+    store.init().expect("`init()` succeeds");
     (dir, store)
 }
 
@@ -39,9 +39,9 @@ fn revision(change: ChangeId, predecessors: &[&EncodedObject], seed: &str) -> En
 fn statement(subject: RecordId, kind: &str) -> EncodedObject {
     Statement {
         subject,
-        kind: Kind::new(kind).unwrap(),
+        kind: Kind::new(kind).expect("`Kind::new(kind)` succeeds"),
         verdict: Some(Verdict::Pass),
-        issuer: "node:ci-1".parse().unwrap(),
+        issuer: "node:ci-1".parse().expect("`parse()` succeeds"),
         inputs: None,
         payload: None,
         supersedes: None,
@@ -63,22 +63,30 @@ fn detects_divergence_and_convergence() {
     let right = revision(c, &[&first], "right");
     let merged = revision(c, &[&left, &right], "merged");
 
-    store.write_all(slice::from_ref(&first)).unwrap();
-    let index = Index::open(&store).unwrap();
+    store
+        .write_all(slice::from_ref(&first))
+        .expect("`write_all(slice::from_ref(&first))` succeeds");
+    let index = Index::open(&store).expect("`Index::open(&store)` succeeds");
     assert_eq!(index.heads(c), [revision_id(&first)]);
     assert!(!index.is_divergent(c));
 
-    store.write_all(slice::from_ref(&left)).unwrap();
-    store.write_all(slice::from_ref(&right)).unwrap();
-    let index = Index::open(&store).unwrap();
+    store
+        .write_all(slice::from_ref(&left))
+        .expect("`write_all(slice::from_ref(&left))` succeeds");
+    store
+        .write_all(slice::from_ref(&right))
+        .expect("`write_all(slice::from_ref(&right))` succeeds");
+    let index = Index::open(&store).expect("`Index::open(&store)` succeeds");
     assert_eq!(index.heads(c), [revision_id(&left), revision_id(&right)]);
     assert!(
         index.is_divergent(c),
         "two agents revised the same revision"
     );
 
-    store.write_all(slice::from_ref(&merged)).unwrap();
-    let index = Index::open(&store).unwrap();
+    store
+        .write_all(slice::from_ref(&merged))
+        .expect("`write_all(slice::from_ref(&merged))` succeeds");
+    let index = Index::open(&store).expect("`Index::open(&store)` succeeds");
     assert_eq!(index.heads(c), [revision_id(&merged)]);
     assert!(!index.is_divergent(c));
     assert_eq!(index.revisions(c).len(), 4);
@@ -92,8 +100,8 @@ fn finds_changes_by_unique_prefix() {
     let ac = ChangeId::from_bytes([0xac; 16]);
     store
         .write_all(&[revision(ab, &[], "ab"), revision(ac, &[], "ac")])
-        .unwrap();
-    let index = Index::open(&store).unwrap();
+        .expect("`write_all()` succeeds");
+    let index = Index::open(&store).expect("`Index::open(&store)` succeeds");
 
     assert_eq!(index.find_change("ab"), Ok(ab));
     assert_eq!(index.find_change("AC"), Ok(ac), "either case");
@@ -132,7 +140,7 @@ fn write_history(store: &Store) {
     );
     let mut result: Statement = statement(RecordId::Revision(b1.id().into()), "ci.test")
         .decode_as()
-        .unwrap();
+        .expect("`decode_as()` succeeds");
     result.inputs = Some(Inputs {
         paths: Vec::new(),
         target_paths: Vec::new(),
@@ -150,7 +158,7 @@ fn write_history(store: &Store) {
         vec![b2, on_snapshot, a1, result.encode()],
     ];
     for batch in &batches {
-        store.write_all(batch).unwrap();
+        store.write_all(batch).expect("`write_all(batch)` succeeds");
     }
 }
 
@@ -158,7 +166,7 @@ fn write_history(store: &Store) {
 fn rebuilding_equals_updating() {
     let (_dir, store) = store();
     write_history(&store);
-    let updated = Index::open(&store).unwrap();
+    let updated = Index::open(&store).expect("`Index::open(&store)` succeeds");
     assert_eq!(updated.arrivals().len(), 9, "every record once, no blob");
     assert_eq!(updated.heads(change(1)).len(), 1);
     let promotable: Vec<_> = updated.promotable().collect();
@@ -169,11 +177,23 @@ fn rebuilding_equals_updating() {
         [promotable[0].1[0]]
     );
 
-    assert_eq!(Index::rebuild(&store).unwrap().index, updated);
-    assert_eq!(Index::open(&store).unwrap(), updated, "rebuilt on disk");
+    assert_eq!(
+        Index::rebuild(&store)
+            .expect("`Index::rebuild(&store)` succeeds")
+            .index,
+        updated
+    );
+    assert_eq!(
+        Index::open(&store).expect("`Index::open(&store)` succeeds"),
+        updated,
+        "rebuilt on disk"
+    );
 
-    fs::remove_file(store.index_log()).unwrap();
-    assert_eq!(sorted(Index::open(&store).unwrap()), sorted(updated));
+    fs::remove_file(store.index_log()).expect("`fs::remove_file(store.index_log())` succeeds");
+    assert_eq!(
+        sorted(Index::open(&store).expect("`Index::open(&store)` succeeds")),
+        sorted(updated)
+    );
 }
 
 /// Returns the index with every list sorted, to compare indexes regardless
@@ -197,19 +217,24 @@ fn sorted(mut index: Index) -> Index {
 fn damage_rebuilds_the_index() {
     let (_dir, store) = store();
     write_history(&store);
-    Index::open(&store).unwrap();
+    Index::open(&store).expect("`Index::open(&store)` succeeds");
     let last = revision(change(3), &[], "last");
-    store.write_all(slice::from_ref(&last)).unwrap();
-    let index = Index::open(&store).unwrap();
+    store
+        .write_all(slice::from_ref(&last))
+        .expect("`write_all(slice::from_ref(&last))` succeeds");
+    let index = Index::open(&store).expect("`Index::open(&store)` succeeds");
     let log = store.index_log();
-    let bytes = fs::read(&log).unwrap();
+    let bytes = fs::read(&log).expect("`fs::read(&log)` succeeds");
 
     let mut late = bytes.clone();
-    *late.last_mut().unwrap() ^= 1;
-    fs::write(&log, late).unwrap();
-    assert_eq!(Index::open(&store).unwrap(), index);
+    *late.last_mut().expect("`last_mut()` yields a value") ^= 1;
+    fs::write(&log, late).expect("`fs::write(&log, late)` succeeds");
     assert_eq!(
-        Log::parse(&fs::read(&log).unwrap()).1,
+        Index::open(&store).expect("`Index::open(&store)` succeeds"),
+        index
+    );
+    assert_eq!(
+        Log::parse(&fs::read(&log).expect("`fs::read(&log)` succeeds")).1,
         Tail::Clean,
         "repaired on disk"
     );
@@ -219,10 +244,13 @@ fn damage_rebuilds_the_index() {
     let mut versioned = bytes;
     versioned[Log::FRAMES.header().len() - 2] = b'9';
     for damaged in [early, versioned, Vec::new()] {
-        fs::write(&log, damaged).unwrap();
-        assert_eq!(sorted(Index::open(&store).unwrap()), sorted(index.clone()));
+        fs::write(&log, damaged).expect("`fs::write(&log, damaged)` succeeds");
         assert_eq!(
-            Log::parse(&fs::read(&log).unwrap()).1,
+            sorted(Index::open(&store).expect("`Index::open(&store)` succeeds")),
+            sorted(index.clone())
+        );
+        assert_eq!(
+            Log::parse(&fs::read(&log).expect("`fs::read(&log)` succeeds")).1,
             Tail::Clean,
             "repaired on disk"
         );
@@ -235,13 +263,19 @@ fn catches_up_with_what_crashed_writes_published() {
     let c = change(1);
     let published = revision(c, &[], "published");
     let unpublished = revision(c, &[], "unpublished");
-    store.write_all(slice::from_ref(&published)).unwrap();
-    let caught_up = Index::open(&store).unwrap();
+    store
+        .write_all(slice::from_ref(&published))
+        .expect("`write_all(slice::from_ref(&published))` succeeds");
+    let caught_up = Index::open(&store).expect("`Index::open(&store)` succeeds");
 
-    let entries = [&published, &unpublished].map(|object| Entry::of(object).unwrap().unwrap());
+    let entries = [&published, &unpublished].map(|object| {
+        Entry::of(object)
+            .expect("`Entry::of(object)` succeeds")
+            .expect("`Entry::of(object)` yields a value")
+    });
     store
         .commit_logged(store.durable_write(), &[Effect::Wrote(entries.to_vec())])
-        .unwrap();
+        .expect("`commit_logged()` succeeds");
     let frame = Frame::Records {
         applied: 99,
         entries: Cow::Borrowed(&entries),
@@ -250,29 +284,38 @@ fn catches_up_with_what_crashed_writes_published() {
     let mut log = OpenOptions::new()
         .append(true)
         .open(store.index_log())
-        .unwrap();
-    log.write_all(&frame[..frame.len() / 2]).unwrap();
+        .expect("`open(store.index_log())` succeeds");
+    log.write_all(&frame[..frame.len() / 2])
+        .expect("`write_all(&frame[..frame.len() / 2])` succeeds");
 
-    let (index, intact) = Index::read(&store).unwrap();
+    let (index, intact) = Index::read(&store).expect("`Index::read(&store)` succeeds");
     assert!(intact, "a partial last frame is no damage");
     assert_eq!(index, caught_up);
-    let index = Index::open(&store).unwrap();
+    let index = Index::open(&store).expect("`Index::open(&store)` succeeds");
     assert_eq!(
         index.heads(c),
         [revision_id(&published)],
         "what was published"
     );
-    assert_eq!(index.applied, store.oplog().last_seq().unwrap());
     assert_eq!(
-        Log::parse(&fs::read(store.index_log()).unwrap()).1,
+        index.applied,
+        store.oplog().last_seq().expect("`last_seq()` succeeds")
+    );
+    assert_eq!(
+        Log::parse(&fs::read(store.index_log()).expect("`fs::read(store.index_log())` succeeds")).1,
         Tail::Clean
     );
 
     let next = revision(c, &[&published], "next");
-    store.write_all(slice::from_ref(&next)).unwrap();
-    let reopened = Index::open(&store).unwrap();
-    fs::write(store.index_log(), Log::encode(&[], &[], 0)).unwrap();
-    assert_eq!(Index::open(&store).unwrap(), reopened);
+    store
+        .write_all(slice::from_ref(&next))
+        .expect("`write_all(slice::from_ref(&next))` succeeds");
+    let reopened = Index::open(&store).expect("`Index::open(&store)` succeeds");
+    fs::write(store.index_log(), Log::encode(&[], &[], 0)).expect("`fs::write()` succeeds");
+    assert_eq!(
+        Index::open(&store).expect("`Index::open(&store)` succeeds"),
+        reopened
+    );
     assert_eq!(reopened.heads(c), [revision_id(&next)]);
 }
 
@@ -282,55 +325,69 @@ fn writes_in_progress_hold_back_none_published_after_them() {
     let c = change(1);
     let slow = revision(c, &[], "slow");
     let quick = revision(change(2), &[], "quick");
-    let entry = Entry::of(&slow).unwrap().unwrap();
+    let entry = Entry::of(&slow)
+        .expect("`Entry::of(&slow)` succeeds")
+        .expect("`Entry::of(&slow)` yields a value");
     let (held, writing) = store
         .oplog()
         .append_in_progress(&Effect::Wrote(vec![entry]))
-        .unwrap();
-    store.write_all(slice::from_ref(&quick)).unwrap();
+        .expect("`append_in_progress(&Effect::Wrote(vec![entry]))` succeeds");
+    store
+        .write_all(slice::from_ref(&quick))
+        .expect("`write_all(slice::from_ref(&quick))` succeeds");
 
-    let index = Index::open(&store).unwrap();
+    let index = Index::open(&store).expect("`Index::open(&store)` succeeds");
     assert_eq!(index.heads(change(2)), [revision_id(&quick)]);
     assert_eq!(index.applied, held - 1, "it looks at the slow one again");
     assert_eq!(
-        Index::open(&store).unwrap(),
+        Index::open(&store).expect("`Index::open(&store)` succeeds"),
         index,
         "and appends nothing twice"
     );
 
-    store.write_all(slice::from_ref(&slow)).unwrap();
+    store
+        .write_all(slice::from_ref(&slow))
+        .expect("`write_all(slice::from_ref(&slow))` succeeds");
     drop(writing);
-    let index = Index::open(&store).unwrap();
+    let index = Index::open(&store).expect("`Index::open(&store)` succeeds");
     assert_eq!(index.heads(c), [revision_id(&slow)]);
-    assert_eq!(index.applied, store.oplog().last_seq().unwrap());
+    assert_eq!(
+        index.applied,
+        store.oplog().last_seq().expect("`last_seq()` succeeds")
+    );
 }
 
 #[test]
 fn records_added_before_catching_up_are_still_logged() {
     let (_dir, store) = store();
-    let mut index = Index::open(&store).unwrap();
+    let mut index = Index::open(&store).expect("`Index::open(&store)` succeeds");
     let written = revision(change(1), &[], "added");
-    store.write_all(slice::from_ref(&written)).unwrap();
-    index.add([&written]).unwrap();
-    assert!(index.catch_up(&store).unwrap());
-    let reopened = Index::open(&store).unwrap();
+    store
+        .write_all(slice::from_ref(&written))
+        .expect("`write_all(slice::from_ref(&written))` succeeds");
+    index.add([&written]).expect("`add([&written])` succeeds");
+    assert!(index.catch_up(&store).expect("`catch_up(&store)` succeeds"));
+    let reopened = Index::open(&store).expect("`Index::open(&store)` succeeds");
     assert_eq!(reopened.heads(change(1)), [revision_id(&written)]);
 }
 
 #[test]
 fn op_log_damage_rebuilds_the_index() {
     let (_dir, store) = store();
-    Index::open(&store).unwrap();
+    Index::open(&store).expect("`Index::open(&store)` succeeds");
     let written: Vec<_> = (1..=3)
         .map(|seed| revision(change(seed), &[], "lost"))
         .collect();
     for revision in &written {
-        store.write_all(slice::from_ref(revision)).unwrap();
+        store
+            .write_all(slice::from_ref(revision))
+            .expect("`write_all(slice::from_ref(revision))` succeeds");
     }
-    store
-        .oplog()
-        .damage(store.oplog().last_seq().unwrap() - 1, FramePart::Check);
-    let index = Index::open(&store).unwrap();
+    store.oplog().damage(
+        store.oplog().last_seq().expect("`last_seq()` succeeds") - 1,
+        FramePart::Check,
+    );
+    let index = Index::open(&store).expect("`Index::open(&store)` succeeds");
     for (seed, revision) in (1..).zip(&written) {
         assert_eq!(index.heads(change(seed)), [revision_id(revision)]);
     }
@@ -342,7 +399,9 @@ fn rebuilds_once_the_op_log_dropped_what_it_missed() {
     let written: Vec<_> = (0..100)
         .map(|i| {
             let object = revision(change(1), &[], &format!("{i}"));
-            store.write_all(slice::from_ref(&object)).unwrap();
+            store
+                .write_all(slice::from_ref(&object))
+                .expect("`write_all(slice::from_ref(&object))` succeeds");
             revision_id(&object)
         })
         .collect();
@@ -350,7 +409,7 @@ fn rebuilds_once_the_op_log_dropped_what_it_missed() {
         store.oplog().after(0),
         Err(StoreError::Expired { .. })
     ));
-    let index = Index::open(&store).unwrap();
+    let index = Index::open(&store).expect("`Index::open(&store)` succeeds");
     assert_eq!(index.revisions(change(1)).len(), written.len());
 }
 
@@ -363,12 +422,15 @@ fn rebuilds_skip_and_report_corrupt_records() {
     let garbled = revision(c, &[], "garbled");
     store
         .write_all(&[intact.clone(), corrupt.clone(), garbled.clone()])
-        .unwrap();
-    let other = zstd::bulk::compress(intact.bytes(), 1).unwrap();
-    fs::write(store.path(corrupt.id()), other).unwrap();
-    fs::write(store.path(garbled.id()), b"not zstd").unwrap();
+        .expect("`write_all()` succeeds");
+    let other = zstd::bulk::compress(intact.bytes(), 1)
+        .expect("`zstd::bulk::compress(intact.bytes(), 1)` succeeds");
+    fs::write(store.path(corrupt.id()), other)
+        .expect("`fs::write(store.path(corrupt.id()), other)` succeeds");
+    fs::write(store.path(garbled.id()), b"not zstd").expect("`fs::write()` succeeds");
 
-    let Rebuilt { index, skipped } = Index::rebuild(&store).unwrap();
+    let Rebuilt { index, skipped } =
+        Index::rebuild(&store).expect("`Index::rebuild(&store)` succeeds");
     assert_eq!(index.heads(c), [revision_id(&intact)]);
     assert_eq!(skipped.len(), 2, "{skipped:?}");
     assert!(
@@ -388,17 +450,24 @@ fn rebuilds_skip_and_report_corrupt_records() {
 #[test]
 fn refreshing_catches_up_an_index_kept_open() {
     let (_dir, store) = store();
-    let mut index = Index::open(&store).unwrap();
+    let mut index = Index::open(&store).expect("`Index::open(&store)` succeeds");
     let first = revision(change(1), &[], "first");
-    store.write_all(slice::from_ref(&first)).unwrap();
-    index.refresh(&store).unwrap();
-    assert_eq!(index, Index::open(&store).unwrap());
+    store
+        .write_all(slice::from_ref(&first))
+        .expect("`write_all(slice::from_ref(&first))` succeeds");
+    index.refresh(&store).expect("`refresh(&store)` succeeds");
+    assert_eq!(
+        index,
+        Index::open(&store).expect("`Index::open(&store)` succeeds")
+    );
 
     for i in 0..100 {
         let object = revision(change(2), &[], &format!("{i}"));
-        store.write_all(slice::from_ref(&object)).unwrap();
+        store
+            .write_all(slice::from_ref(&object))
+            .expect("`write_all(slice::from_ref(&object))` succeeds");
     }
-    index.refresh(&store).unwrap();
+    index.refresh(&store).expect("`refresh(&store)` succeeds");
     assert_eq!(index.revisions(change(2)).len(), 100);
     assert_eq!(index.heads(change(1)), [revision_id(&first)]);
 }
@@ -408,10 +477,13 @@ fn rejects_records_that_do_not_decode() {
     let (_dir, store) = store();
     let bytes = vec![ObjectKind::Revision as u8, 1, 2, 3];
     let id = ObjectId::from_bytes(*Digest::of(&bytes).as_bytes());
-    let malformed = EncodedObject::verify(id, bytes).unwrap();
-    let error = store.write_all(&[malformed]).unwrap_err();
+    let malformed =
+        EncodedObject::verify(id, bytes).expect("`EncodedObject::verify(id, bytes)` succeeds");
+    let error = store
+        .write_all(&[malformed])
+        .expect_err("`write_all(&[malformed])` fails");
     assert!(matches!(error, StoreError::Decode { .. }), "{error}");
-    assert!(!store.contains(id).unwrap());
+    assert!(!store.contains(id).expect("`contains(id)` succeeds"));
 }
 
 #[test]
@@ -421,7 +493,7 @@ fn rebuilds_never_miss_concurrent_writes() {
     let written: Vec<_> = thread::scope(|scope| {
         scope.spawn(|| {
             while !done.load(Ordering::Relaxed) {
-                Index::rebuild(&store).unwrap();
+                Index::rebuild(&store).expect("`Index::rebuild(&store)` succeeds");
             }
         });
         let writers: Vec<_> = (0..4)
@@ -431,7 +503,9 @@ fn rebuilds_never_miss_concurrent_writes() {
                     (0..20)
                         .map(|i| {
                             let object = revision(change(writer), &[], &format!("{i}"));
-                            store.write_all(slice::from_ref(&object)).unwrap();
+                            store
+                                .write_all(slice::from_ref(&object))
+                                .expect("`write_all(slice::from_ref(&object))` succeeds");
                             object.id()
                         })
                         .collect::<Vec<_>>()
@@ -440,12 +514,12 @@ fn rebuilds_never_miss_concurrent_writes() {
             .collect();
         let written = writers
             .into_iter()
-            .flat_map(|w| w.join().unwrap())
+            .flat_map(|w| w.join().expect("`join()` succeeds"))
             .collect();
         done.store(true, Ordering::Relaxed);
         written
     });
-    let index = Index::open(&store).unwrap();
+    let index = Index::open(&store).expect("`Index::open(&store)` succeeds");
     for id in written {
         assert!(index.known.contains(&RecordId::Revision(id.into())), "{id}");
     }
@@ -457,17 +531,25 @@ fn records_written_after_an_unsettled_entry_are_not_logged_yet() {
     let (_, writing) = store
         .oplog()
         .append_in_progress(&Effect::Wrote(Vec::new()))
-        .unwrap();
+        .expect("`append_in_progress(&Effect::Wrote(Vec::new()))` succeeds");
     let written = revision(change(1), &[], "after the entry in progress");
-    store.write_all(slice::from_ref(&written)).unwrap();
-    let index = Index::open(&store).unwrap();
+    store
+        .write_all(slice::from_ref(&written))
+        .expect("`write_all(slice::from_ref(&written))` succeeds");
+    let index = Index::open(&store).expect("`Index::open(&store)` succeeds");
     let record = RecordId::Revision(written.id().into());
     assert!(index.known.contains(&record), "known in memory");
-    fs::remove_file(store.path(written.id())).unwrap();
-    let (logged, _) = Index::read(&store).unwrap();
+    fs::remove_file(store.path(written.id()))
+        .expect("`fs::remove_file(store.path(written.id()))` succeeds");
+    let (logged, _) = Index::read(&store).expect("`Index::read(&store)` succeeds");
     assert!(!logged.known.contains(&record));
     drop(writing);
-    assert!(!Index::open(&store).unwrap().known.contains(&record));
+    assert!(
+        !Index::open(&store)
+            .expect("`Index::open(&store)` succeeds")
+            .known
+            .contains(&record)
+    );
 }
 
 #[test]
@@ -476,12 +558,14 @@ fn rebuilds_keep_records_of_unsettled_entries_in_memory() {
     let (_, _writing) = store
         .oplog()
         .append_in_progress(&Effect::Wrote(Vec::new()))
-        .unwrap();
+        .expect("`append_in_progress(&Effect::Wrote(Vec::new()))` succeeds");
     let written = revision(change(1), &[], "after the entry in progress");
-    store.write_all(slice::from_ref(&written)).unwrap();
+    store
+        .write_all(slice::from_ref(&written))
+        .expect("`write_all(slice::from_ref(&written))` succeeds");
     let record = RecordId::Revision(written.id().into());
-    let rebuilt = Index::rebuild(&store).unwrap();
+    let rebuilt = Index::rebuild(&store).expect("`Index::rebuild(&store)` succeeds");
     assert!(rebuilt.index.known.contains(&record), "known in memory");
-    let (logged, _) = Index::read(&store).unwrap();
+    let (logged, _) = Index::read(&store).expect("`Index::read(&store)` succeeds");
     assert!(!logged.known.contains(&record), "not written yet");
 }

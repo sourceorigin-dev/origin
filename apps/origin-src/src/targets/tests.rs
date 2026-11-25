@@ -8,9 +8,9 @@ use super::*;
 use crate::store::tests::{Recorder, Synced};
 
 fn store() -> (tempfile::TempDir, Store) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("`tempfile::tempdir()` succeeds");
     let store = Store::new(dir.path().join(".origin"), Native::default());
-    store.init().unwrap();
+    store.init().expect("`init()` succeeds");
     (dir, store)
 }
 
@@ -36,8 +36,10 @@ fn acceptance(target: &TargetName, prev: Option<Head>) -> Acceptance {
 fn land<P: Platform>(store: &Store<P>, target: &TargetName, count: usize) -> Vec<AcceptanceId> {
     (0..count)
         .map(|_| {
-            let head = store.head(target).unwrap();
-            store.append(target, &acceptance(target, head)).unwrap()
+            let head = store.head(target).expect("`head(target)` succeeds");
+            store
+                .append(target, &acceptance(target, head))
+                .expect("`append(target, &acceptance(target, head))` succeeds")
         })
         .collect()
 }
@@ -63,20 +65,28 @@ fn appending_several_acceptances_creates_the_target() {
 fn appends_form_a_chain() {
     let (_dir, store) = store();
     let main = TargetName::MAIN;
-    assert_eq!(store.head(&main).unwrap(), None);
-    assert_eq!(store.log(&main).unwrap(), Vec::<AcceptanceId>::new());
+    assert_eq!(store.head(&main).expect("`head(&main)` succeeds"), None);
+    assert_eq!(
+        store.log(&main).expect("`log(&main)` succeeds"),
+        Vec::<AcceptanceId>::new()
+    );
 
     let ids = land(&store, &main, 3);
     assert_eq!(
-        store.head(&main).unwrap(),
+        store.head(&main).expect("`head(&main)` succeeds"),
         Some(Head {
             seq: 2,
             acceptance: ids[2]
         })
     );
-    assert_eq!(store.log(&main).unwrap(), ids);
+    assert_eq!(store.log(&main).expect("`log(&main)` succeeds"), ids);
     for (seq, &id) in (0..).zip(&ids) {
-        assert_eq!(store.acceptance_at(main.id(), seq).unwrap(), Some(id));
+        assert_eq!(
+            store
+                .acceptance_at(main.id(), seq)
+                .expect("`acceptance_at(main.id(), seq)` succeeds"),
+            Some(id)
+        );
     }
     assert_eq!(store.acceptance_at(main.id(), 3).unwrap(), None);
     assert_eq!(store.log_since(&main, 1, None).unwrap(), ids[1..]);
@@ -86,22 +96,28 @@ fn appends_form_a_chain() {
     assert_eq!(store.log_since(&main, 3, None).unwrap(), []);
     let last = store.get(ids[2]).unwrap();
     assert_eq!(last.body().prev, Some(ids[1]));
-    last.verify(&key().public()).unwrap();
-    assert_eq!(store.targets().unwrap(), [main]);
+    last.verify(&key().public())
+        .expect("`verify(&key().public())` succeeds");
+    assert_eq!(store.targets().expect("`targets()` succeeds"), [main]);
 }
 
 #[test]
 fn policy_heads_wait_for_collection() {
     let (_dir, store) = store();
-    let collecting = store.lock_for_collection().unwrap();
+    let collecting = store
+        .lock_for_collection()
+        .expect("`lock_for_collection()` succeeds");
     land(&store, &TargetName::MAIN, 1);
     let (done, landed) = std::sync::mpsc::channel();
     thread::scope(|scope| {
-        scope.spawn(|| done.send(land(&store, &TargetName::POLICY, 1)).unwrap());
+        scope.spawn(|| {
+            done.send(land(&store, &TargetName::POLICY, 1))
+                .expect("`send(land(&store, &TargetName::POLICY, 1))` succeeds");
+        });
         thread::sleep(std::time::Duration::from_millis(100));
         assert!(landed.try_recv().is_err(), "the policy waits");
         drop(collecting);
-        assert_eq!(landed.recv().unwrap().len(), 1);
+        assert_eq!(landed.recv().expect("`recv()` succeeds").len(), 1);
     });
 }
 
@@ -110,14 +126,16 @@ fn appends_must_follow_the_latest_acceptance() {
     let (_dir, store) = store();
     let main = TargetName::MAIN;
     let ids = land(&store, &main, 2);
-    let latest = store.head(&main).unwrap();
+    let latest = store.head(&main).expect("`head(&main)` succeeds");
 
     let genesis = Head {
         seq: 0,
         acceptance: ids[0],
     };
     for stale in [None, Some(genesis)] {
-        let error = store.append(&main, &acceptance(&main, stale)).unwrap_err();
+        let error = store
+            .append(&main, &acceptance(&main, stale))
+            .expect_err("`append(&main, &acceptance(&main, stale))` fails");
         assert!(
             matches!(error, StoreError::Conflict { actual, .. } if actual == latest),
             "{error}"
@@ -125,9 +143,13 @@ fn appends_must_follow_the_latest_acceptance() {
     }
     let error = store
         .append(&TargetName::POLICY, &acceptance(&main, None))
-        .unwrap_err();
+        .expect_err("`append()` fails");
     assert!(matches!(error, StoreError::WrongTarget(_)), "{error}");
-    assert_eq!(store.log(&main).unwrap(), ids, "nothing was appended");
+    assert_eq!(
+        store.log(&main).expect("`log(&main)` succeeds"),
+        ids,
+        "nothing was appended"
+    );
 }
 
 #[test]
@@ -140,7 +162,7 @@ fn concurrent_appends_serialize() {
             scope.spawn(|| {
                 for _ in 0..3 {
                     loop {
-                        let head = store.head(&main).unwrap();
+                        let head = store.head(&main).expect("`head(&main)` succeeds");
                         match store.append(&main, &acceptance(&main, head)) {
                             Ok(id) => break landed.lock().push(id),
                             Err(StoreError::Conflict { .. }) => {}
@@ -151,7 +173,7 @@ fn concurrent_appends_serialize() {
             });
         }
     });
-    let log = store.log(&main).unwrap();
+    let log = store.log(&main).expect("`log(&main)` succeeds");
     assert_eq!(log.len(), 24);
     let mut landed = landed.into_inner();
     landed.sort();
@@ -159,7 +181,14 @@ fn concurrent_appends_serialize() {
     sorted.sort();
     assert_eq!(sorted, landed, "every success is in the log once");
     for pair in log.windows(2) {
-        assert_eq!(store.get(pair[1]).unwrap().body().prev, Some(pair[0]));
+        assert_eq!(
+            store
+                .get(pair[1])
+                .expect("`get(pair[1])` succeeds")
+                .body()
+                .prev,
+            Some(pair[0])
+        );
     }
 }
 
@@ -178,17 +207,25 @@ fn appends_repair_what_a_crash_left() {
         }),
     );
     let unpublished_id = AcceptanceId::from(unpublished.encode().id());
-    store.write_all(&[unpublished.encode()]).unwrap();
+    store
+        .write_all(&[unpublished.encode()])
+        .expect("`write_all(&[unpublished.encode()])` succeeds");
     let mut log = fs::OpenOptions::new()
         .append(true)
         .open(files.log())
-        .unwrap();
-    writeln!(log, "{unpublished_id}").unwrap();
-    log.write_all(b"0123").unwrap();
-    assert_eq!(store.log(&main).unwrap(), ids, "readers go by the head");
+        .expect("`open(files.log())` succeeds");
+    writeln!(log, "{unpublished_id}").expect("the log accepts an appended line");
+    log.write_all(b"0123").expect("`write_all()` succeeds");
+    assert_eq!(
+        store.log(&main).expect("`log(&main)` succeeds"),
+        ids,
+        "readers go by the head"
+    );
 
-    let stale = acceptance(&main, store.head(&main).unwrap());
-    let error = store.append(&main, &stale).unwrap_err();
+    let stale = acceptance(&main, store.head(&main).expect("`head(&main)` succeeds"));
+    let error = store
+        .append(&main, &stale)
+        .expect_err("`append(&main, &stale)` fails");
     let repaired = Head {
         seq: 2,
         acceptance: unpublished_id,
@@ -197,9 +234,12 @@ fn appends_repair_what_a_crash_left() {
         matches!(error, StoreError::Conflict { actual, .. } if actual == Some(repaired)),
         "{error}"
     );
-    assert_eq!(store.head(&main).unwrap(), Some(repaired));
+    assert_eq!(
+        store.head(&main).expect("`head(&main)` succeeds"),
+        Some(repaired)
+    );
     land(&store, &main, 1);
-    assert_eq!(store.log(&main).unwrap().len(), 4);
+    assert_eq!(store.log(&main).expect("`log(&main)` succeeds").len(), 4);
 }
 
 #[test]
@@ -246,9 +286,9 @@ fn repairs_advance_the_target_to_every_acceptance_left_unpublished() {
 
 #[test]
 fn repairs_sync_the_log_before_publishing_it() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("`tempfile::tempdir()` succeeds");
     let store = Store::new(dir.path().join(".origin"), Recorder::default());
-    store.init().unwrap();
+    store.init().expect("`init()` succeeds");
     let main = TargetName::MAIN;
     let ids = land(&store, &main, 1);
     let unsynced = acceptance(
@@ -258,10 +298,15 @@ fn repairs_sync_the_log_before_publishing_it() {
             acceptance: ids[0],
         }),
     );
-    store.write_all(&[unsynced.encode()]).unwrap();
+    store
+        .write_all(&[unsynced.encode()])
+        .expect("`write_all(&[unsynced.encode()])` succeeds");
     let log = store.target_files(main.id()).log();
-    let mut file = fs::OpenOptions::new().append(true).open(log).unwrap();
-    writeln!(file, "{}", unsynced.encode().id()).unwrap();
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(log)
+        .expect("`open(log)` succeeds");
+    writeln!(file, "{}", unsynced.encode().id()).expect("the log accepts an appended line");
     store.platform.0.lock().clear();
 
     assert!(store.append(&main, &unsynced).is_err(), "it's there now");
@@ -302,9 +347,9 @@ fn targets_are_named_before_their_first_head() {
 
 #[test]
 fn acceptances_are_durable_before_the_log_refers_to_them() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("`tempfile::tempdir()` succeeds");
     let store = Store::new(dir.path().join(".origin"), Recorder::default());
-    store.init().unwrap();
+    store.init().expect("`init()` succeeds");
     let main = TargetName::MAIN;
     land(&store, &main, 1);
     store.platform.0.lock().clear();
