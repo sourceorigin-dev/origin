@@ -1,5 +1,7 @@
 //! Benchmarks encoding, hashing and signing objects.
 
+#![expect(clippy::expect_used, reason = "A benchmark fails by panicking.")]
+
 use divan::counter::BytesCount;
 use divan::{Bencher, black_box};
 use origin_shared::{
@@ -22,10 +24,11 @@ fn hash_blob(bencher: Bencher<'_, '_>, len: usize) {
         .bench(|| EncodedObject::blob(black_box(&content)));
 }
 
+#[expect(clippy::expect_used, reason = "A benchmark fails by panicking.")]
 fn tree(len: usize) -> Tree {
     (0..len)
         .map(|i| {
-            let name = EntryName::new(format!("file-{i:06}.rs")).unwrap();
+            let name = EntryName::new(format!("file-{i:06}.rs")).expect("the name is valid");
             let id = EncodedObject::blob(&i.to_le_bytes()).id();
             let entry = TreeEntry {
                 kind: EntryKind::File,
@@ -45,9 +48,14 @@ fn encode_tree(bencher: Bencher<'_, '_>, len: usize) {
 
 /// Benchmarks decoding a tree of `len` entries, as every tree read does.
 #[divan::bench(args = [16, 1024])]
+#[expect(clippy::expect_used, reason = "A benchmark fails by panicking.")]
 fn decode_tree(bencher: Bencher<'_, '_>, len: usize) {
     let encoded = Object::Tree(tree(len)).encode();
-    bencher.bench(|| black_box(&encoded).decode_as::<Tree>().unwrap());
+    bencher.bench(|| {
+        black_box(&encoded)
+            .decode_as::<Tree>()
+            .expect("the object decodes")
+    });
 }
 
 /// Builds an id of any type by hashing `seed` as a blob.
@@ -59,12 +67,12 @@ fn id<T: From<ObjectId>>(seed: &str) -> T {
 fn statement() -> Statement {
     Statement {
         subject: RecordId::Revision(id("revision")),
-        kind: Kind::new("ci.test").unwrap(),
+        kind: Kind::new("ci.test").expect("the name is valid"),
         verdict: Some(Verdict::Pass),
-        issuer: "node:ci-1".parse().unwrap(),
+        issuer: "node:ci-1".parse().expect("the text parses"),
         inputs: Some(Inputs {
             paths: ["src", "Cargo.toml", "Cargo.lock"]
-                .map(|path| RepoPath::new(path).unwrap())
+                .map(|path| RepoPath::new(path).expect("the name is valid"))
                 .into(),
             target_paths: Vec::new(),
             definition: Digest::of(b"cargo test"),
@@ -86,13 +94,19 @@ fn encode_statement(bencher: Bencher<'_, '_>) {
 
 /// Benchmarks decoding a statement, as every statement read does.
 #[divan::bench]
+#[expect(clippy::expect_used, reason = "A benchmark fails by panicking.")]
 fn decode_statement(bencher: Bencher<'_, '_>) {
     let encoded = statement().encode();
-    bencher.bench(|| black_box(&encoded).decode_as::<Statement>().unwrap());
+    bencher.bench(|| {
+        black_box(&encoded)
+            .decode_as::<Statement>()
+            .expect("the object decodes")
+    });
 }
 
 /// Benchmarks encoding and hashing a revision.
 #[divan::bench]
+#[expect(clippy::expect_used, reason = "A benchmark fails by panicking.")]
 fn encode_revision(bencher: Bencher<'_, '_>) {
     let revision = Revision {
         change: ChangeId::from_bytes([7; 16]),
@@ -101,7 +115,7 @@ fn encode_revision(bencher: Bencher<'_, '_>) {
         deps: Vec::new(),
         snapshot: id("tree"),
         description: id("description"),
-        author: "user:alice".parse().unwrap(),
+        author: "user:alice".parse().expect("the text parses"),
     };
     bencher.bench(|| black_box(&revision).encode());
 }
@@ -132,9 +146,14 @@ fn sign_acceptance(bencher: Bencher<'_, '_>) {
 /// Benchmarks verifying an acceptance. A fetch verifies each acceptance
 /// of every chain it brings.
 #[divan::bench]
+#[expect(clippy::expect_used, reason = "A benchmark fails by panicking.")]
 fn verify_acceptance(bencher: Bencher<'_, '_>) {
     let key = NodeKey::from_bytes(&[42; 32]);
     let public = key.public();
     let acceptance = acceptance().sign(&key);
-    bencher.bench(|| black_box(&acceptance).verify(&public).unwrap());
+    bencher.bench(|| {
+        black_box(&acceptance)
+            .verify(&public)
+            .expect("the signature verifies");
+    });
 }

@@ -79,6 +79,9 @@ mod tests {
     #[test]
     fn ids_differ_by_name() {
         assert_ne!(TargetName::MAIN.id(), TargetName::POLICY.id());
-        assert_eq!(TargetName::MAIN.id(), TargetName::new("main").unwrap().id());
+        assert_eq!(
+            TargetName::MAIN.id(),
+            TargetName::new("main").expect("the name is valid").id()
+        );
     }
 }

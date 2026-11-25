@@ -595,10 +595,14 @@ mod tests {
 
     #[test]
     fn lists_are_comma_separated() {
-        let list: List<KindPattern> = serde_json::from_str("\"ci.*,review\"").unwrap();
+        let list: List<KindPattern> =
+            serde_json::from_str("\"ci.*,review\"").expect("the JSON parses");
         assert_eq!(list.0.len(), 2);
-        assert_eq!(serde_json::to_string(&list).unwrap(), "\"ci.*,review\"");
-        let empty: List<String> = serde_json::from_str("\"\"").unwrap();
+        assert_eq!(
+            serde_json::to_string(&list).expect("the value serializes"),
+            "\"ci.*,review\""
+        );
+        let empty: List<String> = serde_json::from_str("\"\"").expect("the JSON parses");
         assert!(empty.is_empty());
         assert!(serde_json::from_str::<List<KindPattern>>("\"CI\"").is_err());
     }

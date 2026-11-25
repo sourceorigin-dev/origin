@@ -138,14 +138,24 @@ mod tests {
 
     #[test]
     fn kind_patterns_match_by_prefix() {
-        let kind = |kind: &str| Kind::new(kind).unwrap();
-        let ci: KindPattern = "ci.*".parse().unwrap();
+        let kind = |kind: &str| Kind::new(kind).expect("the name is valid");
+        let ci: KindPattern = "ci.*".parse().expect("the text parses");
         assert!(ci.matches(&kind("ci.test")));
         assert!(!ci.matches(&kind("ci")), "the prefix itself isn't under it");
         assert!(!ci.matches(&kind("cix.test")));
-        assert!("*".parse::<KindPattern>().unwrap().matches(&kind("review")));
+        assert!(
+            "*".parse::<KindPattern>()
+                .expect("the text parses")
+                .matches(&kind("review"))
+        );
         for pattern in ["*", "ci.*", "ci.test"] {
-            assert_eq!(pattern.parse::<KindPattern>().unwrap().to_string(), pattern);
+            assert_eq!(
+                pattern
+                    .parse::<KindPattern>()
+                    .expect("the text parses")
+                    .to_string(),
+                pattern
+            );
         }
         assert!("ci.**".parse::<KindPattern>().is_err());
     }
@@ -153,7 +163,13 @@ mod tests {
     #[test]
     fn principals_parse_as_they_display() {
         for valid in ["user:alice", "node:ci-1", "group:runners"] {
-            assert_eq!(valid.parse::<Principals>().unwrap().to_string(), valid);
+            assert_eq!(
+                valid
+                    .parse::<Principals>()
+                    .expect("the text parses")
+                    .to_string(),
+                valid
+            );
         }
         assert!("team:x".parse::<Principals>().is_err());
     }

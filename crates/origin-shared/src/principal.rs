@@ -90,7 +90,13 @@ mod tests {
     #[test]
     fn parses_and_displays() {
         for valid in ["user:alice", "node:ci-1", "user:a.b_c"] {
-            assert_eq!(valid.parse::<Principal>().unwrap().to_string(), valid);
+            assert_eq!(
+                valid
+                    .parse::<Principal>()
+                    .expect("the text parses")
+                    .to_string(),
+                valid
+            );
         }
         for invalid in [
             "alice", "group:x", "user:", "user:.x", "node:a b", "user:a:b",

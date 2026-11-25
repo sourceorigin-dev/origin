@@ -447,7 +447,7 @@ mod tests {
         Inputs {
             paths: paths
                 .iter()
-                .map(|path| RepoPath::new(path).unwrap())
+                .map(|path| RepoPath::new(path).expect("the name is valid"))
                 .collect(),
             target_paths: Vec::new(),
             definition: Digest::of(definition.as_bytes()),
@@ -465,7 +465,7 @@ mod tests {
                     kind: EntryKind::File,
                     id: EncodedObject::blob(content.as_bytes()).id(),
                 };
-                (RepoPath::new(path).unwrap(), entry)
+                (RepoPath::new(path).expect("the name is valid"), entry)
             })
             .collect()
     }
@@ -573,13 +573,23 @@ mod tests {
             assert!(Kind::is_valid(reserved.as_str()), "{reserved:?}");
             assert!(reserved.is_reserved(), "{reserved:?}");
         }
-        assert!(!Kind::new("corex.test").unwrap().is_reserved());
+        assert!(
+            !Kind::new("corex.test")
+                .expect("the name is valid")
+                .is_reserved()
+        );
     }
 
     #[test]
     fn verdicts_parse_as_they_display() {
         for verdict in [Verdict::Pass, Verdict::Fail, Verdict::Neutral] {
-            assert_eq!(verdict.to_string().parse::<Verdict>().unwrap(), verdict);
+            assert_eq!(
+                verdict
+                    .to_string()
+                    .parse::<Verdict>()
+                    .expect("the text parses"),
+                verdict
+            );
         }
         assert!("Pass".parse::<Verdict>().is_err());
     }

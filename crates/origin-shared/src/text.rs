@@ -148,7 +148,7 @@ mod tests {
             ("30m", 1800),
             ("45s", 45),
         ] {
-            let period: Period = text.parse().unwrap();
+            let period: Period = text.parse().expect("the text parses");
             assert_eq!(period.duration(), Duration::from_secs(seconds));
             assert_eq!(period.to_string(), text);
         }
@@ -161,10 +161,13 @@ mod tests {
 
     #[test]
     fn values_are_json_strings() {
-        let record = RecordId::Revision(ID.parse().unwrap());
-        let json = serde_json::to_string(&record).unwrap();
+        let record = RecordId::Revision(ID.parse().expect("the text parses"));
+        let json = serde_json::to_string(&record).expect("the value serializes");
         assert_eq!(json, format!("\"revision:{ID}\""));
-        assert_eq!(serde_json::from_str::<RecordId>(&json).unwrap(), record);
+        assert_eq!(
+            serde_json::from_str::<RecordId>(&json).expect("the JSON parses"),
+            record
+        );
         assert!(serde_json::from_str::<Kind>("\"Not A Kind\"").is_err());
     }
 }

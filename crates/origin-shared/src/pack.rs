@@ -179,8 +179,14 @@ mod tests {
         let pack = Pack {
             objects: vec![EncodedObject::blob(b"a"), EncodedObject::blob(b"")],
         };
-        assert_eq!(Pack::decode(&pack.encode()).unwrap(), pack);
-        assert_eq!(Pack::decode(&[]).unwrap(), Pack::default());
+        assert_eq!(
+            Pack::decode(&pack.encode()).expect("the object decodes"),
+            pack
+        );
+        assert_eq!(
+            Pack::decode(&[]).expect("the object decodes"),
+            Pack::default()
+        );
     }
 
     #[test]
@@ -189,7 +195,12 @@ mod tests {
         let pack = Pack {
             objects: vec![blob.clone(), blob.clone()],
         };
-        assert_eq!(Pack::decode(&pack.encode()).unwrap().objects, vec![blob]);
+        assert_eq!(
+            Pack::decode(&pack.encode())
+                .expect("the object decodes")
+                .objects,
+            vec![blob]
+        );
     }
 
     #[test]
@@ -221,7 +232,7 @@ mod tests {
             Pack::decode(&bytes[..bytes.len() - 1]),
             Err(PackError::Malformed(DecodeError::Truncated))
         ));
-        *bytes.last_mut().unwrap() ^= 1;
+        *bytes.last_mut().expect("the pack is not empty") ^= 1;
         assert!(matches!(Pack::decode(&bytes), Err(PackError::Corrupt(_))));
     }
 }

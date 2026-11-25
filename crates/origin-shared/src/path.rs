@@ -124,7 +124,7 @@ mod tests {
     use super::*;
 
     fn path(path: &str) -> RepoPath {
-        RepoPath::new(path).unwrap()
+        RepoPath::new(path).expect("the name is valid")
     }
 
     #[test]
@@ -143,7 +143,7 @@ mod tests {
 
     #[test]
     fn joins_children() {
-        let name = EntryName::new("lib.rs").unwrap();
+        let name = EntryName::new("lib.rs").expect("the name is valid");
         assert_eq!(RepoPath::root().join(&name), path("lib.rs"));
         assert_eq!(path("src").join(&name), path("src/lib.rs"));
     }

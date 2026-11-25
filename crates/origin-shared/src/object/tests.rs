@@ -13,7 +13,12 @@ pub(crate) fn sample_tree() -> Tree {
         ),
     ]
     .into_iter()
-    .map(|(name, kind, id)| (EntryName::new(name).unwrap(), TreeEntry { kind, id }))
+    .map(|(name, kind, id)| {
+        (
+            EntryName::new(name).expect("the name is valid"),
+            TreeEntry { kind, id },
+        )
+    })
     .collect()
 }
 
@@ -29,16 +34,16 @@ fn sample_revision() -> Revision {
         deps: vec![id("dep-1"), id("dep-2")],
         snapshot: TreeId::from(sample_tree().encode().id()),
         description: id("Add retries to fetch"),
-        author: "user:alice".parse().unwrap(),
+        author: "user:alice".parse().expect("the text parses"),
     }
 }
 
 fn sample_statement() -> Statement {
     Statement {
         subject: RecordId::Revision(sample_revision().encode().id().into()),
-        kind: Kind::new("ci.test").unwrap(),
+        kind: Kind::new("ci.test").expect("the name is valid"),
         verdict: Some(Verdict::Pass),
-        issuer: "node:ci-1".parse().unwrap(),
+        issuer: "node:ci-1".parse().expect("the text parses"),
         inputs: Some(Inputs {
             paths: vec![RepoPath::new("src").unwrap(), RepoPath::root()],
             target_paths: Vec::new(),
@@ -89,9 +94,13 @@ fn samples() -> [Object; 7] {
 fn objects_round_trip() {
     for object in samples() {
         let encoded = object.encode();
-        assert_eq!(encoded.kind().unwrap(), object.kind());
-        assert_eq!(encoded.decode().unwrap(), object);
-        let verified = EncodedObject::verify(encoded.id(), encoded.bytes().to_vec()).unwrap();
+        assert_eq!(
+            encoded.kind().expect("the object has a kind"),
+            object.kind()
+        );
+        assert_eq!(encoded.decode().expect("the object decodes"), object);
+        let verified = EncodedObject::verify(encoded.id(), encoded.bytes().to_vec())
+            .expect("the signature verifies");
         assert_eq!(verified, encoded);
     }
 }
@@ -118,16 +127,26 @@ fn encoding_is_stable() {
 #[test]
 fn acceptances_verify_only_against_their_signer() {
     let acceptance = sample_acceptance();
-    acceptance.verify(&sample_key().public()).unwrap();
+    acceptance
+        .verify(&sample_key().public())
+        .expect("the signature verifies");
     let other = NodeKey::from_bytes(&[1; 32]);
     assert!(acceptance.verify(&other.public()).is_err());
     let public = sample_key().public();
-    assert_eq!(public.to_string().parse::<NodePublicKey>().unwrap(), public);
+    assert_eq!(
+        public
+            .to_string()
+            .parse::<NodePublicKey>()
+            .expect("the text parses"),
+        public
+    );
     assert!("ab".parse::<NodePublicKey>().is_err());
 
     let mut bytes = acceptance.encode().into_bytes();
     bytes[1 + 32] += 1;
-    let tampered: Acceptance = EncodedObject::hash(bytes).decode_as().unwrap();
+    let tampered: Acceptance = EncodedObject::hash(bytes)
+        .decode_as()
+        .expect("the object decodes");
     assert_eq!(tampered.body().seq, 2);
     assert!(tampered.verify(&sample_key().public()).is_err());
 }
@@ -180,9 +199,9 @@ fn paths_decode_only_in_canonical_form() {
 #[test]
 fn blob_from_reader_matches_blob() {
     let content = b"some file content";
-    let read = EncodedObject::read_blob(&content[..], content.len()).unwrap();
+    let read = EncodedObject::read_blob(&content[..], content.len()).expect("the blob reads");
     assert_eq!(read, EncodedObject::blob(content));
-    assert_eq!(read.blob_content().unwrap(), content);
+    assert_eq!(read.blob_content().expect("the object is a blob"), content);
 }
 
 #[test]

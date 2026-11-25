@@ -256,14 +256,29 @@ mod tests {
     #[test]
     fn hex_round_trip() {
         let id = ObjectId::hash(b"hello");
-        assert_eq!(id.to_hex().parse::<ObjectId>().unwrap(), id);
-        assert_eq!(id.to_hex().to_uppercase().parse::<ObjectId>().unwrap(), id);
+        assert_eq!(
+            id.to_hex().parse::<ObjectId>().expect("the text parses"),
+            id
+        );
+        assert_eq!(
+            id.to_hex()
+                .to_uppercase()
+                .parse::<ObjectId>()
+                .expect("the text parses"),
+            id
+        );
         assert_eq!(id.short().len(), hex::SHORT_LEN);
         assert!(id.to_hex().starts_with(&id.short()));
 
         let change = ChangeId::from_bytes([0xab; 16]);
         assert_eq!(change.to_string(), "ab".repeat(16));
-        assert_eq!(change.to_string().parse::<ChangeId>().unwrap(), change);
+        assert_eq!(
+            change
+                .to_string()
+                .parse::<ChangeId>()
+                .expect("the text parses"),
+            change
+        );
     }
 
     #[test]
@@ -279,6 +294,9 @@ mod tests {
 
     #[test]
     fn random_change_ids_differ() {
-        assert_ne!(ChangeId::random().unwrap(), ChangeId::random().unwrap());
+        assert_ne!(
+            ChangeId::random().expect("the system random source works"),
+            ChangeId::random().expect("the system random source works")
+        );
     }
 }
