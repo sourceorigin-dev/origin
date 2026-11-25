@@ -1,0 +1,22 @@
+# Path filters for CI's `changes` job (.github/workflows/ci.yml), matched by
+# dorny/paths-filter with picomatch globs, dotfiles included. The xtask's CI
+# table (tools/xtask/src/check_changed.rs) maps them to the jobs they start.
+rust:
+  - .github/workflows/**
+  - .github/filters.yml
+  - .cargo/**
+  - .config/**
+  - Cargo.toml
+  - Cargo.lock
+  - rust-toolchain.toml
+  - rustfmt.toml
+  - clippy.toml
+  - justfile
+  - docs/openapi.json
+  - apps/**
+  - crates/**
+  - tools/**
+deny:
+  - Cargo.toml
+  - Cargo.lock
+  - deny.toml

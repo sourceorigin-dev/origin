@@ -12,7 +12,6 @@ cargo-in-ci = ["cargo +\"$MSRV\" check --locked --workspace --all-targets --all-
 [deviations]
 agent-files = { reason = "the shared skills replace CLAUDE.md in a follow-up", paths = ["CLAUDE.md"] }
 pr-template = { reason = "the pull request template comes with the pull request checks, in a follow-up", paths = [".github/pull_request_template.md"] }
-recipes = { reason = "`check-changed` comes in a follow-up", paths = ["justfile"] }
 skills-synced = "the shared skills are synced in a follow-up"
 
 [deviations.workspace-lints]
