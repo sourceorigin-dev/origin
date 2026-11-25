@@ -19,12 +19,13 @@
 //! languages.
 
 use origin_shared::api::{
-    Annotation, ApiError, EventsQuery, FetchRecords, LandRequest, Landings, LogEntry, LogQuery,
-    NewTarget, RepoName, RepoSummary, Revisions, StatementsQuery, Stored, TargetInfo,
+    Annotation, ApiError, EventsQuery, FetchRecords, FetchSnapshot, LandRequest, Landings,
+    LogEntry, LogQuery, MORE, NewTarget, RepoName, RepoSummary, Revisions, StatementsQuery, Stored,
+    TargetInfo,
 };
 use origin_shared::event::Page;
 use origin_shared::landing::Pending;
-use origin_shared::pack::{Pack, PackError};
+use origin_shared::pack::{Pack, PackError, Part};
 use origin_shared::{ChangeId, Head};
 use reqwest::{Method, RequestBuilder};
 use serde::de::DeserializeOwned;
@@ -65,9 +66,17 @@ endpoints! {
     }
 
     impl Repo {
-        /// Fetches objects by id, in the order requested.
-        fn fetch_records(request: &FetchRecords) -> Pack =
-            POST "records/fetch", json(request) => pack;
+        /// Fetches records by id, in the order requested. Each record is followed
+        /// by its blob if the server has it: a revision's description or a
+        /// statement's payload. A part that stops short holds the records up to the
+        /// last one it includes.
+        fn fetch_records(request: &FetchRecords) -> Part =
+            POST "records/fetch", json(request) => part;
+        /// Fetches the trees and blobs of a snapshot, parents first, skipping those
+        /// that one of the request's `have` snapshots holds at the same path. If a
+        /// part stops short, ask again, skipping the objects already received.
+        fn fetch_snapshot(request: &FetchSnapshot) -> Part =
+            POST "snapshots/fetch", json(request) => part;
         /// Stores a batch of objects: snapshots, revisions and statements. Each
         /// object may only depend on objects in the batch or in the repository.
         fn put_records(pack: &Pack) -> Stored = PUT "records", body(pack.encode()) => json;
@@ -171,8 +180,10 @@ impl Response {
         Ok(self.0.json().await?)
     }
 
-    async fn pack(self) -> Result<Pack, Error> {
-        Ok(Pack::decode(&self.0.bytes().await?)?)
+    async fn part(self) -> Result<Part, Error> {
+        let more = self.0.headers().contains_key(MORE);
+        let pack = Pack::decode(&self.0.bytes().await?)?;
+        Ok(Part { pack, more })
     }
 }
 
