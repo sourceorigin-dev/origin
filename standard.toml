@@ -7,11 +7,26 @@ anyhow-crates = ["origin-src"]
 # CI's check on the minimum supported Rust, which runs no recipe.
 cargo-in-ci = ["cargo +\"$MSRV\" check --locked --workspace --all-targets --all-features"]
 
+# The pull request checks of .github/workflows/pr.yml, read at a pull
+# request's base. The scopes are those titles use.
+[pr-checks]
+scopes = [
+  "agents", "ancestry", "annotations", "api", "auth", "ci", "cli", "client",
+  "conflict", "deps", "design", "e2e", "events", "index", "locks", "objects",
+  "oplog", "permissions", "platform", "policy", "queue", "remote", "repo",
+  "server", "service", "shared", "skills", "src", "standard", "statements",
+  "store", "sync", "targets", "tree", "workspace", "workspaces", "worktree",
+  "xtask",
+]
+approvers = ["PiquelChips"]
+# Exceptions are only reported until the open stack, which predates the
+# standard, lands.
+enforce-lint-exceptions = false
+
 # Each deviation lists the files its findings were in when origin adopted the
 # standard; `cargo xtask standard --fix` drops each file once it complies.
 [deviations]
 agent-files = { reason = "the shared skills replace CLAUDE.md in a follow-up", paths = ["CLAUDE.md"] }
-pr-template = { reason = "the pull request template comes with the pull request checks, in a follow-up", paths = [".github/pull_request_template.md"] }
 skills-synced = "the shared skills are synced in a follow-up"
 
 [deviations.workspace-lints]
