@@ -107,7 +107,7 @@ impl<T: Field> Field for Vec<T> {
 
     fn read(reader: &mut Reader<'_>) -> Result<Self, DecodeError> {
         let len = reader.read_len()?;
-        // Each item takes at least a byte: a corrupt count can't make this
+        // INVARIANT: each item takes at least a byte, so a corrupt count cannot make this
         // allocate more than the encoding's size.
         let mut items = Vec::with_capacity(len.min(reader.remaining()));
         for _ in 0..len {
@@ -193,7 +193,6 @@ impl<'a> Reader<'a> {
     ///
     /// Fails if fewer remain.
     pub fn array<const N: usize>(&mut self) -> Result<[u8; N], DecodeError> {
-        // `take` returns exactly `N` bytes: this never fails.
         self.take(N)?.try_into().map_err(|_| DecodeError::Truncated)
     }
 
