@@ -286,6 +286,12 @@ reviews usually declare no inputs, so they never promote automatically.
 
 ## Targets and policy
 
+Appending acceptances to a chain: the caller verifies the signatures, since
+only it knows the target's authority. The op log records the target advancing
+to each acceptance, even one the store already had, such as one fetched earlier
+as another target's landing. Each acceptance's `target.advanced` event comes
+from that entry.
+
 A target is a hash-chained list of acceptances with one authority. Its tip is
 the target's current snapshot. Only the authority writes to the chain, and
 every acceptance names the one before it. Two acceptances with the same
