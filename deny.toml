@@ -16,6 +16,10 @@ allow = [
   "MIT",
   "Unicode-3.0",
 ]
+# The standard's checks (xtask only) hash YAML maps with foldhash.
+exceptions = [
+  { crate = "foldhash", allow = ["Zlib"] },
+]
 
 [sources]
 unknown-git = "deny"

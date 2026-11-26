@@ -28,6 +28,10 @@ doc-test:
 deny:
     @cargo deny check
 
+# The engineering standard's rules; `cargo xtask standard rules` lists them.
+standard:
+    @cargo xtask standard
+
 # Rewrite docs/openapi.json after changing the API. `just test` fails while
 # it is stale.
 openapi:

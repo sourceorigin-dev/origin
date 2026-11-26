@@ -1,0 +1,124 @@
+# How origin applies the engineering standard; the README of the
+# `sourceorigin-standard` crate lists its rules and every key here.
+
+# The `origin` binary's library, whose server setup and error reports use anyhow.
+anyhow-crates = ["origin-src"]
+
+# CI's check on the minimum supported Rust, which runs no recipe.
+cargo-in-ci = ["cargo +\"$MSRV\" check --locked --workspace --all-targets --all-features"]
+
+# Each deviation lists the files its findings were in when origin adopted the
+# standard; `cargo xtask standard --fix` drops each file once it complies.
+[deviations]
+agent-files = { reason = "the shared skills replace CLAUDE.md in a follow-up", paths = ["CLAUDE.md"] }
+ci-shape = { reason = "ci.yml gets its merge_group trigger and always() in a follow-up", paths = [".github/workflows/ci.yml"] }
+clippy-config = { reason = "clippy.toml gets the test settings in a follow-up", paths = ["clippy.toml"] }
+config-comments = { reason = "ci.yml's header comment is shortened in a follow-up", paths = [".github/workflows/ci.yml"] }
+cargo-locked = { reason = "the recipes gain --locked in a follow-up", paths = ["justfile"] }
+layout = { reason = "the xtask alias gains --locked in a follow-up", paths = [".cargo/config.toml"] }
+pr-template = { reason = "the pull request template comes with the pull request checks, in a follow-up", paths = [".github/pull_request_template.md"] }
+recipes = { reason = "the missing recipes come in follow-ups", paths = ["justfile"] }
+scheduled-audit = { reason = "CI audits weekly from a follow-up", paths = [".github/workflows"] }
+skills-synced = "the shared skills are synced in a follow-up"
+toolchain = { reason = "the toolchain moves to stable in a follow-up", paths = ["rust-toolchain.toml"] }
+
+[deviations.workspace-lints]
+reason = "the required lints are set in a follow-up"
+paths = ["Cargo.toml"]
+
+[deviations.inline-tests]
+reason = "13 findings: the tests move to files of their own in a follow-up"
+paths = [
+    "apps/origin-src/src/ancestry.rs",
+    "apps/origin-src/src/annotations/mod.rs",
+    "apps/origin-src/src/annotations/promotion.rs",
+    "apps/origin-src/src/annotations/retention.rs",
+    "apps/origin-src/src/conflict.rs",
+    "apps/origin-src/src/events.rs",
+    "apps/origin-src/src/index.rs",
+    "apps/origin-src/src/store/packs.rs",
+    "apps/origin-src/src/targets.rs",
+    "apps/origin-src/src/tree.rs",
+    "apps/origin-src/src/worktree.rs",
+    "crates/origin-platform/src/durability.rs",
+    "crates/origin-shared/src/object/mod.rs",
+]
+
+[deviations.rust-comments]
+reason = "356 findings in 48 files, fixed in follow-ups"
+paths = [
+    "apps/origin-src/benches/annotations.rs",
+    "apps/origin-src/benches/packs.rs",
+    "apps/origin-src/benches/server.rs",
+    "apps/origin-src/benches/workspace.rs",
+    "apps/origin-src/src/ancestry.rs",
+    "apps/origin-src/src/annotations/mod.rs",
+    "apps/origin-src/src/annotations/promotion.rs",
+    "apps/origin-src/src/annotations/retention.rs",
+    "apps/origin-src/src/cli.rs",
+    "apps/origin-src/src/config.rs",
+    "apps/origin-src/src/conflict.rs",
+    "apps/origin-src/src/events.rs",
+    "apps/origin-src/src/fixture.rs",
+    "apps/origin-src/src/frames.rs",
+    "apps/origin-src/src/index.rs",
+    "apps/origin-src/src/oplog.rs",
+    "apps/origin-src/src/output.rs",
+    "apps/origin-src/src/policy.rs",
+    "apps/origin-src/src/queue/mod.rs",
+    "apps/origin-src/src/queue/session.rs",
+    "apps/origin-src/src/queue/tests/changes.rs",
+    "apps/origin-src/src/queue/tests/conflicts.rs",
+    "apps/origin-src/src/queue/tests/evidence.rs",
+    "apps/origin-src/src/queue/tests/policy.rs",
+    "apps/origin-src/src/queue/tests/targets.rs",
+    "apps/origin-src/src/server.rs",
+    "apps/origin-src/src/service.rs",
+    "apps/origin-src/src/store/mod.rs",
+    "apps/origin-src/src/store/packs.rs",
+    "apps/origin-src/src/targets.rs",
+    "apps/origin-src/src/tree.rs",
+    "apps/origin-src/src/workspace/annotate.rs",
+    "apps/origin-src/src/workspace/land.rs",
+    "apps/origin-src/src/workspace/mod.rs",
+    "apps/origin-src/src/workspace/ops.rs",
+    "apps/origin-src/src/workspace/registry.rs",
+    "apps/origin-src/src/worktree.rs",
+    "apps/origin-src/tests/cli.rs",
+    "apps/origin-src/tests/http.rs",
+    "crates/origin-platform/src/clone.rs",
+    "crates/origin-platform/src/durability.rs",
+    "crates/origin-platform/tests/conformance.rs",
+    "crates/origin-shared/src/object/encoding.rs",
+    "crates/origin-shared/src/object/mod.rs",
+    "crates/origin-shared/src/object/statement.rs",
+    "crates/origin-shared/src/object/tree.rs",
+    "crates/origin-shared/src/pack.rs",
+    "tools/xtask/src/main.rs",
+]
+
+[deviations.doc-length]
+reason = "28 findings in 21 files, fixed in follow-ups"
+paths = [
+    "apps/origin-src/src/annotations/mod.rs",
+    "apps/origin-src/src/annotations/promotion.rs",
+    "apps/origin-src/src/annotations/retention.rs",
+    "apps/origin-src/src/conflict.rs",
+    "apps/origin-src/src/events.rs",
+    "apps/origin-src/src/frames.rs",
+    "apps/origin-src/src/index.rs",
+    "apps/origin-src/src/oplog.rs",
+    "apps/origin-src/src/policy.rs",
+    "apps/origin-src/src/queue/mod.rs",
+    "apps/origin-src/src/service.rs",
+    "apps/origin-src/src/store/mod.rs",
+    "apps/origin-src/src/store/packs.rs",
+    "apps/origin-src/src/targets.rs",
+    "apps/origin-src/src/workspace/land.rs",
+    "apps/origin-src/src/workspace/mod.rs",
+    "apps/origin-src/src/workspace/ops.rs",
+    "apps/origin-src/src/workspace/registry.rs",
+    "apps/origin-src/src/worktree.rs",
+    "crates/origin-platform/src/durability.rs",
+    "crates/origin-shared/src/object/mod.rs",
+]

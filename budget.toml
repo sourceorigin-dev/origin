@@ -1,0 +1,5 @@
+# Each crate's `#[expect]` lints, which the owner reviews; see the standard's
+# README.
+[expect]
+origin-shared = 1
+origin-src = 1
