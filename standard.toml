@@ -26,8 +26,6 @@ enforce-lint-exceptions = false
 # Each deviation lists the files its findings were in when origin adopted the
 # standard; `cargo xtask standard --fix` drops each file once it complies.
 [deviations]
-agent-files = { reason = "the shared skills replace CLAUDE.md in a follow-up", paths = ["CLAUDE.md"] }
-skills-synced = "the shared skills are synced in a follow-up"
 
 [deviations.workspace-lints]
 reason = "`clippy::unwrap_used` is unset: its findings are fixed in follow-ups"
