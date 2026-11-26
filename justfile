@@ -16,8 +16,9 @@ fmt:
 fmt-check:
     @cargo fmt --all -- --check
 
-lint:
-    @cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+# ARGS, such as `--package origin-src`, replace `--workspace`.
+lint *ARGS='--workspace':
+    @cargo clippy --locked --all-targets --all-features {{ARGS}} -- -D warnings
 
 # ARGS, such as `--package origin-src`, replace `--workspace`.
 test *ARGS='--workspace':
@@ -27,8 +28,9 @@ test *ARGS='--workspace':
 doc:
     @cargo doc --locked --workspace --all-features --no-deps --document-private-items
 
-doc-test:
-    @cargo test --locked --doc --workspace --all-features
+# ARGS, such as `--package origin-src`, replace `--workspace`.
+doc-test *ARGS='--workspace':
+    @cargo test --locked --doc --all-features {{ARGS}}
 
 audit:
     @cargo deny check
@@ -40,6 +42,12 @@ unused:
 # The engineering standard's rules; `cargo xtask standard rules` lists them.
 standard:
     @cargo xtask standard
+
+# CI's quick checks, for only what changed since the merge base with a branch,
+# `origin/main` by default.
+[positional-arguments]
+check-changed *ARGS:
+    @cargo xtask check-changed "$@"
 
 # Rewrite docs/openapi.json after changing the API. `just test` fails while
 # it is stale.

@@ -7,7 +7,10 @@
 //!   benchmarks use it to change files between runs.
 //! - `standard [--fix | report | rules | skills]`: checks the engineering
 //!   standard's rules ([`standard`]).
+//! - `check-changed [BASE]`: CI's quick checks, for only what changed since
+//!   the merge base with BASE, `origin/main` by default ([`check_changed`]).
 
+mod check_changed;
 mod standard;
 
 use std::fmt::Write as _;
@@ -20,6 +23,7 @@ use std::{env, iter};
 
 use anyhow::{Context, Result, bail, ensure};
 use origin_src::fixture::FixtureTree;
+use sourceorigin_standard::check_changed::DEFAULT_BASE;
 
 fn main() -> Result<ExitCode> {
     let mut args = env::args().skip(1);
@@ -35,8 +39,13 @@ fn main() -> Result<ExitCode> {
             )?;
         }
         Some("standard") => return standard::Standard::parse(args)?.run(&root()),
+        Some("check-changed") => {
+            let base = args.next();
+            let base = base.as_deref().unwrap_or(DEFAULT_BASE);
+            return Ok(check_changed::CI.run(&root(), base)?);
+        }
         _ => bail!(
-            "usage: cargo xtask <bench-git [--files N] [--tree PATH] | edit DIR COUNT | standard [--fix | report | rules | skills]>"
+            "usage: cargo xtask <bench-git [--files N] [--tree PATH] | edit DIR COUNT | standard [--fix | report | rules | skills] | check-changed [BASE]>"
         ),
     }
     Ok(ExitCode::SUCCESS)

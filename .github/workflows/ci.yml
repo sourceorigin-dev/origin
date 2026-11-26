@@ -29,8 +29,35 @@ env:
   NEXTEST_PROFILE: ci
 
 jobs:
+  # Which jobs a pull request needs, from .github/filters.yml; every other
+  # event runs them all.
+  changes:
+    name: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      rust: ${{ github.event_name != 'pull_request' || steps.filter.outputs.rust == 'true' }}
+      deny: ${{ github.event_name != 'pull_request' || steps.filter.outputs.deny == 'true' }}
+    steps:
+      - if: github.event_name == 'pull_request'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/filters.yml
+          sparse-checkout-cone-mode: false
+      - if: github.event_name == 'pull_request'
+        id: filter
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        with:
+          filters: .github/filters.yml
+
   checks:
     name: checks
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.deny == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -45,6 +72,8 @@ jobs:
   # origin-platform has one implementation per OS, so both run the tests.
   rust:
     name: rust (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -75,6 +104,8 @@ jobs:
   # newer toolchain cannot silently raise the MSRV.
   msrv:
     name: msrv
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -110,10 +141,11 @@ jobs:
   ci:
     name: ci
     if: always()
-    needs: [checks, rust, msrv, standard]
+    needs: [changes, checks, rust, msrv, standard]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # v1.3.0
         with:
+          allowed-skips: checks, rust, msrv
           jobs: ${{ toJSON(needs) }}
