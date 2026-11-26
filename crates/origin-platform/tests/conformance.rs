@@ -122,6 +122,7 @@ mod suite {
         assert!(exclusive.is_none());
     }
 
+    #[expect(clippy::expect_used, reason = "A test helper fails by panicking.")]
     pub fn blocking_locks_wait_for_release(platform: &impl Platform) {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("lock");
@@ -183,6 +184,7 @@ mod suite {
 
     /// Clones where the test's file system can, and reports it can't
     /// otherwise.
+    #[expect(clippy::panic, reason = "A test helper fails by panicking.")]
     pub fn clones_are_independent_or_unsupported(platform: &impl Platform) {
         let root = tempfile::tempdir().unwrap();
         let (from, to) = (root.path().join("from"), root.path().join("to"));

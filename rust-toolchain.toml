@@ -1,4 +1,3 @@
 [toolchain]
-# Pinned, so local builds and CI use the same Rust.
-channel = "1.99.0"
+channel = "stable"
 components = [ "rustfmt", "clippy" ]

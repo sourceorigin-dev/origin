@@ -739,8 +739,7 @@ impl<'a, P: Platform> OpLog<'a, P> {
             .rev()
             .flat_map(|first| match self.read_segment(first, 0) {
                 Ok(read) => read
-                    .map(|read| read.entries)
-                    .unwrap_or_default()
+                    .map_or_else(Vec::new, |read| read.entries)
                     .into_iter()
                     .rev()
                     .map(Ok)

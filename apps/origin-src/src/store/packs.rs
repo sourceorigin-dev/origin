@@ -36,6 +36,7 @@
 //! after it is retired, so readers also reload the manifest every few
 //! seconds to close the packs it no longer names.
 
+use std::array;
 use std::collections::HashSet;
 use std::fmt;
 use std::fs::{self, File};
@@ -131,12 +132,10 @@ impl Location {
     }
 
     fn decode(bytes: &[u8; Self::LEN]) -> Self {
-        let (offset, rest) = bytes.split_at(8);
-        let (len, stored) = rest.split_at(4);
         Self {
-            offset: u64::from_le_bytes(offset.try_into().expect("8 bytes")),
-            len: u32::from_le_bytes(len.try_into().expect("4 bytes")),
-            stored: u64::from_le_bytes(stored.try_into().expect("8 bytes")),
+            offset: u64::from_le_bytes(array::from_fn(|i| bytes[i])),
+            len: u32::from_le_bytes(array::from_fn(|i| bytes[8 + i])),
+            stored: u64::from_le_bytes(array::from_fn(|i| bytes[12 + i])),
         }
     }
 

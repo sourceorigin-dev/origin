@@ -11,19 +11,12 @@ cargo-in-ci = ["cargo +\"$MSRV\" check --locked --workspace --all-targets --all-
 # standard; `cargo xtask standard --fix` drops each file once it complies.
 [deviations]
 agent-files = { reason = "the shared skills replace CLAUDE.md in a follow-up", paths = ["CLAUDE.md"] }
-ci-shape = { reason = "ci.yml gets its merge_group trigger and always() in a follow-up", paths = [".github/workflows/ci.yml"] }
-clippy-config = { reason = "clippy.toml gets the test settings in a follow-up", paths = ["clippy.toml"] }
-config-comments = { reason = "ci.yml's header comment is shortened in a follow-up", paths = [".github/workflows/ci.yml"] }
-cargo-locked = { reason = "the recipes gain --locked in a follow-up", paths = ["justfile"] }
-layout = { reason = "the xtask alias gains --locked in a follow-up", paths = [".cargo/config.toml"] }
 pr-template = { reason = "the pull request template comes with the pull request checks, in a follow-up", paths = [".github/pull_request_template.md"] }
-recipes = { reason = "the missing recipes come in follow-ups", paths = ["justfile"] }
-scheduled-audit = { reason = "CI audits weekly from a follow-up", paths = [".github/workflows"] }
+recipes = { reason = "`check-changed` comes in a follow-up", paths = ["justfile"] }
 skills-synced = "the shared skills are synced in a follow-up"
-toolchain = { reason = "the toolchain moves to stable in a follow-up", paths = ["rust-toolchain.toml"] }
 
 [deviations.workspace-lints]
-reason = "the required lints are set in a follow-up"
+reason = "`clippy::unwrap_used` is unset: its findings are fixed in follow-ups"
 paths = ["Cargo.toml"]
 
 [deviations.inline-tests]

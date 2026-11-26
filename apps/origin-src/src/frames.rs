@@ -14,6 +14,7 @@
 //! the file is damage too when a complete frame ends the file, since an
 //! interrupted append never leaves one after it.
 
+use std::array;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 
@@ -66,6 +67,7 @@ impl Frames {
     }
 
     /// Encodes a frame whose payload is what `write` writes.
+    #[expect(clippy::expect_used, reason = "Frames are under 4 GiB.")]
     pub(crate) fn frame(write: impl FnOnce(&mut Writer)) -> Vec<u8> {
         let mut out = Writer(vec![0; 4]);
         write(&mut out);
@@ -81,9 +83,8 @@ impl Frames {
     }
 
     fn check(payload: &[u8]) -> [u8; Self::CHECK] {
-        Digest::of(payload).as_bytes()[..Self::CHECK]
-            .try_into()
-            .expect("a digest is longer than a check")
+        let digest = Digest::of(payload);
+        array::from_fn(|i| digest.as_bytes()[i])
     }
 
     /// Decodes the frames of a file with `decode`, up to the first broken one.
@@ -331,6 +332,7 @@ impl Writer {
     }
 
     /// Writes a `u32` count, of items or bytes.
+    #[expect(clippy::expect_used, reason = "Nothing a frame holds counts 2^32.")]
     pub(crate) fn len(&mut self, len: usize) {
         self.bytes(&u32::try_from(len).expect("fewer than 2^32").to_le_bytes());
     }

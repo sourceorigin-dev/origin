@@ -39,6 +39,7 @@ impl FixtureTree {
     }
 
     /// Source-code-like content: unique per file and per `version`.
+    #[expect(clippy::expect_used, reason = "Writing to a String cannot fail.")]
     fn content(&self, index: usize, version: u64) -> String {
         let mut state = (index as u64 + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ version;
         let mut content = String::with_capacity(self.file_size + 64);

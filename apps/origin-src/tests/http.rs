@@ -149,6 +149,7 @@ fn change(seed: u8) -> ChangeId {
 }
 
 /// Returns the error code of a refused request.
+#[expect(clippy::panic, reason = "A test helper fails by panicking.")]
 fn code(error: Error) -> ErrorCode {
     match error {
         Error::Api(error) => error.code,
