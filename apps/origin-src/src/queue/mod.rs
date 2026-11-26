@@ -431,6 +431,9 @@ pub enum LandError {
         /// Its heads.
         heads: Vec<RevisionId>,
     },
+    /// A revision of the change was published while the queue was rebasing it.
+    #[error("change {} moved while it was landing: land it again", .0.short())]
+    Moved(ChangeId),
     /// The change was abandoned.
     #[error("change {} was abandoned, so it cannot land", .0.short())]
     Abandoned(ChangeId),

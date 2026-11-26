@@ -32,7 +32,7 @@ reason = "`clippy::unwrap_used` is unset: its findings are fixed in follow-ups"
 paths = ["Cargo.toml"]
 
 [deviations.rust-comments]
-reason = "356 findings in 58 files, fixed in follow-ups"
+reason = "58 files of findings, fixed in follow-ups"
 paths = [
     "apps/origin-src/benches/annotations.rs",
     "apps/origin-src/benches/packs.rs",
@@ -95,7 +95,7 @@ paths = [
 ]
 
 [deviations.doc-length]
-reason = "28 findings in 21 files, fixed in follow-ups"
+reason = "32 files of findings, fixed in follow-ups"
 paths = [
     "apps/origin-src/src/annotations/mod.rs",
     "apps/origin-src/src/annotations/promotion/mod.rs",

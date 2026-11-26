@@ -19,9 +19,9 @@
 //! languages.
 
 use origin_shared::api::{
-    Annotation, ApiError, EventsQuery, FetchRecords, FetchSnapshot, LandRequest, Landings,
-    LogEntry, LogQuery, MORE, NewTarget, RepoName, RepoSummary, Revisions, StatementsQuery, Stored,
-    TargetInfo,
+    Annotation, ApiError, EventsQuery, FetchRecords, FetchSnapshot, Inventory, InventoryRequest,
+    LandRequest, Landings, LogEntry, LogQuery, MORE, NewTarget, PutQuery, RepoName, RepoSummary,
+    Revisions, StatementsQuery, Stored, TargetInfo,
 };
 use origin_shared::event::Page;
 use origin_shared::landing::Pending;
@@ -32,15 +32,15 @@ use serde::de::DeserializeOwned;
 
 /// Defines endpoints as methods. Each method sends one request and reads the
 /// response with a [`Response`] method. The request is built from an HTTP
-/// method and a path relative to the owner's URL, which can name the
-/// arguments as `format!` does. An optional [`RequestBuilder`] method
-/// (`query`, `json` or `body`) adds a body.
+/// method, a path relative to the owner's URL, which can name the arguments
+/// as `format!` does, and the [`RequestBuilder`] methods (`query`, `json` or
+/// `body`) to apply.
 macro_rules! endpoints {
     ($(
         impl $owner:ident {$(
             $(#[doc = $doc:literal])*
             fn $name:ident($($arg:ident: $type:ty),*) -> $output:ty =
-                $method:ident $path:literal $(, $send:ident($body:expr))? => $read:ident;
+                $method:ident $path:literal $(, $send:ident($body:expr))* => $read:ident;
         )*}
     )*) => {$(
         impl $owner {$(
@@ -50,7 +50,7 @@ macro_rules! endpoints {
             ///
             /// Fails if the server cannot be reached or refuses the request.
             pub async fn $name(&self, $($arg: $type),*) -> Result<$output, Error> {
-                let request = self.request(Method::$method, &format!($path))$(.$send($body))?;
+                let request = self.request(Method::$method, &format!($path))$(.$send($body))*;
                 Response::send(request).await?.$read().await
             }
         )*}
@@ -80,10 +80,20 @@ endpoints! {
         /// Stores a batch of objects: snapshots, revisions and statements. Each
         /// object may only depend on objects in the batch or in the repository.
         fn put_records(pack: &Pack) -> Stored = PUT "records", body(pack.encode()) => json;
+        /// Stores a batch of objects like `put_records`, but only if each change the
+        /// query names still has the heads the query expects once its revisions are
+        /// published. This is a compare-and-swap: a mismatch is refused with a
+        /// conflict.
+        fn push_records(pack: &Pack, query: &PutQuery) -> Stored =
+            PUT "records", query(query), body(pack.encode()) => json;
         /// Returns the statements about a record, in the order the repository
         /// received them.
         fn statements(query: &StatementsQuery) -> Vec<Annotation> =
             GET "statements", query(query) => json;
+        /// Returns what the server holds of some changes: the ids of their
+        /// revisions, heads and statements.
+        fn inventory(request: &InventoryRequest) -> Vec<Inventory> =
+            POST "changes/inventory", json(request) => json;
         /// Returns the revisions of a change, and its heads.
         fn revisions(change: ChangeId) -> Revisions = GET "changes/{change}/revisions" => json;
         /// Lists every target, with its tip, authority and requirements.

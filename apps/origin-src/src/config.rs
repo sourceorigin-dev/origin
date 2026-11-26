@@ -36,6 +36,16 @@ struct ConfigFile {
 }
 
 impl UserConfig {
+    /// The configuration in `dir` of `user`, on the node of the same name.
+    #[cfg(test)]
+    pub(crate) fn new(dir: PathBuf, user: PrincipalName) -> Self {
+        Self {
+            dir,
+            node: user.clone(),
+            user,
+        }
+    }
+
     /// Loads the configuration from its directory.
     ///
     /// # Errors
