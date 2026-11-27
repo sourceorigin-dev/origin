@@ -561,6 +561,10 @@ Access is split into capabilities:
 | `land` | target | submitting to the target's queue (`land *` excludes `policy`) |
 | `admin` | — | landing on `policy` |
 
+Capabilities are written `read src`, `write src`, `annotate ci.*`, `land main`,
+`land *` and `admin`. Writing a path implies reading it. Changing the rules
+always takes `admin`.
+
 Reading:
 - A caller who can read no path doesn't see the repository at all.
 - A revision is visible when it changes a path the caller reads.

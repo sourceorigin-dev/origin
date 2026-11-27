@@ -218,6 +218,19 @@ pub(crate) mod hex {
         }
     }
 
+    /// Parses an even number of hex digits, in either case, into bytes.
+    pub fn bytes(input: &str) -> Option<Vec<u8>> {
+        let digit = |c: u8| char::from(c).to_digit(16);
+        let (pairs, rest) = input.as_bytes().as_chunks::<2>();
+        if !rest.is_empty() {
+            return None;
+        }
+        pairs
+            .iter()
+            .map(|&[high, low]| u8::try_from(digit(high)? << 4 | digit(low)?).ok())
+            .collect()
+    }
+
     /// Parses exactly `2 * N` hex digits, in either case.
     pub fn decode<const N: usize>(input: &str) -> Option<[u8; N]> {
         let input = input.as_bytes();

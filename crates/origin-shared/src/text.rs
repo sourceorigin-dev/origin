@@ -8,6 +8,7 @@ use std::time::Duration;
 use utoipa::openapi::RefOr;
 use utoipa::openapi::schema::{ObjectBuilder, Schema, Type};
 
+use crate::access::{Capability, Targets};
 use crate::policy::{KindPattern, Principals};
 use crate::{
     AcceptanceId, AttachmentId, BlobId, ChangeId, Digest, EntryName, Kind, NodePublicKey, ObjectId,
@@ -72,6 +73,8 @@ as_text! {
     Principals => "group:runners";
     KindPattern => "ci.*";
     Period => "30s";
+    Capability => "write src";
+    Targets => "main";
 }
 
 /// A length of time in whole seconds. It is written as a whole number of
