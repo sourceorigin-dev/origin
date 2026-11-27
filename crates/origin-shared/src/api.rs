@@ -346,6 +346,10 @@ pub struct EventsQuery {
     /// The cursor to read after: the `next` of the previous page. Defaults to
     /// the end of the stream, so only new events are returned.
     pub cursor: Option<u64>,
+    /// The generation of the op log the cursor belongs to, as its page gave it.
+    /// A cursor from another generation, such as from before the repository was
+    /// restored, has expired.
+    pub generation: Option<String>,
     /// How long to wait for events, such as `30s`. Without it, the server
     /// answers at once, possibly with no events.
     #[param(value_type = Option<String>)]

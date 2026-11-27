@@ -1,66 +1,22 @@
 //! The op log: the ordered list of everything this node applied. It is local,
-//! never synced with other nodes, and every workspace of the repository shares
-//! it, so each entry names the workspace and the command it came from. An
-//! entry records one of:
-//!
-//! - records written (revisions, statements and acceptances), with what the
-//!   [index](crate::index) keeps of them;
-//! - a target advancing to a new acceptance;
-//! - a landing left waiting in a queue;
-//! - a working copy moving, by recording a draft or by a command.
-//!
-//! Each entry has a sequence number, one more than the entry before it, which
-//! never changes. It is the cursor of the [event stream](crate::events). The
-//! entries one command run appends form an operation, numbered by the sequence
-//! number of its first entry. `origin op log` shows operations, and
-//! `origin undo` takes them back.
+//! never synced, and shared by every workspace of the repository, so each
+//! entry names its workspace and command. An entry records records written, a
+//! target advancing, a landing left waiting in a queue, or a working copy
+//! moving. Its sequence number, one more than the entry before it, never
+//! changes and is the cursor of the [event stream](crate::events). The entries
+//! one command run appends form an operation, numbered by its first entry:
+//! `origin op log` shows operations, `origin undo` takes them back.
 //!
 //! ```text
 //! .origin/oplog/
+//!   generation                 a random id, made with the log
 //!   lock                       held exclusively while appending
 //!   writers/<n>                held by each writer while it writes
 //!   <first sequence number>    segments of entries, 16 hex digits each
 //! ```
 //!
-//! A segment is a file of [frames](crate::frames), one entry per frame.
-//! Entries are appended to the last segment until it is full, then to a new
-//! one. The log keeps the latest 16 MiB of entries and deletes older segments;
-//! a cursor older than that has expired.
-//!
-//! **Writing.** A write appends its entries ([`Store::commit_logged`]) just
-//! before it commits, and they are synced together with its files
-//! ([`DurableWrite::sync_with`]), so logging costs no extra sync. Before
-//! appending its first entry, the writer creates and locks `writers/<n>`,
-//! where `n` is that entry's sequence number; every entry names its writer.
-//! Once the write is published, the writer removes the file. A target's
-//! `target.advanced` event comes from the entry logged when its head moves,
-//! not from the entry that wrote the acceptance.
-//!
-//! The [index] catches up from the entries, so writers don't
-//! update it.
-//!
-//! **Reading.** Readers stop before the first entry whose writer still holds
-//! its lock ([`OpLog::settled`]). Every entry before it is durable, and its
-//! write is as published as it will ever be. Otherwise a power loss could drop
-//! an entry a reader had seen, and the next entry would reuse its sequence
-//! number. A writer that crashed leaves its lock file unlocked: readers then
-//! sync the segments holding its entries, remove the file, and take the
-//! entries' effects as whatever was published, so a crashed writer holds
-//! nothing back. A crash can leave a write unpublished or partly published:
-//! some or none of a batch's records, an acceptance the target's head never
-//! moved to (the next landing on the target publishes it), a waiting landing
-//! that wasn't kept, or a working copy that didn't move (see
-//! [`workspace`](crate::workspace) for how such a move is finished).
-//!
-//! **Damage.** A crash during an append leaves part of a frame at the end of
-//! the last segment. It never was an entry: readers skip it, and the next
-//! append cuts it off. Other damage loses the entries it covers. Readers read
-//! past it from both ends of the segment and report how many entries were
-//! lost, and the index rebuilds itself from the store, since those entries may
-//! have named records. The first reader to find damage in the last segment
-//! starts a new segment, so appends continue past it. When the damage is at
-//! the end of the last segment, the next append skips as many sequence numbers
-//! as the damaged bytes could hold, so none is reused.
+//! Segments of [frames](crate::frames) hold the entries, and readers stop at
+//! the first one still being written ([`OpLog::settled`]): `docs/design.md`.
 
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
@@ -451,17 +407,54 @@ impl<'a, P: Platform> OpLog<'a, P> {
         let writers = self.dir().join(Self::WRITERS);
         fs::create_dir_all(&writers).map_err(|source| StoreError::io(&writers, source))?;
         self.start_segment(1, &[])?;
+        self.generation()?;
+        Ok(())
+    }
+
+    /// The file holding the log's generation.
+    const GENERATION: &str = "generation";
+
+    /// Returns the log's generation: a random id made with the log, which it
+    /// makes if the log has none. A log made later, such as when a repository
+    /// is restored from a copy of its records, has a different one. The
+    /// cursors of one log mean nothing in another.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the generation cannot be read, or made and written.
+    pub fn generation(&self) -> Result<String, StoreError> {
+        let path = self.dir().join(Self::GENERATION);
+        let read = |path: &Path| match fs::read_to_string(path) {
+            Ok(generation) => Ok(Some(generation.trim_end().to_owned())),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(source) => Err(StoreError::io(path, source)),
+        };
+        if let Some(generation) = read(&path)? {
+            return Ok(generation);
+        }
+        self.create_dir()?;
+        let generation = getrandom::u64().map_err(StoreError::Random)?;
+        let write = self.store.durable_write();
+        write.stage(&path, format!("{generation:016x}\n").as_bytes())?;
+        write.commit()?;
+        Ok(read(&path)?.unwrap_or_default())
+    }
+
+    /// Creates the log's directory, durably, if it's missing.
+    fn create_dir(&self) -> Result<(), StoreError> {
+        let dir = self.dir();
+        if !dir.is_dir() {
+            fs::create_dir_all(&dir).map_err(|source| StoreError::io(&dir, source))?;
+            self.store.sync_dir(self.store.root())?;
+        }
         Ok(())
     }
 
     /// Opens and locks the lock file `name` in the log's directory, creating
     /// the directory, durably, if it is missing.
     fn lock(&self, name: &str, mode: LockMode) -> Result<LockedFile, StoreError> {
+        self.create_dir()?;
         let dir = self.dir();
-        if !dir.is_dir() {
-            fs::create_dir_all(&dir).map_err(|source| StoreError::io(&dir, source))?;
-            self.store.sync_dir(self.store.root())?;
-        }
         Ok(LockedFile::open(
             &self.store.platform,
             &dir.join(name),

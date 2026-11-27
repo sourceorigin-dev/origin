@@ -221,6 +221,7 @@ impl Workspace {
         let service = self.service(None)?;
         let mut query = EventsQuery {
             cursor: since,
+            generation: None,
             wait: Some(Period::from_secs(OriginService::MAX_WAIT.as_secs())),
             limit: Some(256),
             kind: List(kinds),
@@ -232,6 +233,7 @@ impl Workspace {
                 println!("{event}");
             }
             query.cursor = Some(page.next);
+            query.generation = Some(page.generation);
         }
     }
 }

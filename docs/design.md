@@ -637,6 +637,10 @@ Fetched records are written before the chains that refer to them.
 Then the fetch compares the records of changes with the remote's, by id. It
 fetches the missing ones, the records they refer to, and the records of the
 changes those belong to.
+The changes it compares are those the remote's events name since the last
+fetch (`Sync::moved`), so a fetch that brings nothing costs the same however
+long the history. Only without a cursor, or once it expired, does it compare
+every change this node knows.
 
 ## Workspaces and platform code
 
@@ -739,6 +743,62 @@ Another workspace's `.origin/` holds only `workspace`, `state`, `moving`,
   `origin gc` removes the ones a crash left behind.
 - **Local filesystems only.** Writers refuse network file systems. A shared
   folder is a remote, never a live repository.
+
+### Op log
+
+The op log is the ordered list of everything this node applied. It is local,
+never synced with other nodes, and every workspace of the repository shares
+it, so each entry names the workspace and the command it came from. An entry
+records one of:
+
+- records written (revisions, statements and acceptances), with what the index
+  keeps of them;
+- a target advancing to a new acceptance;
+- a landing left waiting in a queue;
+- a working copy moving, by recording a draft or by a command.
+
+Each entry has a sequence number, one more than the entry before it, which
+never changes. It is the cursor of the event stream. The entries one command
+run appends form an operation, numbered by the sequence number of its first
+entry. `origin op log` shows operations, and `origin undo` takes them back.
+
+A segment is a file of frames, one entry per frame. Entries are appended to the
+last segment until it is full, then to a new one. The log keeps the latest
+16 MiB of entries and deletes older segments; a cursor older than that has
+expired. So has a cursor from another log, such as the one a restored
+repository had: the log's generation (`OpLog::generation`) tells logs apart.
+
+**Writing.** A write appends its entries (`Store::commit_logged`) just before
+it commits, and they are synced together with its files
+(`DurableWrite::sync_with`), so logging costs no extra sync. Before appending
+its first entry, the writer creates and locks `writers/<n>`, where `n` is that
+entry's sequence number; every entry names its writer. Once the write is
+published, the writer removes the file. A target's `target.advanced` event
+comes from the entry logged when its head moves, not from the entry that wrote
+the acceptance. The index catches up from the entries, so writers don't update
+it.
+
+**Reading.** Readers stop before the first entry whose writer still holds its
+lock (`OpLog::settled`). Every entry before it is durable, and its write is as
+published as it will ever be. Otherwise a power loss could drop an entry a
+reader had seen, and the next entry would reuse its sequence number. A writer
+that crashed leaves its lock file unlocked: readers then sync the segments
+holding its entries, remove the file, and take the entries' effects as
+whatever was published, so a crashed writer holds nothing back. A crash can
+leave a write unpublished or partly published: some or none of a batch's
+records, an acceptance the target's head never moved to (the next landing on
+the target publishes it), a waiting landing that wasn't kept, or a working
+copy that didn't move (the workspace module finishes such a move).
+
+**Damage.** A crash during an append leaves part of a frame at the end of the
+last segment. It never was an entry: readers skip it, and the next append cuts
+it off. Other damage loses the entries it covers. Readers read past it from
+both ends of the segment and report how many entries were lost, and the index
+rebuilds itself from the store, since those entries may have named records. The
+first reader to find damage in the last segment starts a new segment, so
+appends continue past it. When the damage is at the end of the last segment,
+the next append skips as many sequence numbers as the damaged bytes could
+hold, so none is reused.
 
 ## Command line
 

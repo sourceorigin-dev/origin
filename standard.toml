@@ -104,7 +104,6 @@ paths = [
     "apps/origin-src/src/events/mod.rs",
     "apps/origin-src/src/frames.rs",
     "apps/origin-src/src/index/mod.rs",
-    "apps/origin-src/src/oplog.rs",
     "apps/origin-src/src/policy.rs",
     "apps/origin-src/src/queue/mod.rs",
     "apps/origin-src/src/service.rs",

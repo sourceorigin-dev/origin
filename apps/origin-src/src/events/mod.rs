@@ -120,6 +120,7 @@ impl<'a, P: Platform> Events<'a, P> {
         let mut page = Page {
             events: Vec::new(),
             next: cursor,
+            ..Page::default()
         };
         let oplog = self.store.oplog();
         let read = oplog.after(cursor)?;

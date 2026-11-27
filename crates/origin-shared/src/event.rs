@@ -257,6 +257,10 @@ pub struct Page {
     pub events: Vec<Event>,
     /// The cursor after the entries read. Pass it to the next read.
     pub next: u64,
+    /// The generation of the op log the cursor belongs to. Pass it along with
+    /// the cursor: a cursor means nothing in another generation.
+    #[serde(default)]
+    pub generation: String,
 }
 
 #[cfg(test)]
