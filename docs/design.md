@@ -218,8 +218,10 @@ about kinds beyond the reserved `core.*` ones, which each have authors:
 | `core.conflict` | the revision's author, or a node | Paths left conflicted, with the content written there. From a node, it blocks only that landing. |
 | `core.divergent` | a node | The change has more than one head; the payload lists them. |
 
-A change's creator is the author of its first revisions. Reserved kinds can't
-be promoted, and `origin annotate` refuses them.
+A change's creator is the author of its first revisions, who wrote the change,
+not someone who took it over or rebased it. A `core.conflict` comes from a node
+when a landing queue could not rebase the record. Reserved kinds can't be
+promoted, and `origin annotate` refuses them.
 
 Every other kind (`ci.test`, `review`, `semantic.diff`, `flaky`) belongs to
 whoever issues it. Statements compose: a human can mark a failed `ci.test`

@@ -95,7 +95,9 @@ impl<P: Platform> Session<'_, '_, P> {
             let claims = self.annotations.claims(RecordId::Revision(head))?;
             for claim in &claims {
                 let statement = claim.statement();
-                if statement.kind == Kind::ABANDON && self.store().authorizes(statement)? {
+                if statement.kind == Kind::ABANDON
+                    && self.policy.authorizes(self.store(), statement)?
+                {
                     return Err(LandError::Abandoned(change));
                 }
             }
