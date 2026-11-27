@@ -265,7 +265,10 @@ impl<'a, P: Platform> Events<'a, P> {
                     author: revision.author,
                 }),
                 // Its event comes once a target advances to it.
-                Object::Acceptance(_) | Object::Blob(_) | Object::Tree(_) => None,
+                Object::Acceptance(_)
+                | Object::Blob(_)
+                | Object::Tree(_)
+                | Object::Attachment(_) => None,
             });
         }
         Ok(events)

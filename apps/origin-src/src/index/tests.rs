@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
 use origin_platform::Native;
-use origin_shared::{Base, BlobId, Inputs, Kind, Record, Tree, Verdict};
+use origin_shared::{AttachmentId, Base, Inputs, Kind, Record, Tree, Verdict};
 
 use super::*;
 use crate::oplog::FramePart;
@@ -28,7 +28,7 @@ fn revision(change: ChangeId, predecessors: &[&EncodedObject], seed: &str) -> En
         base: Base::Acceptance(ObjectId::from_bytes([0; 32]).into()),
         deps: Vec::new(),
         snapshot: Tree::default().encode().id().into(),
-        description: BlobId::from(EncodedObject::blob(seed.as_bytes()).id()),
+        description: AttachmentId::from(EncodedObject::attachment(seed.as_bytes()).id()),
         author: "user:alice".parse().unwrap(),
     }
     .encode()

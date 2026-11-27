@@ -312,7 +312,7 @@ fn a_revision_is_published_only_after_its_conflicts() {
     let issuer = revision.author.clone();
     let described = Revision {
         predecessors: vec![converged],
-        description: EncodedObject::blob(b"Described").id().into(),
+        description: EncodedObject::attachment(b"Described").id().into(),
         ..revision
     }
     .encode();
@@ -724,7 +724,7 @@ fn statements_about_statements_show_under_them() {
 fn a_payload_the_repository_lacks_is_unavailable() {
     let repo = Repo::new();
     repo.ok(&["annotate", "@", "review", "--pass", "-m", "Looks good"]);
-    let hex = EncodedObject::blob(b"Looks good").id().to_hex();
+    let hex = EncodedObject::attachment(b"Looks good").id().to_hex();
     fs::remove_file(repo.path(&format!(
         ".origin/objects/loose/{}/{}",
         &hex[..2],

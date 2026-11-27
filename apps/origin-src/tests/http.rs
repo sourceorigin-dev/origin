@@ -1,6 +1,7 @@
 //! Tests the HTTP API by calling every SDK method against a real server that
 //! hosts its own repositories.
 
+use std::collections::BTreeMap;
 use std::slice;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -14,9 +15,9 @@ use origin_shared::event::EventKind;
 use origin_shared::landing::{Blocked, Landing, Proposal};
 use origin_shared::pack::Pack;
 use origin_shared::{
-    Base, BlobId, ChangeId, Digest, EncodedObject, EntryKind, EntryName, Inputs, Kind, NodeKey,
-    Period, Record, RecordId, RepoPath, Revision, RevisionId, Source, Statement, TargetName, Tree,
-    TreeEntry, TreeId, Verdict,
+    AttachmentId, Base, ChangeId, Digest, EncodedObject, EntryKind, EntryName, Inputs, Kind,
+    NodeKey, Period, Record, RecordId, RepoPath, Revision, RevisionId, Source, Statement,
+    TargetName, Tree, TreeEntry, TreeId, Verdict,
 };
 use origin_src::http::Api;
 use origin_src::policy::Policy;
@@ -97,20 +98,72 @@ impl Made {
             })
             .collect();
         let tree = tree.encode();
-        let description = EncodedObject::blob(b"A change");
+        let description = EncodedObject::attachment(b"A change");
         let revision = Revision {
             change,
             predecessors,
             base,
             deps: Vec::new(),
             snapshot: tree.id().into(),
-            description: BlobId::from(description.id()),
+            description: AttachmentId::from(description.id()),
             author: "user:ada".parse().unwrap(),
         }
         .encode();
         let id = revision.id().into();
         objects.extend([tree, description, revision]);
         Self { id, objects }
+    }
+
+    /// Creates a revision whose files may be in directories, such as
+    /// `src/lib.rs`.
+    fn nested(change: ChangeId, base: Base, files: &[(&str, &str)]) -> Self {
+        let mut objects = Vec::new();
+        let tree = Self::tree(files, &mut objects);
+        let description = EncodedObject::attachment(b"A change");
+        let revision = Revision {
+            change,
+            predecessors: Vec::new(),
+            base,
+            deps: Vec::new(),
+            snapshot: tree,
+            description: description.id().into(),
+            author: "user:ada".parse().unwrap(),
+        }
+        .encode();
+        let id = revision.id().into();
+        objects.extend([description, revision]);
+        Self { id, objects }
+    }
+
+    /// Builds the tree of `files` and returns its id. Pushes the tree's objects
+    /// onto `objects`, children first.
+    fn tree(files: &[(&str, &str)], objects: &mut Vec<EncodedObject>) -> TreeId {
+        let mut dirs: BTreeMap<&str, Vec<(&str, &str)>> = BTreeMap::new();
+        let mut tree = Tree::default();
+        for &(path, content) in files {
+            if let Some((dir, rest)) = path.split_once('/') {
+                dirs.entry(dir).or_default().push((rest, content));
+                continue;
+            }
+            let blob = EncodedObject::blob(content.as_bytes());
+            let entry = TreeEntry {
+                kind: EntryKind::File,
+                id: blob.id(),
+            };
+            tree.insert(EntryName::new(path).unwrap(), entry);
+            objects.push(blob);
+        }
+        for (dir, files) in dirs {
+            let entry = TreeEntry {
+                kind: EntryKind::Tree,
+                id: Self::tree(&files, objects).into(),
+            };
+            tree.insert(EntryName::new(dir).unwrap(), entry);
+        }
+        let encoded = tree.encode();
+        let id = encoded.id().into();
+        objects.push(encoded);
+        id
     }
 
     fn pack(&self) -> Pack {
@@ -266,26 +319,29 @@ async fn puts_refuse_objects_named_as_another_kind() {
 
     // A revision whose snapshot is a blob, in the batch.
     let blob = EncodedObject::blob(b"not a tree");
-    let description = EncodedObject::blob(b"A change");
+    let description = EncodedObject::attachment(b"A change");
     let revision = Revision {
         change: change(1),
         predecessors: Vec::new(),
         base,
         deps: Vec::new(),
         snapshot: blob.id().into(),
-        description: BlobId::from(description.id()),
+        description: description.id().into(),
         author: "user:ada".parse().unwrap(),
     }
     .encode();
-    let objects = vec![blob, description, revision];
+    let objects = vec![blob.clone(), description, revision];
     assert_eq!(refused(objects).await, ErrorCode::BadRequest);
 
     // Trees naming a stored blob as a directory, and a stored tree as a
     // file.
-    let made = Made::revision(change(2), base, Vec::new(), &[("lib.rs", "fn a() {}")]);
+    let made = Made::nested(change(2), base, &[("src/lib.rs", "fn a() {}")]);
     repo.put_records(&made.pack()).await.unwrap();
-    let (file, tree) = (made.objects[0].id(), made.objects[1].id());
-    for (kind, id) in [(EntryKind::Tree, file), (EntryKind::File, tree)] {
+    let src = made.objects[1].id();
+    for (kind, id) in [
+        (EntryKind::Tree, made.objects[0].id()),
+        (EntryKind::File, src),
+    ] {
         let tree: Tree = [(EntryName::new("x").unwrap(), TreeEntry { kind, id })]
             .into_iter()
             .collect();
@@ -295,9 +351,10 @@ async fn puts_refuse_objects_named_as_another_kind() {
     // One stored object needed as two kinds, the right one last: a
     // revision's snapshot and description, and a tree's directory and
     // file.
-    let stored = EncodedObject::blob(b"stored");
+    let attachment = EncodedObject::attachment(b"stored");
+    let blob = made.objects[0].clone();
     repo.put_records(&Pack {
-        objects: vec![stored.clone()],
+        objects: vec![attachment.clone()],
     })
     .await
     .unwrap();
@@ -306,14 +363,14 @@ async fn puts_refuse_objects_named_as_another_kind() {
         predecessors: Vec::new(),
         base,
         deps: Vec::new(),
-        snapshot: stored.id().into(),
-        description: BlobId::from(stored.id()),
+        snapshot: attachment.id().into(),
+        description: attachment.id().into(),
         author: "user:ada".parse().unwrap(),
     };
     assert_eq!(refused(vec![both.encode()]).await, ErrorCode::BadRequest);
     let entry = |kind| TreeEntry {
         kind,
-        id: stored.id(),
+        id: blob.id(),
     };
     let tree: Tree = [
         (EntryName::new("a").unwrap(), entry(EntryKind::Tree)),

@@ -43,7 +43,7 @@ impl Workspace {
             let head = Self::single_head(&working_copy.index, change)?;
             (head, self.store.get(head)?, Vec::new())
         } else {
-            let description = EncodedObject::blob(b"");
+            let description = EncodedObject::attachment(b"");
             let base = working_copy.revision.base;
             let revision = Revision {
                 change: ChangeId::random().map_err(WorkspaceError::Random)?,

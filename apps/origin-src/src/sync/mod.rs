@@ -788,7 +788,7 @@ impl<'a> Sync<'a> {
     /// `skip`), and the records they refer to, recursively: a revision's base
     /// and dependencies, and a statement's subject and the statements it
     /// supersedes or promotes, but not their snapshots. Each record comes with
-    /// the blob it carries. Records this node already has are made durable
+    /// the attachment it carries. Records this node already has are made durable
     /// by `held`, which must commit before anything refers to them.
     fn closure(
         &self,

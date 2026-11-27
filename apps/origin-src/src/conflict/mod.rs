@@ -163,7 +163,7 @@ impl Conflicts {
             list.push_str(conflicted.path.as_str());
             list.push('\0');
         }
-        let payload = EncodedObject::blob(list.as_bytes());
+        let payload = EncodedObject::attachment(list.as_bytes());
         let statement = Statement {
             subject,
             kind: Kind::CONFLICT,
@@ -192,7 +192,7 @@ impl Conflicts {
             return Ok(Self::default());
         };
         let content = store
-            .try_blob(payload.into())?
+            .try_attachment(payload)?
             .ok_or(StoreError::NotFound(payload.into()))?;
         let conflicted = String::from_utf8_lossy(&content)
             .split_terminator('\0')

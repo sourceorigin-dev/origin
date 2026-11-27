@@ -22,22 +22,15 @@ pub struct Dropped {
 
 impl<P: Platform> Annotations<'_, P> {
     /// Deletes the payloads whose retention ended by `now`, counting from when
-    /// this node stored their statement. Statements themselves stay. A payload
-    /// stays while any statement whose retention has not ended refers to it, or
-    /// while a revision or a tree refers to the same blob (an empty file and an
-    /// empty payload, for example).
-    ///
-    /// Waits for the writers [holding
-    /// objects](crate::store::Store::hold_objects), landings on `policy` among
-    /// them, then reads the rules from `retention` and the index again. This
-    /// way no writer refers to a payload deleted under it, and a policy landed
-    /// in the meantime applies. If there are no rules, it returns without
-    /// waiting or reading anything.
+    /// this node stored their statement. Statements themselves stay, and so does
+    /// a payload that a live statement or a revision's description refers to. It
+    /// first waits for the writers [holding objects](crate::store::Store::hold_objects)
+    /// and reads the rules again, so no writer refers to a payload deleted under
+    /// it. Without rules, it returns at once.
     ///
     /// # Errors
     ///
-    /// Fails if `retention` fails, a record cannot be read, or a payload cannot
-    /// be deleted.
+    /// Fails if `retention` fails, a record cannot be read, or a payload cannot be deleted.
     pub fn drop_expired_payloads<E: From<StoreError>>(
         &mut self,
         retention: impl Fn() -> Result<Retention, E>,
@@ -54,20 +47,13 @@ impl<P: Platform> Annotations<'_, P> {
         self.index = Index::open(self.store)?;
         let mut expired = HashSet::new();
         let mut live: HashSet<ObjectId> = HashSet::new();
-        let mut roots = Vec::new();
         for &record in self.index.arrivals() {
             match record {
                 RecordId::Revision(id) => {
-                    let revision = self.store.get(id)?;
-                    roots.push(revision.snapshot);
-                    live.insert(revision.description.into());
+                    live.insert(self.store.get(id)?.description.into());
                 }
-                RecordId::Acceptance(id) => roots.push(self.store.get(id)?.body().state),
                 RecordId::Statement(id) => {
                     let statement = self.store.get(id)?;
-                    if let RecordId::Snapshot(tree) = statement.subject {
-                        roots.push(tree);
-                    }
                     let Some(payload) = statement.payload else {
                         continue;
                     };
@@ -84,13 +70,9 @@ impl<P: Platform> Annotations<'_, P> {
                         live.insert(payload.into());
                     }
                 }
-                RecordId::Snapshot(_) => {}
+                RecordId::Acceptance(_) | RecordId::Snapshot(_) => {}
             }
         }
-        if expired.is_empty() {
-            return Ok(Dropped::default());
-        }
-        self.store.reach(roots, &mut live)?;
         let mut doomed = Vec::new();
         for &id in expired.difference(&live) {
             if self.store.contains(id)? {

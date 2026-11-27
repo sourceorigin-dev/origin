@@ -2,7 +2,7 @@ use std::thread;
 use std::time::Duration;
 
 use origin_platform::Native;
-use origin_shared::{EncodedObject, Verdict};
+use origin_shared::{EncodedObject, Record, Revision, Verdict};
 
 use super::*;
 use crate::annotations::tests::{FILES, check, issue, revision, store};
@@ -13,7 +13,7 @@ fn retention_drops_payloads_and_keeps_statements() {
     let (_dir, store) = store();
     let first = revision(&store, 1, &[], &[("empty", "")]);
     let with_payload = |kind: &str, payload: &[u8]| {
-        let payload = EncodedObject::blob(payload);
+        let payload = EncodedObject::attachment(payload);
         let mut statement = check(first, kind, Verdict::Pass, "node:ci", None);
         statement.payload = Some(payload.id().into());
         let annotations = Annotations::open(&store).unwrap();
@@ -23,11 +23,9 @@ fn retention_drops_payloads_and_keeps_statements() {
         (id, payload.id())
     };
     let (log_statement, log) = with_payload("ci.test", b"a long log");
-    // The same blob as the empty file, which must stay.
     let (_, empty) = with_payload("ci.lint", b"");
     let (_, review) = with_payload("review", b"looks good");
     let (_, shared) = with_payload("ci.bench", b"shared");
-    // Also the payload of a statement whose retention hasn't ended.
     let mut kept = check(first, "keep", Verdict::Pass, "node:ci", None);
     kept.payload = Some(shared.into());
     issue(&store, &kept);
@@ -82,7 +80,7 @@ fn without_rules_collection_waits_for_no_writer() {
 fn collection_waits_for_writers_holding_objects() {
     let (_dir, store) = store();
     let first = revision(&store, 1, &[], FILES);
-    let payload = EncodedObject::blob(b"a log, and a file");
+    let payload = EncodedObject::attachment(b"a log, and a description");
     let mut statement = check(first, "ci.test", Verdict::Pass, "node:ci", None);
     statement.payload = Some(payload.id().into());
     Annotations::open(&store)
@@ -93,8 +91,6 @@ fn collection_waits_for_writers_holding_objects() {
         .unwrap()
         .retention;
 
-    // A writer finds the expired payload stored as a file it snapshots,
-    // so it doesn't write it, then writes the revision referring to it.
     let held = store.hold_objects().unwrap();
     assert_eq!(store.write_all(std::slice::from_ref(&payload)).unwrap(), 0);
     let (done, collected) = std::sync::mpsc::channel();
@@ -109,7 +105,11 @@ fn collection_waits_for_writers_holding_objects() {
         });
         thread::sleep(Duration::from_millis(100));
         assert!(collected.try_recv().is_err(), "collection waits");
-        revision(&store, 2, &[], &[("log", "a log, and a file")]);
+        let reusing = Revision {
+            description: payload.id().into(),
+            ..store.get(first).unwrap()
+        };
+        store.write_all(&[reusing.encode()]).unwrap();
         drop(held);
         assert_eq!(collected.recv().unwrap(), Dropped::default());
     });
@@ -120,7 +120,7 @@ fn collection_waits_for_writers_holding_objects() {
 fn promotions_and_collection_exclude_each_other() {
     let (_dir, store) = store();
     let first = revision(&store, 1, &[], FILES);
-    let payload = EncodedObject::blob(b"a log to promote");
+    let payload = EncodedObject::attachment(b"a log to promote");
     let inputs = Some((&["src"][..], false));
     let mut result = check(first, "ci.test", Verdict::Pass, "node:ci", inputs);
     result.payload = Some(payload.id().into());

@@ -400,42 +400,6 @@ impl<'a, P: Platform> Snapshots<'a, P> {
     }
 }
 
-impl<P: Platform> Store<P> {
-    /// Adds to `reached` every object the trees `roots` reach: the trees
-    /// themselves, their subtrees and their files. Trees already in `reached`
-    /// are not read again, and trees the store doesn't have (as after a lazy
-    /// clone) are skipped.
-    ///
-    /// # Errors
-    ///
-    /// Fails if a tree cannot be read.
-    pub fn reach(
-        &self,
-        roots: impl IntoIterator<Item = TreeId>,
-        reached: &mut HashSet<ObjectId>,
-    ) -> Result<(), StoreError> {
-        let mut pending: Vec<TreeId> = roots.into_iter().collect();
-        while let Some(id) = pending.pop() {
-            if !reached.insert(id.into()) {
-                continue;
-            }
-            let tree: Tree = match self.get(id) {
-                Err(StoreError::NotFound(_)) => continue,
-                tree => tree?,
-            };
-            for (_, entry) in &tree {
-                match entry.subtree() {
-                    Some(subtree) => pending.push(subtree),
-                    None => {
-                        reached.insert(entry.id);
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
 /// A durable mark in the store's `fetching/` directory, saying a snapshot is
 /// being fetched. A fetch publishes trees before their contents, so the mark
 /// keeps an interrupted fetch from being taken for a whole snapshot (see
