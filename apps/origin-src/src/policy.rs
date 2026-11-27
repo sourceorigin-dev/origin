@@ -21,7 +21,11 @@
 //! [retention]
 //! "ci.*" = "90d"
 //!
-//! [[paths]]
+//! [grants]                    # capabilities, but path access
+//! "group:maintainers" = ["admin", "land *", "annotate review"]
+//! "group:runners"     = ["annotate ci.*"]
+//!
+//! [[paths]]                   # path access: none, read or write
 //! path   = "secrets"
 //! grants = { all = "none", "group:maintainers" = "write" }
 //! ```
@@ -29,7 +33,7 @@
 //! A target without a table of its own uses the authority of `policy` and
 //! requires nothing. Every name a policy uses must be defined in it, and
 //! unknown keys are errors, so a typo never silently drops a requirement.
-//! Path rules are parsed and checked, but not enforced yet.
+//! Each caller's [`Rights`] come from the last two tables (see "Targets and policy" in the design).
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -37,6 +41,7 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use origin_platform::Platform;
+use origin_shared::access::{Capability, Level, PathAccess, Rights, Targets};
 use origin_shared::policy::{KindPattern, Principals, Requirement};
 use origin_shared::{
     AcceptanceBody, AcceptanceId, EncodedObject, EntryKind, EntryName, InvalidName, InvalidPeriod,
@@ -56,6 +61,8 @@ pub struct Policy {
     targets: BTreeMap<TargetName, TargetRules>,
     /// How long payloads are kept.
     pub retention: Retention,
+    /// The `[grants]` table, or `None` if the policy has none.
+    grants: Option<Vec<(Grantee, Vec<Capability>)>>,
     paths: Vec<PathRule>,
 }
 
@@ -72,7 +79,7 @@ pub struct PathRule {
     /// The file or directory the rule covers, with everything under it.
     pub path: RepoPath,
     /// What each grantee may do there.
-    pub grants: BTreeMap<Grantee, Access>,
+    pub grants: BTreeMap<Grantee, Level>,
 }
 
 /// Who a path rule grants access to.
@@ -82,17 +89,6 @@ pub enum Grantee {
     All,
     /// A user, a node or a group's members.
     Principals(Principals),
-}
-
-/// What a path rule grants.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Access {
-    /// Nothing, not even the content.
-    None,
-    /// Reading the content.
-    Read,
-    /// Proposing revisions that change it.
-    Write,
 }
 
 impl Policy {
@@ -236,6 +232,74 @@ impl Policy {
     pub fn paths(&self) -> &[PathRule] {
         &self.paths
     }
+
+    /// Whether `grantee` covers `principal`, where `None` is an anonymous
+    /// caller. `all` covers anonymous callers too.
+    fn covers(&self, grantee: &Grantee, principal: Option<&Principal>) -> bool {
+        match (grantee, principal) {
+            (Grantee::All, _) => true,
+            (Grantee::Principals(principals), Some(principal)) => {
+                self.admits(principals, principal)
+            }
+            (Grantee::Principals(_), None) => false,
+        }
+    }
+
+    /// Returns what `principal` may do, or an anonymous caller if it is `None`,
+    /// by the rules the module docs describe. Anonymous callers can never
+    /// write.
+    #[must_use]
+    pub fn rights(&self, principal: Option<&Principal>) -> Rights {
+        let mut rules: BTreeMap<RepoPath, Level> = BTreeMap::new();
+        for rule in &self.paths {
+            let granted = rule
+                .grants
+                .iter()
+                .filter(|(grantee, _)| self.covers(grantee, principal))
+                .map(|(_, &level)| level)
+                .max();
+            if let Some(level) = granted {
+                let at = rules.entry(rule.path.clone()).or_insert(level);
+                *at = (*at).max(level);
+            }
+        }
+        let mut paths = PathAccess::new(Level::Write, rules);
+        if principal.is_none() {
+            paths = paths.min(&PathAccess::uniform(Level::Read));
+        }
+        let mut rights = Rights {
+            principal: principal.cloned(),
+            groups: principal.map_or_else(Vec::new, |principal| {
+                self.groups
+                    .iter()
+                    .filter(|(_, members)| members.contains(principal))
+                    .map(|(group, _)| group.clone())
+                    .collect()
+            }),
+            scope: None,
+            paths,
+            annotate: vec![KindPattern::Any],
+            land: vec![Targets::Any],
+            admin: false,
+        };
+        if let Some(grants) = &self.grants {
+            rights.annotate.clear();
+            rights.land.clear();
+            let granted = grants
+                .iter()
+                .filter(|(grantee, _)| self.covers(grantee, principal))
+                .flat_map(|(_, capabilities)| capabilities);
+            for capability in granted {
+                match capability {
+                    Capability::Annotate(kinds) => rights.annotate.push(kinds.clone()),
+                    Capability::Land(targets) => rights.land.push(targets.clone()),
+                    Capability::Admin => rights.admin = true,
+                    Capability::Read(_) | Capability::Write(_) => {}
+                }
+            }
+        }
+        rights
+    }
 }
 
 /// `policy.toml` as written, which [`Policy::try_from`] parses and checks.
@@ -250,6 +314,7 @@ struct PolicyFile {
     targets: BTreeMap<String, TargetFile>,
     #[serde(default)]
     retention: Retention,
+    grants: Option<BTreeMap<String, Vec<String>>>,
     #[serde(default)]
     paths: Vec<PathRuleFile>,
 }
@@ -322,6 +387,7 @@ impl TryFrom<PolicyFile> for Policy {
             groups,
             targets: BTreeMap::new(),
             retention: file.retention,
+            grants: None,
             paths: Vec::new(),
         };
         for (name, target) in file.targets {
@@ -351,18 +417,34 @@ impl TryFrom<PolicyFile> for Policy {
                 .targets
                 .insert(name, TargetRules { authority, require });
         }
+        if let Some(grants) = file.grants {
+            let grants = grants
+                .into_iter()
+                .map(|(grantee, capabilities)| {
+                    let grantee = policy.grantee(PolicyFile::parse("grantee", grantee)?)?;
+                    let capabilities = capabilities
+                        .into_iter()
+                        .map(
+                            |capability| match PolicyFile::parse("capability", capability)? {
+                                Capability::Read(path) | Capability::Write(path) => {
+                                    Err(RuleError::PathGrant(path))
+                                }
+                                capability => Ok(capability),
+                            },
+                        )
+                        .collect::<Result<_, _>>()?;
+                    Ok((grantee, capabilities))
+                })
+                .collect::<Result<_, RuleError>>()?;
+            policy.grants = Some(grants);
+        }
         for rule in file.paths {
             let grants = rule
                 .grants
                 .into_iter()
-                .map(|(grantee, access)| {
-                    let grantee = match PolicyFile::parse("grantee", grantee)? {
-                        Grantee::Principals(principals) => {
-                            Grantee::Principals(policy.check(principals)?)
-                        }
-                        Grantee::All => Grantee::All,
-                    };
-                    Ok((grantee, PolicyFile::parse("access", access)?))
+                .map(|(grantee, level)| {
+                    let grantee = policy.grantee(PolicyFile::parse("grantee", grantee)?)?;
+                    Ok((grantee, PolicyFile::parse("access", level)?))
                 })
                 .collect::<Result<_, RuleError>>()?;
             policy.paths.push(PathRule {
@@ -397,8 +479,27 @@ impl Policy {
              \n\
              [targets.main]\n\
              authority = \"node:{node}\"\n\
-             # require = [{{ kind = \"ci.test\", verdict = \"pass\", issuer = \"group:runners\" }}]\n"
+             # require = [{{ kind = \"ci.test\", verdict = \"pass\", issuer = \"group:runners\" }}]\n\
+             \n\
+             # Who may land, annotate, and change this policy (`admin`). Without\n\
+             # [grants], everyone lands and annotates, and no one is admin\n\
+             # remotely.\n\
+             # [grants]\n\
+             # \"user:alice\" = [\"admin\", \"land *\"]\n\
+             \n\
+             # Who may read and write paths: everyone writes everything by default.\n\
+             # [[paths]]\n\
+             # path   = \"secrets\"\n\
+             # grants = {{ all = \"none\", \"user:alice\" = \"write\" }}\n"
         )
+    }
+
+    /// Checks that the group `grantee` names, if any, is defined.
+    fn grantee(&self, grantee: Grantee) -> Result<Grantee, RuleError> {
+        match grantee {
+            Grantee::Principals(principals) => Ok(Grantee::Principals(self.check(principals)?)),
+            Grantee::All => Ok(Grantee::All),
+        }
     }
 
     /// Checks that the group `principals` names, if any, is defined.
@@ -423,19 +524,6 @@ impl FromStr for Grantee {
             .parse()
             .map(Self::Principals)
             .map_err(|error| format!("{error}, or `all`"))
-    }
-}
-
-impl FromStr for Access {
-    type Err = String;
-
-    fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
-            "none" => Ok(Self::None),
-            "read" => Ok(Self::Read),
-            "write" => Ok(Self::Write),
-            _ => Err(format!("`{input}` is not `none`, `read` or `write`")),
-        }
     }
 }
 
@@ -471,6 +559,9 @@ pub enum RuleError {
     /// A rule names a group `[groups]` doesn't define.
     #[error("group:{0} is not defined in [groups]")]
     UnknownGroup(PrincipalName),
+    /// `[grants]` grants path access, which only `[[paths]]` rules may set.
+    #[error("[grants] cannot grant access to `{0}`: add a [[paths]] rule")]
+    PathGrant(RepoPath),
 }
 
 /// How long the payloads of each kind of statement are kept, counting from
@@ -627,9 +718,49 @@ mod tests {
              [targets.main]\nauthority = \"node:hosted\"\nrequire = [\n\
                {{ kind = \"ci.test\", verdict = \"pass\", issuer = \"group:runners\" }},\n\
                {{ kind = \"review\", verdict = \"pass\", issuer = \"user:bob\" }},\n]\n\
+             [grants]\n\"group:maintainers\" = [\"admin\", \"land *\"]\n\
+             \"group:runners\" = [\"annotate ci.*\"]\nall = [\"land main\"]\n\
              [[paths]]\npath = \"secrets\"\n\
-             grants = {{ all = \"none\", \"group:maintainers\" = \"write\" }}\n"
+             grants = {{ all = \"none\", \"group:maintainers\" = \"write\" }}\n\
+             [[paths]]\npath = \"/\"\n\
+             grants = {{ all = \"read\", \"node:ci-1\" = \"write\" }}\n"
         )
+    }
+
+    #[test]
+    fn rights_come_from_grants_and_paths() {
+        let policy: Policy = toml::from_str(&full_policy()).unwrap();
+        let path = |path: &str| RepoPath::new(path).unwrap();
+        let alice = policy.rights(Some(&principal("user:alice")));
+        assert_eq!(alice.groups, [PrincipalName::new("maintainers").unwrap()]);
+        assert!(alice.admin && alice.may_land(&TargetName::POLICY));
+        assert!(alice.may_land(&TargetName::new("release").unwrap()));
+        assert!(!alice.may_annotate(&Kind::new("ci.test").unwrap()));
+        assert_eq!(alice.paths.level(&path("secrets/key")), Level::Write);
+        assert_eq!(alice.paths.level(&path("src")), Level::Read, "`all` at `/`");
+
+        let ci = policy.rights(Some(&principal("node:ci-1")));
+        assert!(ci.may_annotate(&Kind::new("ci.test").unwrap()));
+        assert!(ci.may_land(&TargetName::MAIN), "`all` lands on `main`");
+        assert!(!ci.may_land(&TargetName::POLICY) && !ci.admin);
+        assert_eq!(ci.paths.level(&path("src")), Level::Write);
+        assert_eq!(ci.paths.level(&path("secrets/key")), Level::None);
+
+        let anonymous = policy.rights(None);
+        assert_eq!(anonymous.paths.level(&path("src")), Level::Read);
+        assert!(!anonymous.paths.reads(&path("secrets")));
+
+        let open = Policy::default().rights(Some(&principal("user:bob")));
+        assert!(open.paths.writes_all());
+        assert!(open.may_land(&TargetName::MAIN) && !open.admin);
+        assert!(open.may_annotate(&Kind::new("review").unwrap()));
+        assert!(!Policy::default().rights(None).paths.writes(&path("x")));
+
+        let error = toml::from_str::<Policy>("[grants]\nall = [\"write src\"]\n").unwrap_err();
+        assert!(
+            error.to_string().contains("add a [[paths]] rule"),
+            "{error}"
+        );
     }
 
     fn principal(principal: &str) -> Principal {
@@ -670,11 +801,11 @@ mod tests {
         assert_eq!(policy.authority(&other), Some(&hosted));
         assert_eq!(policy.requirements(&other), []);
 
-        let [rule] = policy.paths() else {
-            panic!("one path rule")
+        let [rule, _] = policy.paths() else {
+            panic!("two path rules")
         };
         assert_eq!(rule.path, RepoPath::new("secrets").unwrap());
-        assert_eq!(rule.grants.get(&Grantee::All), Some(&Access::None));
+        assert_eq!(rule.grants.get(&Grantee::All), Some(&Level::None));
     }
 
     #[test]

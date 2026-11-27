@@ -389,6 +389,14 @@ The rules for this file:
   requirements.
 - Without `[grants]`, everyone may land on every target except `policy` and
   issue any kind. Only the local owner is an admin.
+- Every name a policy uses must be defined in it, so a typo never silently
+  drops a requirement.
+- With `[grants]`, each caller has only what it grants them. Only an `admin`
+  may land on `policy`, so no one can grant themselves rights they lack. No one
+  is `admin` unless the policy says so, except the node's own user on its
+  command line.
+- For a path, the most specific `[[paths]]` rule that mentions the caller
+  decides, and paths no rule mentions them for are writable.
 
 `origin init` creates `policy` and `main`. Your node is the authority, and
 neither target has requirements, so a solo project lands instantly.
