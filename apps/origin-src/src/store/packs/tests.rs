@@ -263,13 +263,15 @@ fn rejects_corrupt_indexes() {
     );
 }
 
-/// The native platform, failing one batch sync once armed with
-/// [`Crashing::crash_after`], as if the process died there.
+/// The native platform, except that once armed with
+/// [`Crashing::crash_after`], one batch sync fails, as if the process died
+/// there.
 #[derive(Default)]
 struct Crashing(Mutex<Option<usize>>);
 
 impl Crashing {
-    /// Fails the batch sync after the next `batches`.
+    /// Arms the platform: after `batches` more batch syncs succeed, the next one
+    /// fails.
     fn crash_after(&self, batches: usize) {
         *self.0.lock() = Some(batches);
     }

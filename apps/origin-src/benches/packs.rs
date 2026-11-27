@@ -1,6 +1,6 @@
-//! Packs: writing and reading a million statements loose and packed,
-//! compacting them, and looking objects up across several packs. Run on a
-//! real disk: syncs cost nothing on a RAM-backed file system.
+//! Benchmarks for packs: writing and reading a million statements loose and
+//! packed, compacting them, and finding objects across several packs. Run
+//! on a real disk: syncs cost nothing on a RAM-backed file system.
 
 use std::path::PathBuf;
 use std::sync::{LazyLock, OnceLock};
@@ -25,7 +25,8 @@ static ROOT: OnceLock<PathBuf> = OnceLock::new();
 /// How many statements the large stores hold.
 const STATEMENTS: usize = 1_000_000;
 
-/// `count` distinct statements, like a CI runner issues, from `seed` on.
+/// Returns `count` distinct statements, like those a CI runner issues,
+/// numbered from `seed`.
 fn statements(seed: usize, count: usize) -> Vec<EncodedObject> {
     (seed..seed + count)
         .map(|seed| {
@@ -57,17 +58,16 @@ fn store() -> Fixture {
     (dir, store)
 }
 
-/// A store of the million statements, loose.
+/// A store holding the million statements as loose objects.
 fn loose() -> Fixture {
     let (dir, store) = store();
     store.write_all(&STATEMENTS_1M).unwrap();
     (dir, store)
 }
 
-/// A store of the million statements in `packs` packs, halving in size so
-/// compaction keeps them apart. The first pack takes the remainder: each
-/// later one is then at most half the one before, which compaction never
-/// merges into it.
+/// A store holding the million statements in `packs` packs. Each pack after
+/// the first is at most half the size of the one before, so compaction never
+/// merges them. The first pack takes the remainder.
 fn packed(packs: u32) -> Fixture {
     let (dir, store) = store();
     let later: usize = (1..packs).map(|pack| STATEMENTS >> (pack + 1)).sum();
@@ -103,7 +103,7 @@ static PACKED: [LazyLock<Fixture, fn() -> Fixture>; 3] = [
     LazyLock::new(|| packed(16)),
 ];
 
-/// The large packed store with `packs` packs.
+/// The packed store with `packs` packs: 1, 4 or 16.
 fn packed_store(packs: u32) -> &'static Store {
     let index = match packs {
         1 => 0,
@@ -125,8 +125,7 @@ fn write_loose(bencher: Bencher<'_, '_>) {
         .bench_local_refs(|(_, store)| store.write_all(&STATEMENTS_1M).unwrap());
 }
 
-/// Compacting a million loose statements into one pack: what packing costs
-/// on top of writing them loose.
+/// Compacting a million loose statements into one pack.
 #[divan::bench(sample_count = 3, sample_size = 1)]
 fn compact(bencher: Bencher<'_, '_>) {
     bencher
@@ -135,8 +134,8 @@ fn compact(bencher: Bencher<'_, '_>) {
         .bench_local_refs(|(_, store)| store.compact().unwrap());
 }
 
-/// Reading back every statement of a million, in id order, from one
-/// thread.
+/// Reading every statement of a million back, in id order, from one thread,
+/// loose or packed.
 #[divan::bench(args = ["loose", "packed"], sample_count = 3, sample_size = 1)]
 fn read_all(bencher: Bencher<'_, '_>, layout: &str) {
     let store = match layout {
@@ -152,7 +151,7 @@ fn read_all(bencher: Bencher<'_, '_>, layout: &str) {
     });
 }
 
-/// Reading one statement of a million, loose or in the smallest of
+/// Reading one statement of a million, loose or from the smallest of
 /// `packs` packs, which is searched last.
 #[divan::bench(args = [0, 1, 4, 16])]
 fn read_one(bencher: Bencher<'_, '_>, packs: u32) {
@@ -167,8 +166,8 @@ fn read_one(bencher: Bencher<'_, '_>, packs: u32) {
 }
 
 /// Looking up an object the store doesn't have, among a million statements
-/// loose or in `packs` packs: every pack is searched and the manifest
-/// reread.
+/// loose or in `packs` packs. Every pack is searched and the manifest is
+/// read again.
 #[divan::bench(args = [0, 1, 4, 16])]
 fn contains_absent(bencher: Bencher<'_, '_>, packs: u32) {
     let store = if packs == 0 {

@@ -62,8 +62,9 @@ pub struct Index {
     changes: HashMap<ChangeId, Change>,
     /// The statements about each record, in arrival order.
     statements: HashMap<RecordId, Vec<StatementId>>,
-    /// The statements claiming to supersede each statement. Only those from
-    /// the same issuer do, which reading them tells.
+    /// The statements claiming to supersede each statement. Only claims from
+    /// the statement's own issuer count, which the index doesn't check: it
+    /// doesn't keep issuers.
     superseders: HashMap<StatementId, Vec<StatementId>>,
     /// The promotable statements, by their
     /// [promotion group](Statement::promotion_group), in arrival order.
@@ -81,10 +82,10 @@ pub struct Index {
 /// The revisions of one change.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Change {
-    /// In arrival order.
+    /// The change's revisions, in arrival order.
     revisions: Vec<RevisionId>,
-    /// The revisions another revision of the change evolves from: all but
-    /// the heads.
+    /// The revisions that another revision of the change evolves from: every
+    /// revision but the heads.
     superseded: HashSet<RevisionId>,
 }
 
@@ -93,11 +94,11 @@ struct Change {
 pub struct Rebuilt {
     /// The index.
     pub index: Index,
-    /// The objects skipped, also reported on stderr.
+    /// The objects skipped, which the rebuild also reports on stderr.
     pub skipped: Vec<Skipped>,
 }
 
-/// An object a rebuild skips, since readers can't use it either.
+/// An object a rebuild skips because it is unusable.
 #[derive(Debug, thiserror::Error)]
 pub enum Skipped {
     /// Its content doesn't hash to its id.
@@ -111,7 +112,7 @@ pub enum Skipped {
         /// Why decompressing failed.
         error: io::Error,
     },
-    /// It's a record that doesn't decode.
+    /// A record that doesn't decode.
     #[error("the index skips record {id}, which doesn't decode: {error}")]
     Undecodable {
         /// The record.
@@ -158,10 +159,9 @@ impl Index {
         Ok(())
     }
 
-    /// Reconstructs the index of `store` from its records, and replaces the
-    /// one on disk. Records the old index knew keep their arrival order.
-    /// Objects that are corrupt or don't decode are skipped, and reported on
-    /// stderr.
+    /// Rebuilds the index of `store` from its records and replaces the one on
+    /// disk. Records the old index knew keep their arrival order. Objects that
+    /// are corrupt or don't decode are skipped and reported on stderr.
     ///
     /// # Errors
     ///
@@ -172,8 +172,8 @@ impl Index {
         Self::rebuild_locked(store, &old)
     }
 
-    /// Rebuilds the index while holding its lock exclusively, keeping the
-    /// arrival order of `old`.
+    /// Rebuilds the index, keeping the arrival order of `old`. The caller must
+    /// hold the index lock exclusively.
     fn rebuild_locked<P: Platform>(store: &Store<P>, old: &Self) -> Result<Rebuilt, StoreError> {
         // Every entry up to it is as published as it will be, so the store
         // has their records; later ones are caught up.
@@ -224,8 +224,8 @@ impl Index {
         Ok(Rebuilt { index, skipped })
     }
 
-    /// Reads as much of the index as is intact, returning whether all of it
-    /// was. A missing index is empty and not intact.
+    /// Reads as much of the index as is intact, and returns whether all of it
+    /// was. A missing index reads as empty and not intact.
     fn read<P: Platform>(store: &Store<P>) -> Result<(Self, bool), StoreError> {
         let path = store.index_log();
         let bytes = match fs::read(&path) {
@@ -333,7 +333,7 @@ impl Index {
         Ok(true)
     }
 
-    /// Adds a record, unless it's already indexed.
+    /// Adds the record of `entry`, unless it is already indexed.
     fn insert(&mut self, entry: Entry) {
         if !self.known.insert(entry.record()) {
             return;
@@ -367,8 +367,8 @@ impl Index {
         }
     }
 
-    /// Every record indexed, in the order this node received them. A
-    /// position in it is a cursor: records received later come after it.
+    /// Every record indexed, in the order this node received them. A position
+    /// in this list works as a cursor: records received later come after it.
     #[must_use]
     pub fn arrivals(&self) -> &[RecordId] {
         &self.arrivals
@@ -414,7 +414,7 @@ impl Index {
     }
 
     /// The statements claiming to supersede `statement`, in arrival order.
-    /// Only those from its issuer do.
+    /// Only claims from its issuer count, which the caller must check.
     #[must_use]
     pub fn superseders(&self, statement: StatementId) -> &[StatementId] {
         self.superseders.get(&statement).map_or(&[], Vec::as_slice)
@@ -436,9 +436,9 @@ impl Index {
         self.digests.get(&statement).copied()
     }
 
-    /// Remembers the input digests of promotable statements, so they're
-    /// computed once. Since the index is a cache, they aren't synced: a
-    /// crash only costs computing them again.
+    /// Saves the input digests of promotable statements, so they are only
+    /// computed once. They are appended without a sync: after a crash they are
+    /// just computed again.
     ///
     /// # Errors
     ///
@@ -457,33 +457,33 @@ impl Index {
         Ok(())
     }
 
-    /// The one change whose id starts with `prefix`, a few hex digits.
+    /// Returns the one change whose id starts with `prefix`, a few hex digits.
     ///
     /// # Errors
     ///
-    /// Fails if no change, or more than one, has an id starting with
-    /// `prefix`.
+    /// Fails if `prefix` isn't hex digits, or if no change or more than one has
+    /// an id starting with it.
     pub fn find_change(&self, prefix: &str) -> Result<ChangeId, FindChangeError> {
         ChangeId::find(prefix, self.changes.keys().copied())
     }
 
-    /// The one revision whose id starts with `prefix`, a few hex digits.
+    /// Returns the one revision whose id starts with `prefix`, a few hex digits.
     ///
     /// # Errors
     ///
-    /// Fails if no revision, or more than one, has an id starting with
-    /// `prefix`.
+    /// Fails if `prefix` isn't hex digits, or if no revision or more than one has
+    /// an id starting with it.
     pub fn find_revision(&self, prefix: &str) -> Result<RevisionId, FindError<RevisionId>> {
         let revisions = self.changes.values().flat_map(|change| &change.revisions);
         RevisionId::find(prefix, revisions.copied())
     }
 
-    /// The one statement whose id starts with `prefix`, a few hex digits.
+    /// Returns the one statement whose id starts with `prefix`, a few hex digits.
     ///
     /// # Errors
     ///
-    /// Fails if no statement, or more than one, has an id starting with
-    /// `prefix`.
+    /// Fails if `prefix` isn't hex digits, or if no statement or more than one has
+    /// an id starting with it.
     pub fn find_statement(&self, prefix: &str) -> Result<StatementId, FindError<StatementId>> {
         StatementId::find(prefix, self.statements.values().flatten().copied())
     }
@@ -491,15 +491,15 @@ impl Index {
 
 /// Ids that can be named by a unique prefix of their hex digits.
 pub trait Prefixed: Copy + Ord + fmt::Display {
-    /// What the ids identify, for errors.
+    /// What the ids identify, such as `change`, for error messages.
     const WHAT: &str;
 
-    /// The one id of `ids` starting with `prefix`.
+    /// Returns the one id of `ids` that starts with `prefix`, ignoring case.
     ///
     /// # Errors
     ///
-    /// Fails if `prefix` isn't hex digits, or no id or more than one starts
-    /// with it.
+    /// Fails if `prefix` is empty or isn't hex digits, or if no id or more than
+    /// one starts with it.
     fn find(prefix: &str, ids: impl Iterator<Item = Self>) -> Result<Self, FindError<Self>> {
         let prefix = prefix.to_ascii_lowercase();
         if prefix.is_empty() || !prefix.bytes().all(|byte| byte.is_ascii_hexdigit()) {
@@ -537,13 +537,13 @@ pub type FindChangeError = FindError<ChangeId>;
 /// An id prefix that doesn't name exactly one id.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum FindError<I: Prefixed> {
-    /// It isn't hex digits.
+    /// The prefix isn't hex digits.
     #[error("`{0}` is not a {what} id", what = I::WHAT)]
     Invalid(String),
-    /// No id starts with it.
+    /// No id starts with the prefix.
     #[error("no {what} has an id starting with `{0}`", what = I::WHAT)]
     NotFound(String),
-    /// Several do.
+    /// More than one id starts with the prefix.
     #[error(
         "`{prefix}` could be any of the {what}s {}",
         matches.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "),
@@ -586,8 +586,8 @@ pub enum Entry {
 }
 
 impl Entry {
-    /// The entry of `object`, or `None` if it isn't indexed: blobs and
-    /// trees.
+    /// Returns the entry of `object`, or `None` for the objects the index
+    /// doesn't keep: blobs and trees.
     ///
     /// # Errors
     ///
@@ -635,10 +635,14 @@ impl Entry {
         ObjectId::from(self.record())
     }
 
-    /// Appends the entry: its record's kind and id, then for a revision its
-    /// change and a `u32` count of predecessors and their ids, and for a
-    /// statement its subject's kind and id, and the statement it supersedes
-    /// and its promotion group, each a 0 byte, or a 1 byte and the id.
+    /// Appends the entry's encoding to `out`: its record's kind and id, then
+    ///
+    /// - for a revision, its change, a `u32` count of predecessors, and their
+    ///   ids;
+    /// - for a statement, its subject's kind and id, then the statement it
+    ///   supersedes and its promotion group, each a 0 byte for none, or a 1 byte
+    ///   and the id;
+    /// - for an acceptance, nothing more.
     pub(crate) fn write(&self, out: &mut Writer) {
         Log::write_record(self.record(), out);
         match self {
@@ -700,7 +704,7 @@ impl Entry {
     }
 }
 
-/// A frame of the log.
+/// A frame of `index/log`.
 #[derive(Debug)]
 enum Frame<'a> {
     /// The published records of op log entries, up to the entry `applied`.
@@ -708,7 +712,7 @@ enum Frame<'a> {
         applied: u64,
         entries: Cow<'a, [Entry]>,
     },
-    /// Input digests of promotable statements, computed from the store.
+    /// Input digests of promotable statements.
     Digests(Cow<'a, [(StatementId, Digest)]>),
 }
 
@@ -770,7 +774,7 @@ impl Frame<'_> {
     }
 }
 
-/// The format of `index/log`.
+/// The format of `index/log`: a header, then frames.
 struct Log;
 
 impl Log {
@@ -794,8 +798,8 @@ impl Log {
         log
     }
 
-    /// The frames of a log and their offsets, up to the first broken one,
-    /// and how it ends after them.
+    /// Parses a log: returns its frames with their offsets, up to the first
+    /// broken one, and how the log ends after them.
     fn parse(bytes: &[u8]) -> (Vec<(u64, Frame<'static>)>, Tail) {
         Self::FRAMES.parse(bytes, Frame::decode)
     }
@@ -885,8 +889,8 @@ impl<P: Platform> Store<P> {
         Ok(())
     }
 
-    /// The entry of every record in the store, read from every core, and
-    /// the objects skipped because they are corrupt or don't decode.
+    /// Reads the entry of every record in the store, from every core. Also
+    /// returns the objects skipped because they are corrupt or don't decode.
     fn entries(&self) -> Result<(Vec<Entry>, Vec<Skipped>), StoreError> {
         let ids = self.ids()?;
         let chunks = Self::on_every_core(&ids, |ids| {

@@ -1,5 +1,6 @@
-//! Snapshotting a working copy: the cost behind every command that reads it.
-//! Objects are written durably, as the commands write them.
+//! Benchmarks for snapshotting a working copy, which every command that
+//! reads the working copy does. Objects are written durably, as the commands
+//! write them.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
