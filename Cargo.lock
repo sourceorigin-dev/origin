@@ -868,7 +868,9 @@ name = "origin-ci"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "clap",
+ "divan",
  "origin-platform",
  "origin-shared",
  "origin-src",
@@ -876,6 +878,7 @@ dependencies = [
  "serde",
  "tempfile",
  "thiserror",
+ "tokio",
  "toml",
 ]
 

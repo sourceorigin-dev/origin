@@ -23,7 +23,14 @@ thiserror.workspace = true
 toml.workspace = true
 
 [dev-dependencies]
+axum.workspace = true
+divan.workspace = true
 tempfile.workspace = true
+tokio.workspace = true
+
+[[bench]]
+name = "worker"
+harness = false
 
 [lints]
 workspace = true
