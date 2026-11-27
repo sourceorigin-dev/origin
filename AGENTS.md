@@ -10,7 +10,8 @@ review bots read and write at the same time, written in Rust.
   shared by every component.
 - `crates/origin-platform`: everything that differs between platforms
   (durable writes, file locks, copy-on-write clones, positioned reads,
-  refusing network file systems), behind traits. It is the only place whose
+  refusing network file systems, killing process groups), behind traits.
+  It is the only place whose
   code differs by target OS. `std::os::unix`, which every supported platform
   has, may be used anywhere.
 - `crates/origin-client`: the SDK, a typed client for origin servers. Each
