@@ -94,7 +94,6 @@ fn appends_form_a_chain() {
 fn policy_heads_wait_for_collection() {
     let (_dir, store) = store();
     let collecting = store.lock_for_collection().unwrap();
-    // Other targets don't.
     land(&store, &TargetName::MAIN, 1);
     let (done, landed) = std::sync::mpsc::channel();
     thread::scope(|scope| {
@@ -140,7 +139,6 @@ fn concurrent_appends_serialize() {
         for _ in 0..8 {
             scope.spawn(|| {
                 for _ in 0..3 {
-                    // Retry on conflict, as a landing queue would.
                     loop {
                         let head = store.head(&main).unwrap();
                         match store.append(&main, &acceptance(&main, head)) {
@@ -172,7 +170,6 @@ fn appends_repair_what_a_crash_left() {
     let ids = land(&store, &main, 2);
     let files = store.target_files(main.id());
 
-    // A crash after syncing a log entry, before publishing the head.
     let unpublished = acceptance(
         &main,
         Some(Head {
@@ -187,11 +184,9 @@ fn appends_repair_what_a_crash_left() {
         .open(files.log())
         .unwrap();
     writeln!(log, "{unpublished_id}").unwrap();
-    // Then a crash in the middle of writing the next line.
     log.write_all(b"0123").unwrap();
     assert_eq!(store.log(&main).unwrap(), ids, "readers go by the head");
 
-    // Landing on the published head finds the target moved.
     let stale = acceptance(&main, store.head(&main).unwrap());
     let error = store.append(&main, &stale).unwrap_err();
     let repaired = Head {
@@ -256,7 +251,6 @@ fn repairs_sync_the_log_before_publishing_it() {
     store.init().unwrap();
     let main = TargetName::MAIN;
     let ids = land(&store, &main, 1);
-    // A crash after appending a log entry, before syncing it.
     let unsynced = acceptance(
         &main,
         Some(Head {
@@ -280,7 +274,6 @@ fn repairs_sync_the_log_before_publishing_it() {
             Synced::Batch(0),
             Synced::Dir(dir.path().join(".origin/objects/loose").join(shard)),
             Synced::File,
-            // The head, and the op log entry saying it advanced.
             Synced::Batch(2),
             Synced::Dir(targets),
             Synced::Dir(target),
@@ -301,7 +294,6 @@ fn targets_are_named_before_their_first_head() {
     let targets = Synced::Dir(store.targets_dir());
     let synced = store.platform.0.into_inner();
     let named = synced.iter().position(|synced| *synced == targets);
-    // The head, and the op log entry saying it advanced.
     let published = synced
         .iter()
         .rposition(|synced| *synced == Synced::Batch(2));
@@ -324,8 +316,6 @@ fn acceptances_are_durable_before_the_log_refers_to_them() {
     assert_eq!(
         store.platform.0.into_inner(),
         [
-            // The acceptance and its op log entry, which costs no sync
-            // of its own.
             Synced::Batch(2),
             Synced::Dir(dir.path().join(".origin/objects/loose")),
             Synced::Dir(dir.path().join(".origin/objects/loose").join(&hex[..2])),

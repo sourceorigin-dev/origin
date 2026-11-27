@@ -109,7 +109,6 @@ impl Workspace {
         revision: RevisionId,
     ) -> Result<(), WorkspaceError> {
         let revision: Revision = self.store.get(revision)?;
-        // A new change has a single revision.
         if revision.predecessors.is_empty() || !index.is_divergent(revision.change) {
             return Ok(());
         }
@@ -174,8 +173,6 @@ impl Workspace {
                 println!("Supersedes statement {}", superseded.short());
             }
         } else if let Some(withdrawn) = statement.supersedes {
-            // A withdrawal always supersedes: `supersede` refuses one with
-            // nothing to take back.
             println!(
                 "Withdrew statement {} with statement {}: {} about {}",
                 withdrawn.short(),
@@ -382,7 +379,6 @@ impl Workspace {
     /// Fails if the policy is invalid, or the store cannot be read, compacted or
     /// cleaned.
     pub fn gc(&self) -> Result<(), WorkspaceError> {
-        // The policy in force once collection may start, not before.
         let retention = || Ok::<_, WorkspaceError>(Policy::load(&self.store)?.retention);
         let dropped =
             Annotations::open(&self.store)?.drop_expired_payloads(retention, SystemTime::now())?;

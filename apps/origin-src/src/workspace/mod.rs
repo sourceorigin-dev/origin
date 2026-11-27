@@ -211,14 +211,12 @@ impl Workspace {
     /// Fails if `root` already has a repository, the node key cannot be
     /// loaded, or the repository cannot be written.
     pub fn init(root: &Path, config: UserConfig, actor: &Actor) -> Result<Self, WorkspaceError> {
-        // Canonical, as every command opening it spells it, so the op log
-        // names this working copy one way.
         let root = Self::canonical(root)?;
         let meta = root.join(Self::META_DIR);
         if meta.exists() {
             return Err(WorkspaceError::AlreadyInitialized(root));
         }
-        // First, so a key that cannot be loaded leaves no repository behind.
+        // INVARIANT: First, so a key that cannot be loaded leaves no repository behind.
         let key = config.node_key()?;
         let store = Store::new(meta, Native::default()).with_actor(actor.in_workspace(&root));
         store.init()?;
@@ -332,8 +330,6 @@ impl Workspace {
             Ok(moving) => moving,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
             Err(error) => {
-                // Kept, so no move replaces it, or is undone by it if it can
-                // be read later: the user decides what it was.
                 eprintln!(
                     "warning: cannot read {}, the marker of a move of the working copy a crash \
                      cut short ({error}): its files stay as they are, and the working copy \
@@ -481,7 +477,6 @@ impl Workspace {
         if working_copy.files == working_copy.revision.snapshot || working_copy.behind.is_some() {
             return Ok(working_copy);
         }
-        // The draft is a move of the working copy, before anything is written.
         self.may_move()?;
         let revision = Revision {
             predecessors: vec![working_copy.id],
@@ -491,7 +486,6 @@ impl Workspace {
         };
         let encoded = revision.encode();
         if !working_copy.conflicts.is_empty() {
-            // Now, so the revision never exists without them.
             self.write(&self.revision_layers(Vec::new(), &encoded, &working_copy.conflicts))?;
         }
         Ok(WorkingCopy {
@@ -676,7 +670,7 @@ impl Workspace {
         why: Why,
         index: &mut Index,
     ) -> Result<(), WorkspaceError> {
-        // Before the revision exists, or it would be a head of its change
+        // INVARIANT: Before the revision exists, or it would be a head of its change
         // the working copy isn't.
         self.may_move()?;
         self.write(layers)?;
@@ -768,7 +762,7 @@ impl Workspace {
         why: Why,
     ) -> Result<(), WorkspaceError> {
         self.may_move()?;
-        // The draft's move stays to log until this commit logs it.
+        // INVARIANT: The draft's move stays to log until this commit logs it.
         let mut moves: Vec<_> = self.unlogged.into_iter().collect();
         moves.push(Move { from, to, why });
         let write = self.store.durable_write();
@@ -798,7 +792,6 @@ impl Workspace {
         unwritten: &[Vec<EncodedObject>],
         why: Why,
     ) -> Result<(), WorkspaceError> {
-        // Before changing any file.
         self.may_move()?;
         let changes = if revision.snapshot == working_copy.files {
             Vec::new()
@@ -807,7 +800,6 @@ impl Workspace {
         } else {
             self.store.diff(working_copy.files, revision.snapshot)?
         };
-        // The files stay as they are: there's nothing to finish.
         if changes.is_empty() {
             self.write(unwritten)?;
             return self.point_at(to, why);
@@ -821,7 +813,7 @@ impl Workspace {
         self.publish_moving(&moving)?;
         let checkout = self.checkout(&changes, Some(&working_copy.cache));
         if let Err(error) = checkout.and_then(|()| self.write(unwritten)) {
-            // So a crash finishes taking the files back, not the move, whose
+            // INVARIANT: So a crash finishes taking the files back, not the move, whose
             // revision may exist. Best effort: the error says what went
             // wrong, and whichever move is left behind, the next command
             // finishes.
@@ -988,7 +980,6 @@ impl Workspace {
     pub fn show(&mut self, change: Option<&str>) -> Result<(), WorkspaceError> {
         let working_copy = self.snapshot()?;
         let index = &working_copy.index;
-        // Each revision, with the files to show: the working copy's draft.
         let revisions = match change {
             None => vec![(working_copy.id, Some(working_copy.files))],
             Some(change) => index
@@ -1073,11 +1064,8 @@ impl Workspace {
         let id = encoded.id().into();
         let recorded = working_copy.unsaved.is_some();
         let first = working_copy.unsaved.take().into_iter().chain([description]);
-        // It starts with the files of the one below, and their conflicts.
         let layers = self.revision_layers(first.collect(), &encoded, &working_copy.conflicts);
         self.save(&layers, id, Why::Command, &mut working_copy.index)?;
-        // Edits recorded on a revision that is no longer its change's head
-        // make that change diverge.
         if recorded {
             self.flag_divergence(&working_copy.index, working_copy.id)?;
         }
@@ -1194,7 +1182,6 @@ impl Workspace {
             supersedes: None,
             promoted_from: None,
         };
-        // As readers count it.
         if !Policy::load(&self.store)?.authorizes(&self.store, &statement)? {
             return Err(AnnotateError::Reserved {
                 kind: statement.kind,
@@ -1223,7 +1210,7 @@ impl Workspace {
         let encoded = revision.encode();
         let conflicts = self.base_conflicts(&mut working_copy.index, revision.base)?;
         let mut layers = self.revision_layers(vec![reason, empty], &encoded, &conflicts);
-        // Published before the revision that replaces the change.
+        // INVARIANT: Published before the revision that replaces the change.
         layers[1].push(statement);
         let id = encoded.id().into();
         self.switch_to(&working_copy, id, &revision, &layers, Why::Command)?;
@@ -1263,7 +1250,6 @@ impl Workspace {
         let mut snapshot = kept_revision.snapshot;
         let mut merged = Conflicts::default();
         for (merged_heads, &head) in heads.iter().filter(|&&head| head != kept).enumerate() {
-            // Past the first merge, our side holds every head merged so far.
             let ours = if merged_heads == 0 {
                 kept.short()
             } else {
@@ -1275,12 +1261,10 @@ impl Workspace {
                 self.store.get(head)?.snapshot,
                 [&ours, &head.short()],
             )?;
-            // The next merge reads this one's trees.
             self.write(&[merge.files.into_iter().chain(merge.trees).collect()])?;
             snapshot = merge.tree;
             merged = merged.with(merge.conflicts);
         }
-        // The heads' own, where the merge kept their side.
         let mut conflicts = Conflicts::default();
         for &head in &heads {
             let revision = self.store.get(head)?;
@@ -1378,7 +1362,6 @@ impl Workspace {
             Some(target) => target,
             None => self.target_name(on)?,
         };
-        // Only the last `limit` acceptances are read.
         let since = match (limit, self.store.head(&target)?) {
             (Some(limit), Some(head)) => (head.seq + 1).saturating_sub(limit as u64),
             _ => 0,

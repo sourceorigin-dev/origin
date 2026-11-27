@@ -251,7 +251,6 @@ async fn hosts_several_repositories() {
         ErrorCode::NotFound
     );
 
-    // Records put in one repository aren't in the other.
     let made = Made::revision(change(1), main_tip(&server.demo).await, vec![], &[]);
     server.demo.put_records(&made.pack()).await.unwrap();
     let request = FetchRecords {
@@ -307,7 +306,6 @@ async fn puts_and_fetches_records() {
         assert_eq!(code(error), ErrorCode::BadRequest, "content leaves by path");
     }
 
-    // A record is refused unless the repository can use it.
     let orphan = Made::revision(change(2), main_tip(repo).await, vec![], &[("c.txt", "c")]);
     let revision_only = Pack {
         objects: vec![orphan.objects.last().unwrap().clone()],
@@ -345,7 +343,6 @@ async fn puts_refuse_objects_named_as_another_kind() {
         code(repo.put_records(&Pack { objects }).await.unwrap_err())
     };
 
-    // A revision whose snapshot is a blob, in the batch.
     let blob = EncodedObject::blob(b"not a tree");
     let description = EncodedObject::attachment(b"A change");
     let revision = Revision {
@@ -361,8 +358,6 @@ async fn puts_refuse_objects_named_as_another_kind() {
     let objects = vec![blob.clone(), description, revision];
     assert_eq!(refused(objects).await, ErrorCode::BadRequest);
 
-    // Trees naming a stored blob as a directory, and a stored tree as a
-    // file.
     let made = Made::nested(change(2), base, &[("src/lib.rs", "fn a() {}")]);
     repo.put_records(&made.pack()).await.unwrap();
     let src = made.objects[1].id();
@@ -376,9 +371,6 @@ async fn puts_refuse_objects_named_as_another_kind() {
         assert_eq!(refused(vec![tree.encode()]).await, ErrorCode::BadRequest);
     }
 
-    // One stored object needed as two kinds, the right one last: a
-    // revision's snapshot and description, and a tree's directory and
-    // file.
     let attachment = EncodedObject::attachment(b"stored");
     let blob = made.objects[0].clone();
     repo.put_records(&Pack {
@@ -450,7 +442,6 @@ async fn promotions_must_match_their_original() {
     let repo = &server.demo;
     let made = Made::revision(change(1), main_tip(repo).await, vec![], &[("a.txt", "a")]);
     repo.put_records(&made.pack()).await.unwrap();
-    // Even when they come together.
     let same = Made::revision(change(3), main_tip(repo).await, vec![], &[("a.txt", "a")]);
     repo.put_records(&same.pack()).await.unwrap();
     let original = Statement {
@@ -586,8 +577,6 @@ async fn reads_statements_and_revisions() {
     assert_eq!(found[0].statement.kind.as_str(), "ci.test");
     assert_eq!(found[0].superseded_by, None);
 
-    // Two revisions evolving from the same one make the change diverge,
-    // which the server flags.
     let left = Made::revision(change(1), base, vec![first.id], &[("a.txt", "2")]);
     let right = Made::revision(change(1), base, vec![first.id], &[("a.txt", "3")]);
     for made in [&left, &right] {

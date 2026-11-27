@@ -214,7 +214,6 @@ impl StatCache {
     fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
         let mut reader = Reader::new(bytes);
         if reader.take(Self::MAGIC.len())? != Self::MAGIC {
-            // Another format, or another version of this one.
             return Err(DecodeError::NonCanonical("stat cache header"));
         }
         let scanned_at = i64::from_le_bytes(reader.array()?);
@@ -442,15 +441,12 @@ impl<'a, P: Platform> Worktree<'a, P> {
             }
             let name =
                 EntryName::new(name).map_err(|_| SnapshotError::UntrackableName(entry.path()))?;
-            // On most filesystems the type comes with the listing, without a
-            // `stat` call.
             let file_type = entry.file_type().map_err(io_error)?;
             let listed = if file_type.is_dir() {
                 Listed::Dir
             } else if file_type.is_file() || file_type.is_symlink() {
                 Listed::File
             } else {
-                // Sockets, FIFOs and devices have no content to track.
                 continue;
             };
             listing.push((name, listed));
@@ -566,7 +562,7 @@ impl<'a, P: Platform> Worktree<'a, P> {
         if changes.is_empty() {
             return Ok(());
         }
-        // Every content it writes can be read before anything changes, so
+        // INVARIANT: Every content it writes can be read before anything changes, so
         // a store that fails it leaves the files as they are.
         Self::par_map(&changes, |change| {
             change
@@ -586,8 +582,6 @@ impl<'a, P: Platform> Worktree<'a, P> {
         sources: &[CloneSource],
     ) -> Result<(), SnapshotError> {
         let seen = |index: usize| seen.map(|seen| seen[index]);
-        // Removing first frees the paths of files that become directories,
-        // and of directories that become files.
         for (index, change) in changes.iter().enumerate() {
             if change.new.is_some() {
                 continue;
@@ -596,7 +590,6 @@ impl<'a, P: Platform> Worktree<'a, P> {
             Seen::check(seen(index), &path)?;
             Self::remove(&path)?;
             for dir in path.ancestors().skip(1) {
-                // Stops at the first directory that isn't empty, or the root.
                 if dir == self.root || fs::remove_dir(dir).is_err() {
                     break;
                 }
@@ -613,8 +606,6 @@ impl<'a, P: Platform> Worktree<'a, P> {
                 })
             })
             .collect();
-        // Creating the directories first lets the files be written in any
-        // order.
         let mut dirs: Vec<_> = writes
             .iter()
             .filter_map(|write| write.path.parent())
@@ -628,9 +619,6 @@ impl<'a, P: Platform> Worktree<'a, P> {
             })?;
         }
         let originals = Originals::new(sources, writes.iter().map(|write| &write.entry));
-        // Many files take long to sync: the first half is written back
-        // while the second is written, so the final sync, the barrier, has
-        // less left to wait for.
         let half = if writes.len() >= Self::EARLY_SYNC {
             writes.len() / 2
         } else {
@@ -741,7 +729,6 @@ impl<'a, P: Platform> Worktree<'a, P> {
                 }
             }
         }
-        // Those a removal emptied are gone, with their entries.
         for dir in dirs.into_iter().filter(|dir| dir.is_dir()) {
             write.sync_with(dir);
         }
@@ -788,10 +775,9 @@ impl<'a, P: Platform> Worktree<'a, P> {
             source,
         };
         Seen::check(*seen, path)?;
-        // Never write through a symlink, or keep the old file's mode.
         Self::remove(path)?;
         if let Some(original) = originals.get(entry) {
-            // A clone has a new file's mode, or on some platforms the
+            // INVARIANT: A clone has a new file's mode, or on some platforms the
             // original's, whose kind may differ: originals are found by
             // content. Only a regular file from a regular file is right
             // either way.
@@ -944,7 +930,7 @@ impl Original<'_> {
         } else {
             fs::copy(&from, to).is_ok()
         };
-        // Every write moves a file's ctime forward, past the time its entry
+        // INVARIANT: Every write moves a file's ctime forward, past the time its entry
         // settled at, so an original still matching its entry now was
         // unmodified during the clone.
         let stat = Stat::new(&fs::symlink_metadata(&from).ok()?);

@@ -86,7 +86,6 @@ fn same_size_rewrites_are_detected() {
     let fixture = Fixture::new();
     fixture.write("file", "aaaa");
     let (first, cache) = fixture.snapshot(&StatCache::default());
-    // Rewritten right away, possibly within the same mtime tick.
     fixture.write("file", "bbbb");
     let (second, _) = fixture.snapshot(&cache);
     assert_ne!(first, second);
@@ -99,7 +98,6 @@ fn restored_modification_times_do_not_hide_changes() {
     let path = fixture.dir.path().join("file");
     let mtime = fs::metadata(&path).unwrap().modified().unwrap();
     let (first, mut cache) = fixture.snapshot(&StatCache::default());
-    // Trust every entry, as if the file had settled long ago.
     cache.scanned_at = i64::MAX;
     fixture.write("file", "bbbb");
     File::options()
@@ -118,9 +116,6 @@ fn cache_hits_skip_reading() {
     fixture.write("file", "content");
     fixture.write("other", "content");
     let (root, mut cache) = fixture.snapshot(&StatCache::default());
-    // Pretend the scan happened long after the write, so the entries are
-    // trusted, and point one at a different blob: a hit returns the
-    // cached id without reading the file.
     cache.scanned_at = i64::MAX;
     cache.root = None;
     let fake = EncodedObject::blob(b"cached");
@@ -204,7 +199,6 @@ fn checkouts_reproduce_snapshots() {
     symlink("keep", fixture.dir.path().join("link")).unwrap();
     let (new, cache) = fixture.snapshot(&cache);
 
-    // Back to the old snapshot, then forward to the new one.
     let worktree = fixture.worktree();
     worktree
         .checkout(&fixture.store.diff(new, old).unwrap(), &[], None)
@@ -231,7 +225,6 @@ fn checkouts_never_overwrite_edits_made_since_the_snapshot() {
     let back = fixture.store.diff(new, old).unwrap();
     let worktree = fixture.worktree();
 
-    // Snapshotted, then edited again before the checkout.
     let (_, cache) = fixture.snapshot(&StatCache::default());
     fixture.write("changed", "edited since");
     let error = worktree.checkout(&back, &[], Some(&cache)).unwrap_err();
@@ -245,12 +238,10 @@ fn checkouts_never_overwrite_edits_made_since_the_snapshot() {
         "nothing changed"
     );
 
-    // Edited back, it is as snapshotted: its content tells.
     fixture.write("changed", "after");
     worktree.checkout(&back, &[], Some(&cache)).unwrap();
     assert_eq!(fixture.snapshot(&StatCache::default()).0, old);
 
-    // A file created where the checkout writes one.
     let (_, cache) = fixture.snapshot(&StatCache::default());
     fixture.write("added", "created since");
     let forward = fixture.store.diff(old, new).unwrap();
@@ -274,7 +265,6 @@ fn checkouts_stop_at_a_file_edited_while_they_run() {
     let back = fixture.store.diff(new, old).unwrap();
     let worktree = fixture.worktree();
 
-    // Found unedited, then edited before the checkout replaces it.
     let seen: Vec<_> = back
         .iter()
         .map(|change| worktree.check_unchanged(change, &cache).unwrap())
@@ -319,7 +309,6 @@ fn restoring_reads_every_content_before_changing_a_file() {
     let lost = EncodedObject::blob(b"content the store no longer has");
     fs::remove_file(fixture.store.path(lost.id())).unwrap();
 
-    // The files as the move found them: it fails before removing one.
     fs::remove_file(fixture.dir.path().join("lost")).unwrap();
     fixture.write("removed", "old");
     assert!(fixture.worktree().restore(&changes).is_err());
@@ -340,7 +329,6 @@ fn restoring_keeps_files_edited_since() {
     let (new, _) = fixture.snapshot(&StatCache::default());
     let changes = fixture.store.diff(old, new).unwrap();
 
-    // A move cut short, then edits.
     fixture.write("unmoved", "old");
     fixture.write("edited", "edited");
     fixture.write("added", "created");
@@ -439,7 +427,6 @@ fn checkouts_clone_only_unmodified_files() {
     let run = fixture.dir.path().join("run.sh");
     fs::set_permissions(&run, fs::Permissions::from_mode(0o755)).unwrap();
     symlink("same", fixture.dir.path().join("link")).unwrap();
-    // Enough files that every writer thread has several.
     let files = 64;
     for i in 0..files {
         fixture.write(&format!("copies/{i}"), &i.to_string());
@@ -460,8 +447,6 @@ fn checkouts_clone_only_unmodified_files() {
             None,
         )
         .unwrap();
-    // Each writer thread tries once at most: the first refusal it sees
-    // makes it, and every thread after, copy.
     let threads = thread::available_parallelism().map_or(1, usize::from);
     let attempts = store.platform.attempts.load(Ordering::Relaxed);
     assert!(
@@ -487,8 +472,6 @@ fn clones_take_the_mode_their_entry_names() {
     cache.scanned_at = i64::MAX;
     let script = fixture.entry(root, "run.sh");
     let empty = Tree::default().encode();
-    // The script's content as an entry of `kind`, cloned from it: the
-    // mode bits for executing it.
     let checked_out = |kind, platform: FakeClones| {
         let mut tree = Tree::default();
         let name = origin_shared::EntryName::new("file").unwrap();
@@ -518,14 +501,12 @@ fn clones_take_the_mode_their_entry_names() {
         let file = fs::metadata(other.path().join("file")).unwrap();
         file.permissions().mode() & 0o111
     };
-    // A clone of the content alone, as Linux makes, of the executable.
     let content_only = FakeClones {
         content_only: true,
         ..FakeClones::default()
     };
     let executable = checked_out(EntryKind::Executable, content_only);
     assert_eq!(executable, 0o111, "still executable");
-    // A copy, as where cloning is refused, keeps the original's mode.
     let regular = checked_out(EntryKind::File, FakeClones::default());
     assert_eq!(regular, 0, "not executable");
 }
