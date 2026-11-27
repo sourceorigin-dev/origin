@@ -14,7 +14,8 @@ use std::{mem, slice};
 use origin_shared::api::{LandRequest, Landings, NewTarget};
 use origin_shared::landing::{Blocked, Landing, Pending, Proposal};
 use origin_shared::{
-    Base, ChangeId, EncodedObject, Record, Revision, RevisionId, Source, TargetName, TreeId,
+    Base, ChangeId, EncodedObject, Record, RecordId, Revision, RevisionId, Source, TargetName,
+    TreeId,
 };
 
 use super::{Behind, WorkingCopy, Workspace, WorkspaceError};
@@ -275,8 +276,8 @@ impl Workspace {
             .store
             .head(target)?
             .ok_or_else(|| WorkspaceError::UnknownTarget(target.clone()))?;
+        self.need(&[RecordId::Acceptance(tip.acceptance)])?;
         let state = self.store.get(tip.acceptance)?.body().state;
-        self.need(&[state])?;
         let tip_label = format!("{target} #{}", tip.seq);
         let merge = self.store.merge_marked(
             Some(base),
@@ -347,6 +348,7 @@ impl Workspace {
         working_copy: &mut WorkingCopy,
         rebased: RevisionId,
     ) -> Result<(), WorkspaceError> {
+        self.need(&[RecordId::Revision(rebased)])?;
         let theirs: Revision = self.store.get(rebased)?;
         if working_copy.files == working_copy.revision.snapshot {
             return self.move_to(working_copy, rebased, &theirs, &[], &Conflicts::default());
@@ -385,8 +387,8 @@ impl Workspace {
             .store
             .head(onto)?
             .ok_or_else(|| WorkspaceError::UnknownTarget(onto.clone()))?;
+        self.need(&[RecordId::Acceptance(tip.acceptance)])?;
         let state = self.store.get(tip.acceptance)?.body().state;
-        self.need(&[state])?;
         let current = &working_copy.revision;
         let tip_label = format!("{onto} #{}", tip.seq);
         let merge = self.store.merge_marked(

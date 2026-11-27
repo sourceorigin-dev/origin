@@ -197,6 +197,7 @@ fn a_move_that_cannot_fetch_moves_nothing() {
     let url = origin.root().to_str().unwrap();
     let clone = Repo::clone(&ada, url, &[]);
     clone.ok(&["fetch", "--change", &change]);
+    let own = clone.change();
 
     let away = origin.root().with_extension("away");
     fs::rename(origin.root(), &away).unwrap();
@@ -209,6 +210,10 @@ fn a_move_that_cannot_fetch_moves_nothing() {
     fs::rename(&away, origin.root()).unwrap();
     clone.ok(&["edit", &change]);
     assert_eq!(clone.read("x"), "x\n");
+
+    fs::rename(origin.root(), &away).unwrap();
+    clone.ok(&["edit", &own]);
+    assert_eq!(clone.read("notes"), "mine\n");
 }
 
 #[test]

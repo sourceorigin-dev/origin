@@ -18,7 +18,7 @@ use std::collections::HashSet;
 
 use origin_platform::Platform;
 use origin_shared::api::Annotation;
-use origin_shared::{Principal, Record, RecordId, Statement, StatementId, TreeId};
+use origin_shared::{Principal, Record, RecordId, Statement, StatementId};
 
 use super::Annotations;
 use crate::store::{Store, StoreError};
@@ -246,21 +246,6 @@ impl<P: Platform> Annotations<'_, P> {
 }
 
 impl<P: Platform> Store<P> {
-    /// The snapshot of a record a statement is about, which its input
-    /// digest is taken from. Statements have none.
-    ///
-    /// # Errors
-    ///
-    /// Fails if the record cannot be read.
-    pub fn snapshot_of(&self, subject: RecordId) -> Result<Option<TreeId>, StoreError> {
-        Ok(match subject {
-            RecordId::Snapshot(id) => Some(id),
-            RecordId::Revision(id) => Some(self.get(id)?.snapshot),
-            RecordId::Acceptance(id) => Some(self.get(id)?.body().state),
-            RecordId::Statement(_) => None,
-        })
-    }
-
     /// Checks the claim `statement`, `id`, makes. A statement that promotes
     /// none makes its own. A promotion must name an original the store has
     /// that is [promotable](Statement::is_promotable), match its kind,

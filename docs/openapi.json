@@ -1362,7 +1362,7 @@
         "type": "object",
         "description": "A request for the trees and blobs of a snapshot that the caller lacks,\nwalked from its root. This is the only way blobs and trees leave a\nrepository, so the server can check what each caller may read by path.",
         "required": [
-          "snapshot"
+          "of"
         ],
         "properties": {
           "have": {
@@ -1371,6 +1371,10 @@
               "$ref": "#/components/schemas/TreeId"
             },
             "description": "Snapshots the caller holds in full. Anything one of them holds at the\nsame path is skipped, so only what changed is sent. Snapshots the\nrepository doesn't have are ignored."
+          },
+          "of": {
+            "type": "string",
+            "description": "The record whose snapshot to fetch: a revision or an acceptance. Only a\nrecord's whole snapshot can be walked, not a tree inside it, because the\ntree's paths would be checked as if they were other paths."
           },
           "paths": {
             "type": "array",
@@ -1384,10 +1388,6 @@
             "format": "int64",
             "description": "How many objects to skip, because earlier parts brought them. A response\nthat stops short has the [`MORE`] header.",
             "minimum": 0
-          },
-          "snapshot": {
-            "$ref": "#/components/schemas/TreeId",
-            "description": "The snapshot."
           }
         }
       },

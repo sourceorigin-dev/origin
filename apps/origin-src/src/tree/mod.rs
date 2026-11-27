@@ -8,8 +8,8 @@ use std::path::PathBuf;
 
 use origin_platform::Platform;
 use origin_shared::{
-    Digest, EncodedObject, EntryKind, EntryName, Inputs, ObjectId, Record, RepoPath, Tree,
-    TreeEntry, TreeId,
+    Base, Digest, EncodedObject, EntryKind, EntryName, Inputs, ObjectId, Record, RecordId,
+    RepoPath, Tree, TreeEntry, TreeId,
 };
 
 use crate::conflict::{Conflicted, Conflicts};
@@ -397,6 +397,36 @@ impl<'a, P: Platform> Snapshots<'a, P> {
         inputs: &Inputs,
     ) -> Result<Digest, StoreError> {
         inputs.digest(|path| self.entry_at(snapshot, path))
+    }
+}
+
+impl<P: Platform> Store<P> {
+    /// Returns the snapshot `base` names: an acceptance's state or a revision's
+    /// snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the record cannot be read.
+    pub fn base_snapshot(&self, base: Base) -> Result<TreeId, StoreError> {
+        Ok(match base {
+            Base::Acceptance(id) => self.get(id)?.body().state,
+            Base::Revision(id) => self.get(id)?.snapshot,
+        })
+    }
+
+    /// Returns the snapshot of a record: a revision's snapshot, an acceptance's
+    /// state, or the snapshot itself. Statements have none.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the record cannot be read.
+    pub fn snapshot_of(&self, record: RecordId) -> Result<Option<TreeId>, StoreError> {
+        Ok(match record {
+            RecordId::Snapshot(id) => Some(id),
+            RecordId::Revision(id) => Some(self.get(id)?.snapshot),
+            RecordId::Acceptance(id) => Some(self.get(id)?.body().state),
+            RecordId::Statement(_) => None,
+        })
     }
 }
 

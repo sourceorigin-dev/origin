@@ -501,7 +501,7 @@ async fn fetches_snapshots_by_walking_them() {
     };
 
     let snapshot = |have: Vec<TreeId>, paths: &[&str]| FetchSnapshot {
-        snapshot: tree.id().into(),
+        of: RecordId::Revision(made.id),
         have,
         paths: paths
             .iter()
@@ -525,7 +525,7 @@ async fn fetches_snapshots_by_walking_them() {
     repo.put_records(&edited.pack()).await.unwrap();
     let changed = repo
         .fetch_snapshot(&FetchSnapshot {
-            snapshot: edited.objects[2].id().into(),
+            of: RecordId::Revision(edited.id),
             have: vec![tree.id().into()],
             paths: Vec::new(),
             skip: 0,
@@ -537,14 +537,24 @@ async fn fetches_snapshots_by_walking_them() {
         [edited.objects[2].clone(), edited.objects[1].clone()],
         "the new tree and the edited file"
     );
-    let missing = FetchSnapshot {
-        snapshot: description.id().into(),
+    let subtree = FetchSnapshot {
+        of: RecordId::Snapshot(tree.id().into()),
         have: Vec::new(),
         paths: Vec::new(),
         skip: 0,
     };
+    let error = repo.fetch_snapshot(&subtree).await.unwrap_err();
+    assert_eq!(
+        code(error),
+        ErrorCode::BadRequest,
+        "only a record's snapshot, not a tree within one"
+    );
+    let missing = FetchSnapshot {
+        of: RecordId::Revision(description.id().into()),
+        ..subtree
+    };
     let error = repo.fetch_snapshot(&missing).await.unwrap_err();
-    assert_eq!(code(error), ErrorCode::NotFound, "a blob is no snapshot");
+    assert_eq!(code(error), ErrorCode::NotFound);
 }
 
 #[tokio::test]
