@@ -1,18 +1,12 @@
-//! Append-only files of checked frames. The [record index](crate::index) and
-//! the [op log](crate::oplog) are made of them.
+//! Append-only files of checked frames. The [record index](crate::index) and the
+//! [op log](crate::oplog) are made of them.
 //!
-//! A file is a header naming its format and version, followed by frames. A
-//! frame is its payload's length as a `u32`, the payload, the first 8 bytes of
-//! the payload's BLAKE3 hash, and the length again. The trailing length lets a
-//! reader check the last frame from the end without reading the rest.
-//!
-//! Appenders hold an exclusive lock and write whole frames at the end. A crash
-//! during an append can leave part of a frame at the end: a partial tail.
-//! Readers skip it, and the next append cuts it off first, so a partial frame
-//! is only ever last. Anything else that fails its check is damage, and each
-//! format decides how to handle it. A frame whose length runs past the end of
-//! the file is damage too when a complete frame ends the file, since an
-//! interrupted append never leaves one after it.
+//! A file is a header naming its format and version, followed by frames, each a
+//! length, a payload and a check. Appenders hold an exclusive lock and write
+//! whole frames at the end. A crash can leave a partial frame last, which readers
+//! skip and the next append cuts off. Anything else that fails its check is
+//! damage, and each format decides how to handle it. The frame layout is in
+//! `docs/design.md`, under "Frames".
 
 use std::array;
 use std::fs::File;

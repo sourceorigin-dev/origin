@@ -1,8 +1,8 @@
 //! Conflicts: the paths a merge could not combine.
 //!
-//! When both sides of a merge into a working copy, such as
-//! `origin converge`, changed a text file, the merge writes both versions
-//! between markers naming the sides:
+//! When both sides of a merge into a working copy, such as `origin converge`,
+//! changed a text file, the merge writes both versions between markers naming
+//! the sides:
 //!
 //! ```text
 //! <<<<<<< 3f1c9a2e07b4
@@ -12,23 +12,11 @@
 //! >>>>>>> 8d02e5b1c4f9
 //! ```
 //!
-//! For a binary file, or a path that is a directory on either side, it
-//! keeps one side instead. The merge then issues a `core.conflict`
-//! statement about the new revision, as its author (a user), listing each
-//! conflicted path and the entry it wrote there. That list is what counts,
-//! not the markers: a path stays unresolved while a revision still has that
-//! entry there. Editing the file resolves it, and so does `origin resolve`,
-//! which accepts the file as it is.
-//!
-//! A revision made from one with unresolved paths (by a snapshot,
-//! `describe`, a new change on top, or a merge) gets its own
-//! `core.conflict` listing the paths still unresolved. It is published
-//! before the revision, so the revision is never seen without it. The
-//! landing queue refuses a revision that still has unresolved paths.
-//!
-//! The landing queue also issues a `core.conflict`, as a node, when a
-//! revision does not rebase onto its target. That statement only blocks
-//! landing on that target; each retry merges again.
+//! The merge then issues a `core.conflict` statement about the new revision,
+//! listing each conflicted path and the entry it wrote there. That list is what
+//! counts, not the markers: a path stays unresolved while a revision still has
+//! that entry there. Binary files, carrying paths forward and the landing queue's
+//! own statement are in `docs/design.md`, under "Conflicts".
 
 use origin_platform::Platform;
 use origin_shared::{

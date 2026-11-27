@@ -1,20 +1,8 @@
-//! Target chains: the acceptances of each target, in order.
-//!
-//! A target is stored in `targets/<id>/`, where the [`TargetId`] is the hash
-//! of its name, so names never become file names:
-//!
-//! - `name`: the target's name.
-//! - `log`: the id of each acceptance in hex, one per line, append-only.
-//!   Appenders hold an exclusive lock on it, which the kernel releases if the
-//!   process dies. The file is never replaced, so the lock always protects it.
-//! - `head`: `<seq> <id>`, the latest published acceptance, replaced
-//!   atomically.
-//!
-//! An append writes the acceptance durably, appends its id to the log and
-//! syncs the log, and only then publishes the new head. Readers go by the
-//! head, so they only see durable acceptances. If a crash leaves the log
-//! ahead of the head, or a partial line at its end, the next append repairs
-//! it first: it syncs the log, then publishes what it holds.
+//! Target chains: the acceptances of each target, in order, in `targets/<id>/`,
+//! where the [`TargetId`] is the hash of its name, so names never become file
+//! names. Readers go by each target's head, so they only see durable
+//! acceptances; the "Target chains" section of `docs/design.md` describes the
+//! files and how an append repairs what a crash left.
 
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};

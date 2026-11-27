@@ -1,40 +1,12 @@
-//! Pack files: many small objects stored together in a few large files, so
-//! a store of a million statements holds a handful of files instead of a
-//! million.
+//! Pack files: many small objects stored together in a few large files, so a
+//! store of a million statements holds a handful of files instead of a million.
 //!
-//! `objects/packs/` holds:
-//!
-//! - `<id>.pack`: [`Pack::MAGIC`], then each object as the `u32` length of
-//!   its compressed encoding followed by the encoding, compressed as in a
-//!   loose file. A pack can be read on its own, from start to end.
-//! - `<id>.idx`: [`Pack::INDEX_MAGIC`], the pack's object ids in ascending
-//!   order, then for each object a `u64` offset and a `u32` length of its
-//!   compressed encoding in the pack, and a `u64` time in seconds since the
-//!   Unix epoch: when this node stored the object (the modification time of
-//!   its loose file). The pack's id is the hash of its object ids; opening
-//!   the pack checks it.
-//! - `manifest`: the ids of the packs in use, one hex id per line, largest
-//!   first. Replacing this file adds and retires packs in one step.
-//! - `lock`: held by the compactor, so only one runs at a time.
-//!
-//! Integers are little endian.
-//!
-//! [`Store::compact`] gathers the small loose objects into a new pack, and
-//! merges into it every pack smaller than twice what the new pack holds so
-//! far. A store thus keeps a logarithmic number of packs, and each object is
-//! rewritten a logarithmic number of times. Compaction writes the pack and
-//! its index durably, then the manifest, and only then removes the loose
-//! files and the merged packs. A crash loses nothing: the next compaction
-//! removes the files the manifest does not name.
-//!
-//! [`Store::compact_if_due`] compacts once enough loose objects pile up. A
-//! long-running process calls it as it writes.
-//!
-//! Readers look in the packs they loaded last, and reload the manifest when
-//! an object is not there. An object that is neither loose nor in the
-//! current manifest's packs is not in the store. An open pack stays readable
-//! after it is retired, so readers also reload the manifest every few
-//! seconds to close the packs it no longer names.
+//! [`Store::compact`] gathers the small loose objects into a new pack, and merges
+//! into it every pack smaller than twice what the new pack holds so far;
+//! [`Store::compact_if_due`] does so once enough loose objects pile up, and a
+//! long-running process calls it as it writes. Readers reload the manifest when
+//! an object is not in the packs they loaded. The files, compaction and reading
+//! are described in `docs/design.md`, under "Packs".
 
 use std::array;
 use std::collections::HashSet;

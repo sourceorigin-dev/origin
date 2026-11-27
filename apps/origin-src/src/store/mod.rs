@@ -1,23 +1,14 @@
-//! A repository's storage on disk, under its `.origin` directory. This
-//! module stores content-addressed objects; [`targets`](crate::targets)
-//! stores target chains, and [`queue`](crate::queue) pending landings.
+//! A repository's storage on disk, under its `.origin` directory. This module
+//! stores content-addressed objects; [`targets`](crate::targets) stores target
+//! chains, and [`queue`](crate::queue) pending landings.
 //!
-//! Each object is a zstd-compressed file at
-//! `objects/loose/<first 2 hex digits>/<remaining hex digits>`. Objects are
-//! written in batches through a [`DurableWrite`]: each file is staged next
-//! to its destination, then the whole batch is synced, renamed into place,
-//! and its directories are synced. Once [`Batch::commit`] returns, the
-//! objects survive a crash, so records that refer to them can be published.
-//! Readers never see a partial object, and concurrent writers of the same
-//! object do no harm. Writers that crash leave temporary files behind;
-//! [`Store::remove_stale_temps`] removes them, and garbage collection
-//! ([`Store::gc`]) calls it.
-//!
-//! [`Store::compact`] moves small loose objects into [`packs`]. Reads look in
-//! the loose objects first, then in the packs.
-//!
-//! Committing a batch also appends its new records to the op log, which the
-//! [`index`](crate::index) catches up from.
+//! Objects are zstd-compressed loose files, written in batches through a
+//! [`DurableWrite`]: once [`Batch::commit`] returns they survive a crash, so
+//! records that refer to them can be published. [`Store::compact`] moves small
+//! loose objects into [`packs`]; reads look in the loose objects first. Committing
+//! a batch also appends its records to the op log, which the
+//! [`index`](crate::index) catches up from. See "Loose objects" in
+//! `docs/design.md`; [`Store::gc`] removes the temporary files crashed writers leave.
 
 use std::collections::BTreeSet;
 use std::fs;
