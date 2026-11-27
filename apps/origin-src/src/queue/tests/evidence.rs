@@ -61,6 +61,32 @@ fn missing_evidence_waits_and_promoted_results_count() {
 }
 
 #[test]
+fn promotes_only_what_the_submitter_sees() {
+    let repo = Repo::new(
+        "[targets.main]\nauthority = \"node:queue\"\n\
+         require = [{ kind = \"ci.test\", verdict = \"pass\", issuer = \"node:ci\" }]\n",
+    );
+    let hidden = repo.change_on_main(1, &[("secrets/key", "hunter2")]);
+    repo.annotations()
+        .issue(&ci_test(hidden, "node:ci"), None)
+        .unwrap();
+    repo.change_on_main(2, &[("docs/guide.md", "# Guide")]);
+    let secrets = RepoPath::new("secrets").unwrap();
+    let blind = PathAccess::new(Level::Write, [(secrets, Level::None)]);
+    let waiting = repo
+        .queue()
+        .submitted_by(blind)
+        .land_change(
+            &mut repo.annotations(),
+            ChangeId::from_bytes([2; 16]),
+            &TargetName::MAIN,
+        )
+        .unwrap();
+    assert!(matches!(waiting[..], [Landing::Pending(_)]), "{waiting:?}");
+    assert!(matches!(repo.land(2)[..], [Landing::Landed { .. }]));
+}
+
+#[test]
 fn forged_promotions_are_no_evidence() {
     let repo = requiring_ci();
     let failed = repo.change_on_main(1, &[("src/lib.rs", "bad")]);
@@ -107,7 +133,11 @@ fn replaced_results_are_promoted_again() {
     let id = annotations.issue(&original, None).unwrap();
     Annotations::open(&repo.store)
         .unwrap()
-        .promote(RecordId::Revision(new), &"node:queue".parse().unwrap())
+        .promote(
+            RecordId::Revision(new),
+            &"node:queue".parse().unwrap(),
+            |_| Ok(true),
+        )
         .unwrap();
     // The same passing result runs again, replacing the one promoted.
     let rerun = Statement {

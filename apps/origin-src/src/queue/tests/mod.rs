@@ -7,6 +7,7 @@ mod policy;
 mod targets;
 
 use origin_platform::Native;
+use origin_shared::access::{Level, PathAccess};
 use origin_shared::landing::{Blocked, Landing, Pending, Proposal};
 use origin_shared::policy::Requirement;
 use origin_shared::{

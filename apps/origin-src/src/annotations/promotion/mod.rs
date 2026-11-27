@@ -155,22 +155,20 @@ impl<P: Platform> Annotations<'_, P> {
     }
 
     /// Returns the statements that would promote results to `subject`, as
-    /// `issuer` would issue them, without writing them, sorted by kind. For
-    /// each [promotion group](Statement::promotion_group), it picks the latest
-    /// statement about another record whose input digest equals the subject's,
-    /// unless its issuer superseded it. It skips a group if the subject already
-    /// has a result of that kind from that issuer, direct or promoted: a result
-    /// that ran on the subject wins. A statement has no snapshot, so nothing is
-    /// promoted to one.
+    /// `issuer` would issue them, without writing them, sorted by kind. For each
+    /// [promotion group](Statement::promotion_group) it picks the latest result
+    /// about another record that `sees` says the caller reads, whose input digest
+    /// equals the subject's. It skips a group the subject has a result in from
+    /// that issuer: a result that ran there wins.
     ///
     /// # Errors
     ///
-    /// Fails if a record or tree cannot be read, or the computed digests cannot
-    /// be saved to the index.
+    /// Fails if a record or tree cannot be read, or the digests cannot be saved.
     pub fn promotions(
         &mut self,
         subject: RecordId,
         issuer: &Principal,
+        mut sees: impl FnMut(RecordId) -> Result<bool, StoreError>,
     ) -> Result<Vec<Statement>, StoreError> {
         let Some(snapshot) = self.store.snapshot_of(subject)? else {
             return Ok(Vec::new());
@@ -202,7 +200,7 @@ impl<P: Platform> Annotations<'_, P> {
                     continue;
                 }
                 let statement = self.store.get(id)?;
-                if self.superseded_by(id, &statement)?.is_none() {
+                if self.superseded_by(id, &statement)?.is_none() && sees(statement.subject)? {
                     promotions.push(Statement {
                         subject,
                         issuer: issuer.clone(),
@@ -219,10 +217,11 @@ impl<P: Platform> Annotations<'_, P> {
         Ok(promotions)
     }
 
-    /// Issues the [`promotions`](Self::promotions) to `subject` as `issuer` and
-    /// returns them. A promotion refers to its original's payload without
-    /// writing it, so this [holds the objects](Store::hold_objects) from
-    /// finding the originals until the promotions are written.
+    /// Issues the [`promotions`](Self::promotions) to `subject` as `issuer`,
+    /// for a caller who `sees` some records, and returns them. A promotion
+    /// refers to its original's payload without writing it, so this [holds the
+    /// objects](Store::hold_objects) from finding the originals until the
+    /// promotions are written.
     ///
     /// # Errors
     ///
@@ -232,9 +231,10 @@ impl<P: Platform> Annotations<'_, P> {
         &mut self,
         subject: RecordId,
         issuer: &Principal,
+        sees: impl FnMut(RecordId) -> Result<bool, StoreError>,
     ) -> Result<Vec<(StatementId, Statement)>, StoreError> {
         let _held = self.store.hold_objects()?;
-        let promotions = self.promotions(subject, issuer)?;
+        let promotions = self.promotions(subject, issuer, sees)?;
         let encoded: Vec<_> = promotions.iter().map(Statement::encode).collect();
         self.store.write_all(&encoded)?;
         Ok(encoded

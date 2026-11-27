@@ -880,6 +880,14 @@ async fn tells_callers_what_they_may_do_and_issues_narrower_tokens() {
     let base = main_tip(&server.strict).await;
     let in_src = Made::nested(change(1), base, &[("src/lib.rs", "fn a() {}")]);
     agent.put_records(&in_src.pack()).await.unwrap();
+    let land = LandRequest {
+        proposal: Proposal::Change(change(1)),
+        onto: None,
+    };
+    assert_eq!(
+        code(agent.land(&land).await.unwrap_err()),
+        ErrorCode::Forbidden
+    );
     let error = server
         .anonymous
         .put_records(&in_src.pack())

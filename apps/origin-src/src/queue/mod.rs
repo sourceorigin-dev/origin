@@ -1,46 +1,13 @@
 //! The landing queue: how a target's authority lands changes and other
 //! targets on the target, one acceptance at a time.
 //!
-//! Landing a change lands its stack: the head of each change below it that
-//! the target does not have yet, from the bottom up, each with its own
-//! acceptance. A change that is divergent, abandoned by its creator, or
-//! whose head has unresolved conflicts (see [`conflict`](crate::conflict))
-//! is refused. If a change waits, the queue keeps the whole stack waiting,
-//! so a retry lands the rest once that change can land. For each revision:
-//!
-//! 1. **Rebase.** The changes the revision made to its base are merged onto
-//!    the target's tip, file by file ([`Store::merge`]). A revision made on
-//!    the tip lands as it is; this node rebases any other into a new
-//!    revision of its change, on the tip. If the merge would leave the
-//!    target unchanged, nothing lands: the target already has the change.
-//! 2. **Conflicts.** If both sides changed a path, a `core.conflict`
-//!    statement about the revision lists the paths, and the change waits
-//!    until a new revision of it merges.
-//! 3. **Policy.** The policy in force must name this node as the target's
-//!    authority. On `policy`, the policy is that of the acceptance before,
-//!    never the one landing ([`Policy::governing`]). Each of the target's
-//!    requirements needs a [claim](crate::annotations::Claim) about the
-//!    revision that lands. Results about other records with the same input
-//!    digest are promoted to it first, and a valid promotion claims what
-//!    its original does, as the original's issuer.
-//! 4. **Missing evidence.** The landing waits until the statements are
-//!    issued and the landing is retried.
-//! 5. **Otherwise** this node signs an acceptance naming what landed, the
-//!    evidence and the policy, and appends it to the target's chain.
-//!
-//! Landing another target works the same way. The source's tip is merged
-//! from the newest acceptances both targets' histories share, and the
-//! requirements apply to the merged snapshot. If the merge changes nothing
-//! and either tip is in the other's history, nothing lands: the target
-//! already has the source's tip, or the source has nothing new. Otherwise
-//! even a merge that changes nothing lands, with no evidence needed, so
-//! that the target's history records the source's tip and later merges
-//! start from it.
-//!
-//! Each target's queue lives in `queue/<target id>/`. It holds a `lock`,
-//! taken while landing so landings on one target never race, and a file for
-//! each waiting landing, `change-<id>` or `target-<target id>`, so waiting
-//! landings can be listed and retried.
+//! Landing a change lands its stack, bottom up, one acceptance per change
+//! whose head the target lacks, and a change that waits keeps the whole stack
+//! waiting. Each revision is refused, rebased onto the tip ([`Store::merge`]),
+//! held on conflict ([`conflict`](crate::conflict)), checked against the policy
+//! ([`Policy::governing`]) and its [claims](crate::annotations::Claim), and
+//! otherwise signed as an acceptance. Waiting landings live in
+//! `queue/<target id>/`. See `docs/design.md`.
 
 mod pending;
 mod session;
@@ -50,6 +17,7 @@ use std::io;
 use std::path::PathBuf;
 
 use origin_platform::{DurableWrite, LockMode, LockedFile, Native, Platform};
+use origin_shared::access::{Level, PathAccess};
 use origin_shared::landing::{Blocked, Landing, Pending, Proposal};
 use origin_shared::{
     AcceptanceBody, AcceptanceId, ChangeId, EncodedObject, Head, NodeKey, Principal, PrincipalName,
@@ -58,6 +26,7 @@ use origin_shared::{
 
 use crate::annotations::{AnnotateError, Annotations};
 use crate::conflict::Conflicts;
+use crate::permissions::Forbidden;
 use crate::policy::{Policy, PolicyError};
 use crate::store::{Store, StoreError};
 
@@ -70,13 +39,30 @@ pub struct Queue<'a, P = Native> {
     store: &'a Store<P>,
     key: &'a NodeKey,
     node: PrincipalName,
+    /// What the submitter may do with each path.
+    submitter: PathAccess,
 }
 
 impl<'a, P: Platform> Queue<'a, P> {
     /// Returns the queues of `store`, run by the node `node`, which signs with
     /// `key`.
     pub fn new(store: &'a Store<P>, key: &'a NodeKey, node: PrincipalName) -> Self {
-        Self { store, key, node }
+        Self {
+            store,
+            key,
+            node,
+            submitter: PathAccess::uniform(Level::Write),
+        }
+    }
+
+    /// Returns these queues, landing for a submitter whose path access is
+    /// `paths`. By default the submitter may do everything.
+    #[must_use]
+    pub fn submitted_by(self, paths: PathAccess) -> Self {
+        Self {
+            submitter: paths,
+            ..self
+        }
     }
 
     /// Returns this node as a principal: the issuer of the statements and the
@@ -456,6 +442,9 @@ pub enum LandError {
     /// The policy in force cannot be read.
     #[error(transparent)]
     Policy(#[from] PolicyError),
+    /// The submitter may not change what the landing changes.
+    #[error(transparent)]
+    Forbidden(#[from] Forbidden),
     /// A conflict cannot be recorded.
     #[error(transparent)]
     Annotate(#[from] AnnotateError),

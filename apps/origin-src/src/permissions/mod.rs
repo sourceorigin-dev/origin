@@ -16,6 +16,7 @@ use origin_shared::access::{Capability, PathAccess, Rights};
 use origin_shared::event::EventKind;
 use origin_shared::{
     Base, Kind, Object, ObjectId, Principal, RecordId, RepoPath, Revision, RevisionId, Statement,
+    TargetName,
 };
 
 use crate::annotations::RevisionView;
@@ -324,6 +325,9 @@ pub enum Forbidden {
     /// A statement of a kind the caller may not issue.
     #[error("you may not issue `{0}` statements")]
     Annotate(Kind),
+    /// A change to a path the caller may not write.
+    #[error("you may not change `{0}`")]
+    Write(RepoPath),
     /// A path the caller may not read.
     #[error("you may not read `{0}`")]
     Read(RepoPath),
@@ -349,6 +353,9 @@ pub enum Forbidden {
         /// The attachment.
         attachment: ObjectId,
     },
+    /// A target the caller may not land on.
+    #[error("you may not land on `{0}`")]
+    Land(TargetName),
     /// A token's scope reaches beyond its issuer's rights.
     #[error("a token may only narrow your rights, which don't include `{0}`")]
     Scope(Capability),

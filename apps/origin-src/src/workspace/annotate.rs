@@ -333,7 +333,10 @@ impl Workspace {
         let working_copy = self.refresh()?;
         let revision = working_copy.find_revision(rev)?;
         let mut annotations = Annotations::new(&self.store, working_copy.index);
-        let promoted = annotations.promote(RecordId::Revision(revision), &self.node_principal())?;
+        let promoted =
+            annotations.promote(RecordId::Revision(revision), &self.node_principal(), |_| {
+                Ok(true)
+            })?;
         if promoted.is_empty() {
             println!("Nothing to promote to revision {}", revision.short());
         }

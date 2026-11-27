@@ -261,6 +261,26 @@ Rules:
 - **Every statement fires an event** with its subject, kind, verdict and
   issuer (see [Events](#events)).
 
+A change that waits keeps the whole stack waiting, so a retry lands the rest
+once that change can land. Landing another target works the same way, with
+the source's tip merged from the newest acceptances both targets' histories
+share, and the requirements applying to the merged snapshot.
+- The statement a conflict issues lists the paths both sides changed. The
+  change waits until a new revision of it merges.
+- The submitter must have write access to every path the landing changes on
+  the target, whatever it lands, so landing a revision made on an old
+  acceptance, or another target, never reverts or deletes what they may not
+  change.
+- On `policy`, the policy is that of the acceptance before, never the one
+  landing (`Policy::governing`). Each of the target's requirements needs a
+  claim about the revision that lands. Results about other records with the
+  same input digest are promoted to it first, and a valid promotion claims
+  what its original does, as the original's issuer.
+- Each target's queue lives in `queue/<target id>/`. It holds a `lock`, taken
+  while landing so landings on one target never race, and a file for each
+  waiting landing, `change-<id>` or `target-<target id>`, so waiting landings
+  can be listed and retried.
+
 ### Promotion by input digest
 
 A statement is always pinned to an exact record. Carrying a check result over
@@ -292,8 +312,12 @@ reserved. Promotion happens on demand, never on every snapshot:
 - `POST /promote`;
 - `origin-ci`, before it runs a check.
 
-It copies the latest matching result from each issuer, and only results the
-caller can see.
+It copies the latest matching result from each issuer, unless that issuer
+superseded it, and only results the caller can see, so a promotion never
+copies a result, or its payload, that the caller cannot read. It skips a
+group if the subject already has a result of that kind from that issuer,
+direct or promoted: a result that ran on the subject wins. A statement has no
+snapshot, so nothing is promoted to one.
 
 A promotion counts as its original: the original's kind, verdict and issuer
 are what policy checks. A result that ran there wins: once the record has a
