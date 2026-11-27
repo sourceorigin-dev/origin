@@ -185,8 +185,9 @@ impl BenchGit {
         Ok(())
     }
 
-    /// A git identity, and no user git configuration (hooks, fsmonitor)
-    /// skewing results. Origin's identity is in its configuration directory.
+    /// Environment variables that set a git identity and disable the user's
+    /// git configuration (hooks, fsmonitor), which would skew the results.
+    /// Origin's identity comes from its configuration directory.
     fn environment() -> impl Iterator<Item = (&'static str, &'static str)> {
         iter::empty()
             .chain([
@@ -243,8 +244,8 @@ struct Bench {
 }
 
 impl Bench {
-    /// `path` as one `sh` word, whatever it holds: single-quoted, with each
-    /// `'` closing the quote, escaped, and reopening it.
+    /// Quotes `path` as one `sh` word: wraps it in single quotes, writing
+    /// each `'` inside it as `'\''`.
     fn quote(path: &Path) -> String {
         format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
     }

@@ -1,23 +1,25 @@
-//! Deterministic synthetic working trees, for benchmarks and tests. The same
-//! shape always produces byte-identical files, so results are comparable
-//! across runs and machines.
+//! Deterministic synthetic working trees for benchmarks and tests. The
+//! same shape always produces byte-identical files, so results are
+//! comparable across runs and machines.
 //!
-//! Behind the `fixture` feature, so the `origin` binary never contains them.
+//! Only built with the `fixture` feature, so the `origin` binary doesn't
+//! include it.
 
 use std::fmt::Write as _;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// The shape of a synthetic tree: `files` files of about `file_size` bytes,
-/// `files_per_dir` per directory, in directories nested two levels deep.
+/// The shape of a synthetic tree: `files` files of about `file_size`
+/// bytes each, `files_per_dir` per directory, in directories nested two
+/// levels deep.
 #[derive(Clone, Copy, Debug)]
 pub struct FixtureTree {
-    /// Number of files.
+    /// The number of files.
     pub files: usize,
-    /// Files in each directory.
+    /// The number of files in each directory.
     pub files_per_dir: usize,
-    /// Approximate size of each file in bytes.
+    /// The approximate size of each file, in bytes.
     pub file_size: usize,
 }
 
@@ -38,7 +40,8 @@ impl FixtureTree {
         self.dir(root, index).join(format!("file{index}.rs"))
     }
 
-    /// Source-code-like content: unique per file and per `version`.
+    /// Returns source-code-like content for file `index`, different for each
+    /// file and each `version`.
     #[expect(clippy::expect_used, reason = "Writing to a String cannot fail.")]
     fn content(&self, index: usize, version: u64) -> String {
         let mut state = (index as u64 + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ version;
@@ -75,8 +78,8 @@ impl FixtureTree {
         Ok(())
     }
 
-    /// Rewrites `count` files spread across the tree with new content,
-    /// numbered by `version` so successive edits differ.
+    /// Rewrites `count` files, spread across the tree, with new content for
+    /// `version`, so successive edits differ.
     ///
     /// # Errors
     ///

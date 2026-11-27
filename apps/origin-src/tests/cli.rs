@@ -358,7 +358,7 @@ fn abandoning_the_current_change_restores_its_base() {
     assert!(show.contains("+cache\n"), "the attempt is kept: {show}");
 }
 
-/// The working copy's revision, in full.
+/// The working copy's full revision id.
 fn revision_of(repo: &Repo) -> RevisionId {
     repo.revision().parse().unwrap()
 }
@@ -641,7 +641,7 @@ fn a_closed_output_pipe_ends_quietly() {
     assert_eq!(String::from_utf8_lossy(&output.stderr), "");
 }
 
-/// The id of the statement an `annotate` issued, as it prints it.
+/// The id of the statement an `annotate` issued, parsed from its output.
 fn issued(output: &str) -> String {
     let rest = output.split("statement ").nth(1).unwrap();
     rest.split(':').next().unwrap().to_owned()

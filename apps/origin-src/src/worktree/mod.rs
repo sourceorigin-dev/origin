@@ -35,15 +35,15 @@ use parking_lot::Mutex;
 use crate::store::{Store, StoreError};
 use crate::tree::FileChange;
 
-/// File metadata that changes whenever the content might have.
+/// File metadata that changes whenever the content might have changed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Stat {
     kind: EntryKind,
     size: u64,
-    /// Modification time in nanoseconds since the Unix epoch. Tools can set
-    /// it back, so it does not prove a file is unchanged on its own.
+    /// Modification time, in nanoseconds since the Unix epoch. Tools can set
+    /// it back, so on its own it doesn't prove a file is unchanged.
     mtime: i64,
-    /// Status change time in nanoseconds since the Unix epoch. Every write
+    /// Status change time, in nanoseconds since the Unix epoch. Every write
     /// moves it forward, and nothing can set it back.
     ctime: i64,
     inode: u64,
@@ -116,36 +116,38 @@ struct Write {
     seen: Option<Seen>,
 }
 
-/// The stat cache: what each file looked like when it was last hashed, and
-/// the snapshot those files made.
+/// The stat cache: each file's metadata when it was last hashed, and the
+/// root tree of that snapshot.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StatCache {
     /// When the scan that produced the cache started, in nanoseconds since
     /// the Unix epoch.
     scanned_at: i64,
-    /// The root tree of that scan. A scan that finds the same files, all
-    /// vouched for by the cache, finds this tree without building it.
+    /// The root tree of that scan. A later scan that finds the same files,
+    /// all vouched for by the cache, reuses this tree instead of building
+    /// it.
     root: Option<TreeId>,
-    /// Keyed by path. Paths are only looked up, never turned into trees, so
-    /// they are not validated when loaded.
+    /// Each file's metadata and object id, by path. Paths are not validated
+    /// when loaded, since they are only looked up.
     files: HashMap<String, (Stat, ObjectId)>,
 }
 
 impl StatCache {
-    /// Identifies the binary format.
+    /// Identifies the cache's binary format.
     const MAGIC: &[u8; 4] = b"OST3";
 
-    /// How long before a scan a file must have been modified for its cache
-    /// entry to be trusted, in nanoseconds. Filesystems record modification
-    /// times in ticks of up to 2 seconds (FAT), and a file edited again
-    /// within the tick of its last modification keeps the same metadata.
+    /// How long before a scan a file must have last changed for its cache
+    /// entry to be trusted, in nanoseconds. Some filesystems (FAT) record
+    /// times in 2-second ticks, so a file edited again within the same tick
+    /// keeps the same metadata.
     const RACY_MARGIN: i64 = 2_000_000_000;
 
-    /// Looks up a file whose metadata has not changed.
+    /// Returns the cached id of the file at `path` if its metadata still
+    /// matches `stat`.
     ///
-    /// Files modified shortly before the previous scan started ("racy"
-    /// files) are never trusted, since they may have changed again without
-    /// their metadata changing. They are rehashed until they settle.
+    /// A file that changed shortly before the cached scan started is never
+    /// trusted: it may have changed again without its metadata changing.
+    /// Such "racy" files are rehashed until they settle.
     fn get(&self, path: &str, stat: &Stat) -> Option<ObjectId> {
         let (cached, id) = self.files.get(path)?;
         (cached == stat && self.settled(stat)).then_some(*id)
@@ -157,8 +159,8 @@ impl StatCache {
         stat.mtime.max(stat.ctime) < self.scanned_at.saturating_sub(Self::RACY_MARGIN)
     }
 
-    /// Loads the cache, treating a missing or unreadable one as empty: the
-    /// cache only saves work, so the next scan just rehashes everything.
+    /// Loads the cache from `path`. A missing or unreadable cache loads as
+    /// empty, which only means the next scan rehashes every file.
     #[must_use]
     pub fn load(path: &Path) -> Self {
         fs::read(path)
@@ -167,8 +169,8 @@ impl StatCache {
             .unwrap_or_default()
     }
 
-    /// Saves the cache atomically, but not durably: losing it only costs
-    /// rehashing. Every object it names is already durable.
+    /// Saves the cache to `path` atomically, but not durably: losing it
+    /// only costs rehashing. Every object it names is already durable.
     ///
     /// # Errors
     ///
@@ -179,9 +181,9 @@ impl StatCache {
         fs::rename(temp, path)
     }
 
-    /// `magic scanned_at:i64 has_root:u8 [root:[u8; 32]]` then, per file,
-    /// `path_len:u32 path kind:u8 size:u64 mtime:i64 ctime:i64 inode:u64
-    /// id:[u8; 32]`.
+    /// Encodes the cache as `magic scanned_at:i64 has_root:u8
+    /// [root:[u8; 32]]`, then, for each file, `path_len:u32 path kind:u8
+    /// size:u64 mtime:i64 ctime:i64 inode:u64 id:[u8; 32]`.
     #[expect(clippy::expect_used, reason = "Paths are shorter than 4 GiB.")]
     fn encode(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(48 + self.files.len() * 96);
@@ -208,7 +210,7 @@ impl StatCache {
         out
     }
 
-    /// Reads what [`StatCache::encode`] wrote.
+    /// Decodes what [`StatCache::encode`] wrote.
     fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
         let mut reader = Reader::new(bytes);
         if reader.take(Self::MAGIC.len())? != Self::MAGIC {
@@ -247,7 +249,7 @@ impl StatCache {
 
 /// Everything the walk found.
 struct Walk {
-    /// Every directory, root first, each depth after the previous one.
+    /// Every directory, root first, ordered by depth.
     dirs: Vec<FoundDir>,
     /// The range of `dirs` at each depth.
     depths: Vec<Range<usize>>,
@@ -261,13 +263,14 @@ struct FoundDir {
     entries: Vec<(EntryName, Child)>,
 }
 
-/// An entry of a [`FoundDir`], indexing the walk's directories or files.
+/// An entry of a [`FoundDir`]: an index into the walk's directories or
+/// files.
 enum Child {
     Dir(usize),
     File(usize),
 }
 
-/// What listing a directory says an entry is.
+/// What a directory listing says an entry is.
 enum Listed {
     Dir,
     File,
@@ -283,43 +286,46 @@ struct FoundFile {
 struct Examined {
     stat: Stat,
     id: ObjectId,
-    /// The file's blob, if it had to be read because the cache could not
-    /// vouch for it.
+    /// The file's blob, if the file had to be read because the cache could
+    /// not vouch for it.
     blob: Option<EncodedObject>,
 }
 
-/// The files of the working copy rooted at `root`, whose snapshots go to
-/// `store`.
+/// The files of the working copy rooted at `root`. Snapshots are written
+/// to `store`.
 pub struct Worktree<'a, P> {
     root: &'a Path,
     store: &'a Store<P>,
 }
 
 impl<'a, P: Platform> Worktree<'a, P> {
-    /// Below this many items, threads cost more than they save.
+    /// Below this many items, work runs on one thread, since threads would
+    /// cost more than they save.
     const PARALLEL_THRESHOLD: usize = 64;
 
     /// From this many files on, a checkout syncs the first half of them while
     /// it writes the second half.
     const EARLY_SYNC: usize = 1024;
 
-    /// The working copy rooted at `root`.
+    /// Returns the working copy rooted at `root`, storing snapshots in
+    /// `store`.
     #[must_use]
     pub fn new(root: &'a Path, store: &'a Store<P>) -> Self {
         Self { root, store }
     }
 
-    /// Records every file into the store and returns the root tree, with the
+    /// Snapshots every file into the store. Returns the root tree, and the
     /// updated stat cache if it changed.
     ///
-    /// Three phases, each parallel: list directories one depth at a time,
+    /// It runs three parallel phases: list directories one depth at a time;
     /// examine every file (one `lstat`, plus reading and hashing the files
-    /// the cache cannot vouch for), and build trees one depth at a time from
-    /// the deepest. Then the new blobs and trees are written in one batch.
-    /// A tree may be published before a blob it names, if a crash cuts the
-    /// batch short, but nothing refers to the tree until the batch commits,
-    /// and the next snapshot rewrites the blob: the stat cache that would
-    /// vouch for it is only saved after the commit.
+    /// the cache can't vouch for); and build trees one depth at a time,
+    /// deepest first. Then it writes the new blobs and trees in one batch.
+    ///
+    /// If a crash cuts the batch short, a tree may be stored without a blob
+    /// it names. Nothing refers to that tree yet, and the next snapshot
+    /// rewrites the blob, because the updated stat cache is only returned
+    /// once the batch commits.
     ///
     /// # Errors
     ///
@@ -487,8 +493,9 @@ impl<'a, P: Platform> Worktree<'a, P> {
         })
     }
 
-    /// Builds a directory's tree, given the trees of every deeper directory.
-    /// Returns `None` for a directory without files, which is not tracked.
+    /// Builds a directory's tree from the already built trees of its
+    /// subdirectories. Returns `None` for a directory with no files, which
+    /// is not tracked.
     fn build_tree(
         dir: &FoundDir,
         trees: &[Option<TreeId>],
@@ -837,9 +844,9 @@ impl<'a, P: Platform> Worktree<'a, P> {
         fs::set_permissions(path, fs::Permissions::from_mode(mode))
     }
 
-    /// Maps `items` in order, on as many threads as there are cores when
-    /// there are enough items. Threads take the next item as they finish
-    /// one, since some files take much longer than others.
+    /// Maps `items` in order, on one thread per core when there are at least
+    /// `PARALLEL_THRESHOLD` items. Each thread takes the next item when it
+    /// finishes one, since some files take much longer than others.
     fn par_map<T: Sync, R: Send>(
         items: &[T],
         map: impl Fn(&T) -> Result<R, SnapshotError> + Sync,

@@ -22,10 +22,10 @@ use crate::store::StoreError;
 use crate::tree::Snapshots;
 
 impl WorkingCopy {
-    /// The revision `rev` names: `@` for the working copy's own, or by a
-    /// unique prefix of its id, a change for its head, or a revision. A
-    /// prefix naming a change and another revision than its head is
-    /// ambiguous.
+    /// Finds the revision `rev` names. `@` is the working copy's revision.
+    /// Otherwise `rev` is a unique prefix of a change's id, naming its head,
+    /// or of a revision's id. A prefix that names both a change and a
+    /// revision other than its head is ambiguous.
     fn find_revision(&self, rev: &str) -> Result<RevisionId, WorkspaceError> {
         if rev == "@" {
             return Ok(self.id);
@@ -45,8 +45,9 @@ impl WorkingCopy {
         }
     }
 
-    /// The record `annotated` names, as [`WorkingCopy::find_revision`]
-    /// finds a revision, or a statement by a unique prefix of its id.
+    /// Finds the record `annotated` names: a revision, as
+    /// [`WorkingCopy::find_revision`] finds it, or a statement by a unique
+    /// prefix of its id.
     fn find_record(&self, annotated: Annotated<'_>) -> Result<RecordId, WorkspaceError> {
         Ok(match annotated {
             Annotated::Revision(rev) => RecordId::Revision(self.find_revision(rev)?),
@@ -55,7 +56,7 @@ impl WorkingCopy {
     }
 }
 
-/// What a statement is about, as the command line names it.
+/// What a statement is about, as named on the command line.
 #[derive(Clone, Copy, Debug)]
 pub enum Annotated<'a> {
     /// A revision: `@`, a change for its head, or a revision.
@@ -69,7 +70,7 @@ pub enum Annotated<'a> {
 pub enum Payload {
     /// Text given inline, such as a review's message.
     Text(String),
-    /// A file's content, such as a log: standard input's for `-`.
+    /// The content of a file, such as a log, or of standard input for `-`.
     File(PathBuf),
 }
 
@@ -93,7 +94,8 @@ impl Payload {
 }
 
 impl Workspace {
-    /// This node, which issues the statements core makes.
+    /// Returns this node as a principal. The node issues the statements
+    /// origin makes itself, such as `core.divergent`.
     pub(super) fn node_principal(&self) -> Principal {
         Principal::Node(self.config.node().clone())
     }
@@ -191,9 +193,9 @@ impl Workspace {
         Ok(())
     }
 
-    /// Why the user has no `kind` statement about `subject` to withdraw:
-    /// none holds there, or about a revision, only a promotion of one of
-    /// theirs about another revision, which is where they withdraw it.
+    /// Builds the error for a withdrawal that found nothing to withdraw. If
+    /// the subject is a revision holding a promotion of the user's `kind`
+    /// statement from another revision, the error says to withdraw it there.
     ///
     /// # Errors
     ///
@@ -231,9 +233,9 @@ impl Workspace {
         })
     }
 
-    /// `origin statements [<rev>]`: prints the statements about a revision,
-    /// the working copy by default, in the order they arrived, each with the
-    /// statements about it indented under it.
+    /// `origin statements [<rev>]`: prints the statements about a revision
+    /// in the order they arrived. Each is followed by the statements about
+    /// it, indented.
     ///
     /// # Errors
     ///

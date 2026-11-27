@@ -51,7 +51,7 @@ pub(crate) fn debug_keys<K: std::fmt::Debug>(
     f.debug_list().entries(secrets.keys()).finish()
 }
 
-/// `config.toml`.
+/// The contents of `config.toml`.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ConfigFile {
@@ -233,9 +233,9 @@ impl KeyFile {
         Ok(NodeKey::from_bytes(&secret))
     }
 
-    /// Generates a key and saves it: written and synced under a temporary
-    /// name, then linked into place, which fails if another process saved
-    /// one first. That one is used instead.
+    /// Generates a key and saves it. The key is written and synced under a
+    /// temporary name, then linked into place. If another process saved a
+    /// key first, the link fails and that key is returned instead.
     fn create(&self) -> Result<NodeKey, ConfigError> {
         let io_error = |path: &Path| {
             let path = path.to_owned();
@@ -322,7 +322,7 @@ pub enum ConfigError {
     /// A key file doesn't hold a valid key.
     #[error("{} is not a node key", .0.display())]
     MalformedKey(PathBuf),
-    /// The operating system has no randomness to generate a key with.
+    /// The operating system cannot supply randomness to generate a key.
     #[error("cannot generate a node key")]
     Random(#[source] getrandom::Error),
 }

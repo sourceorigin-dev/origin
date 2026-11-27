@@ -1,4 +1,5 @@
-//! How commands present what they print.
+//! Helpers for what commands print: file diffs, and exiting quietly when
+//! standard output is closed.
 
 use std::fmt;
 use std::io;
@@ -12,15 +13,15 @@ use similar::TextDiff;
 use crate::store::{Store, StoreError};
 use crate::tree::FileChange;
 
-/// `EPIPE`: writing to a pipe whose reader closed it. It is 32 on every
-/// platform origin supports.
+/// The `EPIPE` error code, returned when writing to a pipe whose reader
+/// closed it. It is 32 on every platform origin supports.
 const EPIPE: i32 = 32;
 
-/// Makes the process exit quietly, and successfully, once the reader of its
-/// standard output closes it, as in `origin log | head`. Rust ignores
-/// `SIGPIPE`, so `println!` panics instead, and every command prints with
-/// it. Records are written to survive a crash, so stopping mid-command
-/// leaves the repository as a kill would. Other panics report as usual.
+/// Makes the process exit quietly, with success, when the reader of its
+/// standard output closes it, as in `origin log | head`. Without this,
+/// `println!` panics, because Rust ignores `SIGPIPE`. Records are written
+/// to survive a crash, so exiting mid-command is safe. Other panics are
+/// reported as usual.
 pub fn exit_quietly_on_broken_pipe() {
     let report = panic::take_hook();
     let broken = format!(
@@ -43,7 +44,7 @@ pub struct FileDiff<'a> {
 }
 
 impl<'a> FileDiff<'a> {
-    /// Reads both sides of a change.
+    /// Reads both sides of `change`.
     ///
     /// # Errors
     ///
@@ -67,8 +68,8 @@ impl<'a> FileDiff<'a> {
         })
     }
 
-    /// The content as text, or `None` if it is binary: not valid UTF-8, or
-    /// holding a NUL byte, which text never contains.
+    /// Returns the content as text, or `None` if it is binary: not valid
+    /// UTF-8, or containing a NUL byte.
     fn text(content: &[u8]) -> Option<&str> {
         str::from_utf8(content)
             .ok()
