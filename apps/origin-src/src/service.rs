@@ -106,6 +106,15 @@ impl OriginService {
         }
     }
 
+    /// Returns the service, answering fetches in parts of at most `limit` bytes.
+    #[cfg(test)]
+    pub(crate) fn with_pack_limit(self, limit: usize) -> Self {
+        Self {
+            pack_limit: limit,
+            ..self
+        }
+    }
+
     /// Returns the service with `index`, just read, as its open index.
     #[must_use]
     pub fn with_index(self, index: Index) -> Self {
@@ -395,7 +404,7 @@ impl OriginService {
             let decoded = object
                 .decode()
                 .map_err(|source| ServiceError::Malformed { id, source })?;
-            for (needed, kind) in Dependencies::of(&decoded) {
+            for (needed, kind) in Dependencies::of(&decoded).all() {
                 match held.get(&needed) {
                     Some(&held) if held != Some(kind) => {
                         return Err(ServiceError::WrongKind { id, needed, kind });
@@ -793,36 +802,49 @@ impl Drop for Taken<'_> {
 }
 
 /// What an object needs the repository to have to be usable, as
-/// [`OriginService::put_records`] lists, and the kind each must be. A
-/// revision's predecessors and a statement's payload are not needed: they are
-/// history and detail, and retention may have dropped a payload.
-struct Dependencies;
+/// [`OriginService::put_records`] lists, and the kind each must be: the records
+/// it refers to, and its content (trees and blobs). A revision's predecessors
+/// and a statement's payload are not needed: they are history and detail, and
+/// retention may have dropped a payload. An acceptance needs nothing here: its
+/// chain brings what it refers to.
+#[derive(Debug, Default)]
+pub(crate) struct Dependencies {
+    /// Revisions, statements and acceptances.
+    pub records: Vec<(ObjectId, ObjectKind)>,
+    /// Trees and blobs.
+    pub content: Vec<(ObjectId, ObjectKind)>,
+}
 
 impl Dependencies {
-    fn of(object: &Object) -> Vec<(ObjectId, ObjectKind)> {
+    pub(crate) fn of(object: &Object) -> Self {
         match object {
-            Object::Blob(_) | Object::Acceptance(_) => Vec::new(),
-            Object::Tree(tree) => tree
-                .iter()
-                .map(|(_, entry)| (entry.id, entry.kind.object_kind()))
-                .collect(),
+            Object::Blob(_) | Object::Acceptance(_) => Self::default(),
+            Object::Tree(tree) => Self {
+                records: Vec::new(),
+                content: tree
+                    .iter()
+                    .map(|(_, entry)| (entry.id, entry.kind.object_kind()))
+                    .collect(),
+            },
             Object::Revision(revision) => {
                 let base = match revision.base {
                     Base::Acceptance(id) => (id.into(), ObjectKind::Acceptance),
                     Base::Revision(id) => (id.into(), ObjectKind::Revision),
                 };
-                let mut needed = vec![
-                    (revision.snapshot.into(), ObjectKind::Tree),
-                    (revision.description.into(), ObjectKind::Blob),
-                    base,
-                ];
-                needed.extend(
+                let mut records = vec![base];
+                records.extend(
                     revision
                         .deps
                         .iter()
                         .map(|&id| (id.into(), ObjectKind::Revision)),
                 );
-                needed
+                Self {
+                    records,
+                    content: vec![
+                        (revision.snapshot.into(), ObjectKind::Tree),
+                        (revision.description.into(), ObjectKind::Blob),
+                    ],
+                }
             }
             Object::Statement(statement) => Self::of_statement(statement),
         }
@@ -830,16 +852,25 @@ impl Dependencies {
 
     /// Returns what a statement needs: its subject, and the statements it
     /// supersedes or promotes.
-    fn of_statement(statement: &Statement) -> Vec<(ObjectId, ObjectKind)> {
+    pub(crate) fn of_statement(statement: &Statement) -> Self {
+        let mut dependencies = Self::default();
         let subject = (statement.subject.into(), statement.subject.kind());
-        [Some(subject)]
-            .into_iter()
-            .chain(
-                [statement.supersedes, statement.promoted_from]
-                    .map(|id| id.map(|id| (id.into(), ObjectKind::Statement))),
-            )
-            .flatten()
-            .collect()
+        match statement.subject {
+            RecordId::Snapshot(_) => dependencies.content.push(subject),
+            _ => dependencies.records.push(subject),
+        }
+        dependencies.records.extend(
+            [statement.supersedes, statement.promoted_from]
+                .into_iter()
+                .flatten()
+                .map(|id| (id.into(), ObjectKind::Statement)),
+        );
+        dependencies
+    }
+
+    /// Returns every object needed, and the kind it must be.
+    pub(crate) fn all(&self) -> impl Iterator<Item = (ObjectId, ObjectKind)> {
+        self.records.iter().chain(&self.content).copied()
     }
 }
 
