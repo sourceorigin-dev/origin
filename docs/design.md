@@ -695,6 +695,46 @@ revision whose abandonment, or a result whose replacement, is still to come.
 
 ## Workspaces and platform code
 
+A repository can have several working copies, called workspaces, that share its
+store and op log. The main working copy's `.origin` holds the store. The others'
+`.origin` holds only `workspace`, `state`, `moving`, `lock`, and a `repository`
+file that names the main one's `.origin`. The main working copy's
+`.origin/workspaces/` holds a file for each other workspace, named by the hash
+of its root and containing that root. Records never change, and only target
+chains, the index and each working copy are locked, so commands run at the same
+time in different workspaces. In one workspace, each command waits for the
+previous one to finish, except `watch`, which never touches the working copy,
+and `workspace rm`, which opens the workspace it removes.
+
+Creating a workspace registers it and checks out its files, and only then
+writes its `.origin/workspace`. So a crash never leaves partial files that a
+command would record, only a workspace that `origin workspace rm` removes.
+Removing a workspace records its draft first, so its work stays a revision of
+its change.
+
+The working copy is always on a revision of the current change. Every command
+that reads the working copy snapshots its files first. The files it finds are
+the draft. Commands that only read the working copy show the draft without
+recording it. Commands that build on the working copy record the draft first: if
+the files changed, they become a new revision of the change.
+
+Records are written before anything refers to them: the snapshot's objects,
+then the revision, then the `workspace` file that names it. The statements a new
+revision needs, such as its unresolved conflicts, are written before the
+revision, so it is never found without them.
+
+A command that moves the working copy to another revision, such as a merge,
+checks out the files before it writes the revision. If a file was edited since
+the snapshot, the checkout fails and puts back the files it changed. The working
+copy and its change stay where they were, so the command can run again.
+
+Every move of the working copy is logged in the op log, in an entry made durable
+together with the `workspace` file that names the new revision. A move that
+changes files first writes `moving`, which names the files it starts from, the
+files it goes to, and their revision. If a crash cuts the move short, the next
+command to open the workspace finishes it, or takes it back if the revision
+wasn't written.
+
 `origin workspace new [--change X] [path]` creates a workspace that shares
 the repository's store:
 - Each workspace has its own current change and stat cache.

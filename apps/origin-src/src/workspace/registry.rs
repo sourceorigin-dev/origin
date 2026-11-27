@@ -2,15 +2,10 @@
 //! git worktrees. Each has its own current change and stat cache.
 //!
 //! The main working copy's `.origin/workspaces/` holds a file for each other
-//! workspace, named by the hash of its root and containing that root. Records
-//! never change, and only target chains and the index are locked, so commands
-//! run at the same time in different workspaces.
-//!
-//! Creating a workspace registers it and checks out its files, and only then
-//! writes its `.origin/workspace`. So a crash never leaves partial files that a
-//! command would record, only a workspace that `origin workspace rm` removes.
-//! Removing a workspace records its draft first, so its work stays a revision
-//! of its change.
+//! workspace, named by the hash of its root and containing that root. Creating
+//! one registers it, checks out its files, and only then writes its
+//! `.origin/workspace`, so a crash leaves only a workspace that `origin
+//! workspace rm` removes, which records its draft first.
 
 use std::ffi::OsStr;
 use std::fs;
@@ -114,7 +109,8 @@ impl Workspace {
     /// Fails if `path` is the main working copy or isn't a workspace, if the
     /// workspace is behind its change and has edits, which no revision would then
     /// hold, or if it cannot be snapshotted or deleted.
-    pub fn remove_workspace(&self, path: &Path) -> Result<(), WorkspaceError> {
+    pub fn remove_workspace(&mut self, path: &Path) -> Result<(), WorkspaceError> {
+        self.lock = None;
         let root = Self::canonical(path)?;
         if root == self.main_root() {
             return Err(WorkspaceError::RemoveMain(root));
