@@ -1333,13 +1333,13 @@ fn landings_wait_for_the_evidence_policy_requires() {
         "{waiting}"
     );
     assert_eq!(repo.ok(&["land", "--status"]), waiting);
-    // A result withdrawn is no evidence.
-    repo.ok(&["annotate", "@", "ci.test", "--pass", "--inputs", "src"]);
+    repo.ok(&["annotate", "@", "ci.test", "--fail", "--inputs", "src"]);
     repo.ok(&["annotate", "@", "ci.test", "--withdraw"]);
-    assert_eq!(repo.ok(&["land"]), waiting);
+    assert_eq!(repo.ok(&["land", "--status"]), waiting);
     repo.ok(&["annotate", "@", "ci.test", "--pass", "--inputs", "src"]);
-    assert!(repo.ok(&["land"]).contains(" on main #1\n"));
     assert_eq!(repo.ok(&["land", "--status"]), "No landing waits.\n");
+    assert!(repo.ok(&["log", "main"]).contains("main #1 "));
+    repo.ok(&["pull"]);
 
     // Only the authority lands: here, after a policy edit hands `main` to
     // another node.

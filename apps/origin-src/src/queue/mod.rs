@@ -1,12 +1,54 @@
 //! The landing queue: how a target's authority lands changes and other
 //! targets on the target, one acceptance at a time.
 //!
-//! Landing a change lands its stack, bottom up, one acceptance per revision
-//! the target lacks. Each revision is rebased or merged onto the target's tip
-//! and checked against the target's policy and evidence, then signed into an
-//! acceptance, or left waiting. Each target's queue lives in
-//! `queue/<target id>/`: a `lock`, and a file per waiting landing,
-//! `change-<id>` or `target-<target id>`.
+//! Landing a change lands its stack: the head of each change below it that
+//! the target does not have yet, from the bottom up, each with its own
+//! acceptance. A change that is divergent, abandoned by its creator, or
+//! whose head has unresolved conflicts (see [`conflict`](crate::conflict))
+//! is refused. If a change waits, the queue keeps the whole stack waiting,
+//! so a retry lands the rest once that change can land. For each revision:
+//!
+//! 1. **Rebase.** The changes the revision made to its base are merged onto
+//!    the target's tip, file by file ([`Store::merge`]). A revision made on
+//!    the tip lands as it is; this node rebases any other into a new
+//!    revision of its change, on the tip. If the merge would leave the
+//!    target unchanged, nothing lands: the target already has the change.
+//! 2. **Conflicts.** If both sides changed a path, a `core.conflict`
+//!    statement about the revision lists the paths, and the change waits
+//!    until a new revision of it merges.
+//! 3. **Policy.** The policy in force must name this node as the target's
+//!    authority. The submitter must also have write access to every path
+//!    the landing changes on the target, whatever it lands, so landing a
+//!    revision made on an old acceptance, or another target, never reverts
+//!    or deletes what they may not change. On `policy`, the policy is that
+//!    of the acceptance before, never the one landing
+//!    ([`Policy::governing`]). Each of the target's requirements needs a
+//!    [claim](crate::annotations::Claim) about the revision that lands.
+//!    Results about the target's revisions with the same input digest are
+//!    promoted to it first, and a valid promotion claims what its original
+//!    does, as the original's issuer.
+//! 4. **Missing evidence.** The landing waits until the statements are
+//!    issued and the landing is retried. It is retried for its submitter,
+//!    under the policy in force then. The [service](crate::service) retries
+//!    it whenever statements about its subject arrive.
+//! 5. **Otherwise** this node signs an acceptance naming what landed, the
+//!    evidence and the policy, and appends it to the target's chain.
+//!
+//! Landing another target works the same way. The source's tip is merged
+//! from the newest acceptances both targets' histories share, and the
+//! requirements apply to the merge: a revision this node makes on the
+//! target's tip, as for a rebase. So results about the same merge on
+//! another target, whose checks may differ, never count here. If the merge
+//! changes nothing and either tip is in the other's history, nothing lands:
+//! the target already has the source's tip, or the source has nothing new.
+//! Otherwise even a merge that changes nothing lands, with no evidence
+//! needed, so that the target's history records the source's tip and later
+//! merges start from it.
+//!
+//! Each target's queue lives in `queue/<target id>/`. It holds a `lock`,
+//! taken while landing so landings on one target never race, and a file for
+//! each waiting landing, `change-<id>` or `target-<target id>`, which names
+//! its submitter, so waiting landings can be listed and retried.
 
 mod pending;
 mod session;
@@ -16,7 +58,7 @@ use std::io;
 use std::path::PathBuf;
 
 use origin_platform::{DurableWrite, LockMode, LockedFile, Native, Platform};
-use origin_shared::access::{Level, PathAccess};
+use origin_shared::access::{Level, PathAccess, Token};
 use origin_shared::landing::{Blocked, Landing, Pending, Proposal};
 use origin_shared::{
     AcceptanceBody, AcceptanceId, Base, ChangeId, Digest, EncodedObject, Head, NodeKey, Principal,
@@ -26,7 +68,7 @@ use origin_shared::{
 
 use crate::annotations::{AnnotateError, Annotations};
 use crate::conflict::Conflicts;
-use crate::permissions::Forbidden;
+use crate::permissions::{Caller, Forbidden};
 use crate::policy::{Policy, PolicyError};
 use crate::store::{Store, StoreError};
 
@@ -39,8 +81,19 @@ pub struct Queue<'a, P = Native> {
     store: &'a Store<P>,
     key: &'a NodeKey,
     node: PrincipalName,
+    /// Who submits the landings. A waiting landing is retried for them.
+    submitter: Caller,
     /// What the submitter may do with each path.
-    submitter: PathAccess,
+    paths: PathAccess,
+}
+
+/// A landing that waits, and who submitted it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Waiting {
+    /// The landing.
+    pub pending: Pending,
+    /// Its submitter, whose rights apply when it is retried.
+    pub submitter: Caller,
 }
 
 impl<'a, P: Platform> Queue<'a, P> {
@@ -51,16 +104,18 @@ impl<'a, P: Platform> Queue<'a, P> {
             store,
             key,
             node,
-            submitter: PathAccess::uniform(Level::Write),
+            submitter: Caller::Owner,
+            paths: PathAccess::uniform(Level::Write),
         }
     }
 
-    /// Returns these queues, landing for a submitter whose path access is
-    /// `paths`. By default the submitter may do everything.
+    /// Returns these queues, landing for `submitter`, whose path access is
+    /// `paths`. By default the submitter is the owner, who may do everything.
     #[must_use]
-    pub fn submitted_by(self, paths: PathAccess) -> Self {
+    pub fn submitted_by(self, submitter: Caller, paths: PathAccess) -> Self {
         Self {
-            submitter: paths,
+            submitter,
+            paths,
             ..self
         }
     }
@@ -259,9 +314,21 @@ impl<'a, P: Platform> Queue<'a, P> {
     ///
     /// # Errors
     ///
+    /// Fails like [`Queue::waiting`].
+    pub fn pending(store: &Store<P>) -> Result<Vec<Pending>, StoreError> {
+        Ok(Self::waiting(store)?
+            .into_iter()
+            .map(|waiting| waiting.pending)
+            .collect())
+    }
+
+    /// Returns every waiting landing with its submitter, sorted by target.
+    ///
+    /// # Errors
+    ///
     /// Fails if the queues cannot be listed, or if a landing cannot be read or
     /// is malformed.
-    pub fn pending(store: &Store<P>) -> Result<Vec<Pending>, StoreError> {
+    pub fn waiting(store: &Store<P>) -> Result<Vec<Waiting>, StoreError> {
         let root = store.queue_dir();
         let list = |dir: &PathBuf| match fs::read_dir(dir) {
             Ok(entries) => entries
@@ -284,15 +351,15 @@ impl<'a, P: Platform> Queue<'a, P> {
                     Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
                     Err(source) => return Err(StoreError::io(&path, source)),
                 };
-                let mut landing = PendingFile::decode(&text)
+                let mut waiting = PendingFile::decode(&text)
                     .ok_or_else(|| StoreError::Malformed(path.clone()))?;
-                if let Blocked::Conflict { statement, paths } = &mut landing.blocked {
+                if let Blocked::Conflict { statement, paths } = &mut waiting.pending.blocked {
                     *paths = Conflicts::listed(store, &store.get(*statement)?)?.paths();
                 }
-                pending.push(landing);
+                pending.push(waiting);
             }
         }
-        pending.sort_by(|a, b| a.onto.cmp(&b.onto));
+        pending.sort_by(|a, b| a.pending.onto.cmp(&b.pending.onto));
         Ok(pending)
     }
 
@@ -364,6 +431,13 @@ impl<'a, P: Platform> Queue<'a, P> {
         onto: &TargetName,
     ) -> Result<Session<'q, 'a, P>, LandError> {
         let lock = self.lock(onto)?;
+        if self
+            .submitter
+            .expires()
+            .is_some_and(|expires| expires <= Token::now())
+        {
+            return Err(Forbidden::Expired.into());
+        }
         annotations.refresh()?;
         let tip = self
             .store

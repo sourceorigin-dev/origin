@@ -510,7 +510,10 @@ impl Token {
         }
     }
 
-    fn now() -> u64 {
+    /// Returns the current time in seconds since the Unix epoch, the unit
+    /// expiry times use.
+    #[must_use]
+    pub fn now() -> u64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |since| since.as_secs())

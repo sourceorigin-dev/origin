@@ -236,11 +236,14 @@ impl Repositories {
         permit.ok().and_then(Result::ok)
     }
 
-    /// Opens the repositories at the given paths, served by `node`.
+    /// Opens the repositories at the given paths, served by `node`, and
+    /// retries the landings waiting for evidence in each (see
+    /// [`OriginService::resume_waiting`]).
     ///
     /// # Errors
     ///
-    /// Fails if one has no repository.
+    /// Fails if one has no repository, or its waiting landings cannot be
+    /// read.
     pub fn open(
         repos: BTreeMap<RepoName, PathBuf>,
         node: &Node,
@@ -250,6 +253,9 @@ impl Repositories {
         for (name, path) in repos {
             let service = OriginService::open(path, node.clone())
                 .with_context(|| format!("cannot serve repository `{name}`"))?;
+            service
+                .resume_waiting()
+                .with_context(|| format!("cannot read the landings waiting in `{name}`"))?;
             repositories.insert(name, service);
         }
         Ok(repositories)
