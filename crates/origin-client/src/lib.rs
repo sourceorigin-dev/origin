@@ -18,10 +18,11 @@
 //! The server also describes its API in `docs/openapi.json`, for other
 //! languages.
 
+use origin_shared::access::Rights;
 use origin_shared::api::{
     Annotation, ApiError, EventsQuery, FetchRecords, FetchSnapshot, Inventory, InventoryRequest,
-    LandRequest, Landings, LogEntry, LogQuery, MORE, NewTarget, PutQuery, RepoName, RepoSummary,
-    Revisions, StatementsQuery, Stored, TargetInfo,
+    IssuedToken, LandRequest, Landings, LogEntry, LogQuery, MORE, NewTarget, PutQuery, RepoName,
+    RepoSummary, Revisions, StatementsQuery, Stored, TargetInfo, TokenRequest,
 };
 use origin_shared::event::Page;
 use origin_shared::landing::Pending;
@@ -110,6 +111,11 @@ endpoints! {
         /// Returns the events after a cursor, waiting up to the query's `wait` for
         /// some. Pass the page's `next` as the cursor of the next query.
         fn events(query: &EventsQuery) -> Page = GET "events", query(query) => json;
+        /// Returns who the server thinks the caller is, and what they may do.
+        fn whoami() -> Rights = GET "whoami" => json;
+        /// Issues a token that acts for the caller, with a narrower scope.
+        fn issue_token(request: &TokenRequest) -> IssuedToken =
+            POST "tokens", json(request) => json;
     }
 }
 

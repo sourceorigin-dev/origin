@@ -915,6 +915,7 @@ dependencies = [
  "origin-shared",
  "origin-src",
  "parking_lot",
+ "reqwest",
  "serde",
  "serde_json",
  "similar",

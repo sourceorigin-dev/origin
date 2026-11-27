@@ -11,9 +11,11 @@ use std::path::{self, Path, PathBuf};
 
 use origin_client::Client;
 use origin_shared::Head;
+use origin_shared::access::Rights;
 use origin_shared::api::{
-    ErrorCode, EventsQuery, FetchRecords, FetchSnapshot, Inventory, InventoryRequest, LandRequest,
-    Landings, LogEntry, LogQuery, NewTarget, PutQuery, RepoName, Stored, TargetInfo,
+    ErrorCode, EventsQuery, FetchRecords, FetchSnapshot, Inventory, InventoryRequest, IssuedToken,
+    LandRequest, Landings, LogEntry, LogQuery, NewTarget, PutQuery, RepoName, Stored, TargetInfo,
+    TokenRequest,
 };
 use origin_shared::event::Page;
 use origin_shared::landing::Pending;
@@ -91,6 +93,11 @@ calls! {
     fn create_target(request: &NewTarget) -> Head = create_target(request), create_target(request);
     /// Returns the events after a cursor, waiting for some to arrive.
     fn events(query: &EventsQuery) -> Page = events(query), events(query);
+    /// Returns who the remote thinks the user is, and what they may do there.
+    fn whoami() -> Rights = whoami(), whoami();
+    /// Issues a token acting for the user, with a narrower scope.
+    fn issue_token(request: &TokenRequest) -> IssuedToken =
+        issue_token(request), issue_token(request);
 }
 
 impl Remote {
