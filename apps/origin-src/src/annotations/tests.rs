@@ -10,14 +10,14 @@ use super::*;
 use crate::tree::tests::build;
 
 pub(super) fn store() -> (tempfile::TempDir, Store) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("`tempfile::tempdir()` succeeds");
     let store = Store::new(dir.path().join(".origin"), Native::default());
-    store.init().unwrap();
+    store.init().expect("`init()` succeeds");
     (dir, store)
 }
 
 pub(super) fn principal(name: &str) -> Principal {
-    name.parse().unwrap()
+    name.parse().expect("`parse()` succeeds")
 }
 
 /// Writes a revision of `change` on `main` with `files`, evolving from
@@ -88,13 +88,13 @@ pub(super) fn check(
 ) -> Statement {
     Statement {
         subject: RecordId::Revision(revision),
-        kind: Kind::new(kind).unwrap(),
+        kind: Kind::new(kind).expect("`Kind::new(kind)` succeeds"),
         verdict: Some(verdict),
         issuer: principal(issuer),
         inputs: inputs.map(|(paths, external)| Inputs {
             paths: paths
                 .iter()
-                .map(|path| RepoPath::new(path).unwrap())
+                .map(|path| RepoPath::new(path).expect("`RepoPath::new(path)` succeeds"))
                 .collect(),
             target_paths: Vec::new(),
             definition: Digest::of(kind.as_bytes()),
@@ -110,9 +110,9 @@ pub(super) fn check(
 /// Issues `statement` through a fresh index.
 pub(super) fn issue(store: &Store, statement: &Statement) -> StatementId {
     Annotations::open(store)
-        .unwrap()
+        .expect("`Annotations::open(store)` succeeds")
         .issue(statement, None)
-        .unwrap()
+        .expect("`issue(statement, None)` succeeds")
 }
 
 /// The kinds and originals of what `promote` issues to `revision`.
@@ -140,7 +140,8 @@ fn statements_issued_at_once_supersede_one_another() {
     let rounds = 50;
     for _ in 0..rounds {
         let racers = [Verdict::Pass, Verdict::Fail].map(|verdict| {
-            let annotations = Annotations::open(&store).unwrap();
+            let annotations =
+                Annotations::open(&store).expect("`Annotations::open(&store)` succeeds");
             (
                 annotations,
                 check(revision, "review", verdict, "user:alice", None),
@@ -152,15 +153,17 @@ fn statements_issued_at_once_supersede_one_another() {
                 let barrier = &barrier;
                 scope.spawn(move || {
                     barrier.wait();
-                    annotations.supersede(statement, None).unwrap();
+                    annotations
+                        .supersede(statement, None)
+                        .expect("`supersede(statement, None)` succeeds");
                 });
             }
         });
     }
     let about = Annotations::open(&store)
-        .unwrap()
+        .expect("`Annotations::open(&store)` succeeds")
         .about(RecordId::Revision(revision))
-        .unwrap();
+        .expect("`about(RecordId::Revision(revision))` succeeds");
     assert_eq!(about.len(), 2 * rounds);
     for pair in about.windows(2) {
         assert_eq!(pair[1].statement.supersedes, Some(pair[0].id));
@@ -180,22 +183,24 @@ fn only_the_issuer_supersedes_its_results() {
 
     let mut foreign = check(first, "lint", Verdict::Fail, "node:other", None);
     foreign.supersedes = Some(pass);
-    let annotations = Annotations::open(&store).unwrap();
+    let annotations = Annotations::open(&store).expect("`Annotations::open(&store)` succeeds");
     assert!(matches!(
         annotations.issue(&foreign, None),
         Err(AnnotateError::ForeignSupersession { .. })
     ));
     let written = foreign.encode();
-    store.write_all(std::slice::from_ref(&written)).unwrap();
+    store
+        .write_all(std::slice::from_ref(&written))
+        .expect("`write_all(std::slice::from_ref(&written))` succeeds");
     assert_eq!(
         Annotations::open(&store)
-            .unwrap()
+            .expect("`Annotations::open(&store)` succeeds")
             .current(
                 RecordId::Revision(first),
-                &Kind::new("lint").unwrap(),
+                &Kind::new("lint").expect("`Kind::new()` succeeds"),
                 &principal("node:ci")
             )
-            .unwrap(),
+            .expect("`current()` succeeds"),
         Some(pass),
         "a fetched one stands as a statement of its own"
     );
@@ -204,9 +209,9 @@ fn only_the_issuer_supersedes_its_results() {
     rerun.supersedes = Some(pass);
     let fail = issue(&store, &rerun);
     let about = Annotations::open(&store)
-        .unwrap()
+        .expect("`Annotations::open(&store)` succeeds")
         .about(RecordId::Revision(first))
-        .unwrap();
+        .expect("`about(RecordId::Revision(first))` succeeds");
     assert_eq!(about[0].superseded_by, Some(fail));
     assert_eq!(promote(&store, target), [("lint".to_owned(), Some(fail))]);
 }
@@ -218,25 +223,28 @@ fn flags_each_divergence_once() {
     let first = revision(&store, 1, &[], FILES);
     assert_eq!(
         Annotations::open(&store)
-            .unwrap()
+            .expect("`Annotations::open(&store)` succeeds")
             .flag_divergence(ChangeId::from_bytes([1; 16]), node.clone())
-            .unwrap(),
+            .expect("`flag_divergence` succeeds"),
         None
     );
     let left = revision(&store, 1, &[first], &[("a", "left")]);
     let right = revision(&store, 1, &[first], &[("a", "right")]);
     let flag = || {
         Annotations::open(&store)
-            .unwrap()
+            .expect("`Annotations::open(&store)` succeeds")
             .flag_divergence(ChangeId::from_bytes([1; 16]), node.clone())
-            .unwrap()
-            .unwrap()
+            .expect("`flag_divergence` succeeds")
+            .expect("the divergence is flagged")
     };
     let flagged = flag();
     assert_eq!(flag(), flagged, "the same heads, the same statement");
 
     let subject = RecordId::Revision(left.min(right));
-    let about = Annotations::open(&store).unwrap().about(subject).unwrap();
+    let about = Annotations::open(&store)
+        .expect("`Annotations::open(&store)` succeeds")
+        .about(subject)
+        .expect("`about(subject)` succeeds");
     assert_eq!(about.len(), 1);
     assert_eq!(about[0].statement.kind, Kind::DIVERGENT);
     let heads = store
@@ -258,10 +266,12 @@ fn reserved_kinds_have_authors() {
     let rebased = Revision {
         predecessors: vec![first],
         author: principal("node:queue"),
-        ..store.get(first).unwrap()
+        ..store.get(first).expect("`get(first)` succeeds")
     }
     .encode();
-    store.write_all(std::slice::from_ref(&rebased)).unwrap();
+    store
+        .write_all(std::slice::from_ref(&rebased))
+        .expect("`write_all(std::slice::from_ref(&rebased))` succeeds");
     let reserved = |kind: Kind, issuer: &str| Statement {
         subject: RecordId::Revision(rebased.id().into()),
         kind,
@@ -272,7 +282,11 @@ fn reserved_kinds_have_authors() {
         supersedes: None,
         promoted_from: None,
     };
-    let authorizes = |statement: &Statement| store.authorizes(statement).unwrap();
+    let authorizes = |statement: &Statement| {
+        store
+            .authorizes(statement)
+            .expect("`authorizes(statement)` succeeds")
+    };
     assert!(authorizes(&reserved(Kind::ABANDON, "user:alice")));
     assert!(
         !authorizes(&reserved(Kind::ABANDON, "node:queue")),
@@ -286,10 +300,13 @@ fn reserved_kinds_have_authors() {
     );
     assert!(authorizes(&reserved(Kind::DIVERGENT, "node:laptop")));
     assert!(!authorizes(&reserved(Kind::DIVERGENT, "user:alice")));
-    let other = reserved(Kind::new("core.other").unwrap(), "node:queue");
+    let other = reserved(
+        Kind::new("core.other").expect("`Kind::new()` succeeds"),
+        "node:queue",
+    );
     assert!(!authorizes(&other));
 
-    let annotations = Annotations::open(&store).unwrap();
+    let annotations = Annotations::open(&store).expect("`Annotations::open(&store)` succeeds");
     let foreign = reserved(Kind::ABANDON, "user:eve");
     assert!(matches!(
         annotations.issue(&foreign, None),
@@ -331,10 +348,12 @@ fn only_the_creator_of_a_change_abandons_it() {
         let encoded = Revision {
             predecessors,
             author: principal(author),
-            ..store.get(first).unwrap()
+            ..store.get(first).expect("`get(first)` succeeds")
         }
         .encode();
-        store.write_all(std::slice::from_ref(&encoded)).unwrap();
+        store
+            .write_all(std::slice::from_ref(&encoded))
+            .expect("`write_all(std::slice::from_ref(&encoded))` succeeds");
         RevisionId::from(encoded.id())
     };
     let taken = write(vec![first], "user:eve");
@@ -351,7 +370,9 @@ fn only_the_creator_of_a_change_abandons_it() {
             supersedes: None,
             promoted_from: None,
         };
-        store.authorizes(&statement).unwrap()
+        store
+            .authorizes(&statement)
+            .expect("`authorizes(&statement)` succeeds")
     };
     assert!(abandons(taken, "user:alice"));
     assert!(!abandons(taken, "user:eve"), "she took it over");

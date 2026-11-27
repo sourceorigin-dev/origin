@@ -10,7 +10,7 @@ fn ancestry(edges: &[(u8, &[u8])]) -> Ancestry<u8> {
         let parents = edges.iter().find(|&&(of, _)| of == id).map(|&(_, p)| p);
         Ok::<_, ()>((parents.unwrap_or_default().to_vec(), empty))
     })
-    .unwrap()
+    .expect("the walk never fails")
 }
 
 fn bases(history: &Ancestry<u8>, tips: &[u8]) -> Vec<u8> {

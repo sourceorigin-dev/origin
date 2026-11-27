@@ -184,13 +184,13 @@ fn direct_results_win_over_promotion() {
     let third = revision(&store, 3, &[], FILES);
     let promoted = promote(&store, third);
     let second_result = Annotations::open(&store)
-        .unwrap()
+        .expect("`Annotations::open(&store)` succeeds")
         .current(
             RecordId::Revision(second),
-            &Kind::new("lint").unwrap(),
+            &Kind::new("lint").expect("`Kind::new()` succeeds"),
             &principal("node:ci"),
         )
-        .unwrap();
+        .expect("`current()` succeeds");
     assert_eq!(promoted, [("lint".to_owned(), second_result)]);
 }
 
@@ -204,8 +204,10 @@ fn results_there_replace_promoted_ones_whatever_came_first() {
         &check(first, "lint", Verdict::Pass, "node:ci", inputs),
     );
     let verdicts = |revision| -> Vec<_> {
-        let annotations = Annotations::open(&store).unwrap();
-        let claims = annotations.claims(RecordId::Revision(revision)).unwrap();
+        let annotations = Annotations::open(&store).expect("`Annotations::open(&store)` succeeds");
+        let claims = annotations
+            .claims(RecordId::Revision(revision))
+            .expect("`claims(RecordId::Revision(revision))` succeeds");
         claims
             .iter()
             .map(|claim| (claim.original().is_some(), claim.claimed().verdict))
@@ -250,9 +252,14 @@ fn digests_are_remembered_across_rebuilds() {
     );
     promote(&store, revision(&store, 2, &[], FILES));
 
-    let index = Index::open(&store).unwrap();
+    let index = Index::open(&store).expect("`Index::open(&store)` succeeds");
     assert!(index.digest(lint).is_some());
-    assert_eq!(Index::rebuild(&store).unwrap().index, index);
+    assert_eq!(
+        Index::rebuild(&store)
+            .expect("`Index::rebuild(&store)` succeeds")
+            .index,
+        index
+    );
 }
 
 #[test]
@@ -269,7 +276,7 @@ fn promotions_must_match_their_original() {
         promoted_from: Some(original),
         ..statement.clone()
     };
-    let annotations = Annotations::open(&store).unwrap();
+    let annotations = Annotations::open(&store).expect("`Annotations::open(&store)` succeeds");
     let refused = |statement: &Statement| match annotations.issue(statement, None) {
         Err(AnnotateError::InvalidPromotion(why)) => why,
         other => panic!("{other:?}"),
@@ -286,7 +293,11 @@ fn promotions_must_match_their_original() {
         ..promotion(failure, &failed)
     };
     assert_eq!(refused(&moved), InvalidPromotion::InputsDiffer);
-    failed.inputs.as_mut().unwrap().external = true;
+    failed
+        .inputs
+        .as_mut()
+        .expect("`as_mut()` yields a value")
+        .external = true;
     let external = issue(&store, &failed);
     assert_eq!(
         refused(&promotion(external, &failed)),
@@ -306,8 +317,15 @@ fn promotions_must_match_their_original() {
         .iter()
         .map(Statement::encode)
         .collect();
-    store.write_all(&records).unwrap();
-    let claims = |subject| Annotations::open(&store).unwrap().claims(subject).unwrap();
+    store
+        .write_all(&records)
+        .expect("`write_all(&records)` succeeds");
+    let claims = |subject| {
+        Annotations::open(&store)
+            .expect("`Annotations::open(&store)` succeeds")
+            .claims(subject)
+            .expect("`claims(subject)` succeeds")
+    };
     assert_eq!(claims(RecordId::Revision(changed)), []);
     let [claim] = &claims(RecordId::Revision(second))[..] else {
         panic!("only the valid promotion claims")
@@ -334,9 +352,16 @@ fn superseded_promotions_hold_nothing() {
             ..original
         },
     );
-    let annotations = Annotations::open(&store).unwrap();
-    assert_eq!(annotations.claims(RecordId::Revision(second)).unwrap(), []);
-    let about = annotations.about(RecordId::Revision(second)).unwrap();
+    let annotations = Annotations::open(&store).expect("`Annotations::open(&store)` succeeds");
+    assert_eq!(
+        annotations
+            .claims(RecordId::Revision(second))
+            .expect("`claims(RecordId::Revision(second))` succeeds"),
+        []
+    );
+    let about = annotations
+        .about(RecordId::Revision(second))
+        .expect("`about(RecordId::Revision(second))` succeeds");
     assert!(
         about.iter().all(|annotation| !annotation.holds),
         "{about:?}"
