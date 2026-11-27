@@ -1,11 +1,11 @@
 //! Strings restricted to valid names: file names, target names, statement
 //! kinds and principals.
 
-/// Defines string types holding only valid names. Each type defines
-/// `fn is_valid(name: &str) -> bool` in its own `impl` block, where
-/// constants can also borrow a static name: `Self(Cow::Borrowed("main"))`.
+/// Defines string types that hold only valid names. Each type defines
+/// `fn is_valid(name: &str) -> bool` in its own `impl` block. Its constants
+/// can borrow a static name: `Self(Cow::Borrowed("main"))`.
 ///
-/// Names are encoded as a `u32` length and their UTF-8 bytes.
+/// A name is encoded as a `u32` length and its UTF-8 bytes.
 macro_rules! names {
     ($($(#[$meta:meta])* $name:ident($what:literal);)*) => {$(
         $(#[$meta])*
@@ -13,11 +13,11 @@ macro_rules! names {
         pub struct $name(std::borrow::Cow<'static, str>);
 
         impl $name {
-            /// Validates a name.
+            /// Creates a name, checking that it is valid.
             ///
             /// # Errors
             ///
-            /// Fails if the name breaks the rules above.
+            /// Fails if the name breaks the type's rules.
             pub fn new(name: impl Into<String>) -> Result<Self, $crate::InvalidName> {
                 let name = name.into();
                 if Self::is_valid(&name) {

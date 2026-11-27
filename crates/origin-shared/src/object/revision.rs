@@ -3,24 +3,24 @@ use crate::{AcceptanceId, AttachmentId, ChangeId, Principal, RecordId, RevisionI
 
 /// One immutable version of a change.
 ///
-/// Editing, rebasing or handing a change to someone else creates a new
-/// revision of the same change, whose predecessors are the revisions it
-/// evolves from.
+/// Editing, rebasing or handing over a change creates a new revision of the
+/// same change. Its predecessors are the revisions it evolves from.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
 pub struct Revision {
     /// The change this is a version of.
     pub change: ChangeId,
-    /// The revisions this one evolves from. Two make it a convergence of
-    /// divergent heads.
+    /// The revisions this one evolves from. A revision with two of them
+    /// converges divergent heads.
     pub predecessors: Vec<RevisionId>,
     /// What the revision was made on top of.
     pub base: Base,
-    /// The exact revisions this one requires: the changes below it in a
-    /// stack.
+    /// The exact revisions this one requires, such as the changes below it
+    /// in a stack.
     pub deps: Vec<RevisionId>,
-    /// The root tree of the files.
+    /// The root tree of the revision's files.
     pub snapshot: TreeId,
-    /// The intent, written for humans and agents.
+    /// The blob holding the change's description, written for humans and
+    /// agents.
     pub description: AttachmentId,
     /// Who wrote the revision.
     pub author: Principal,

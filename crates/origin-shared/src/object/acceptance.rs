@@ -31,7 +31,7 @@ impl Record for Acceptance {
 }
 
 impl Acceptance {
-    /// What landed, and where.
+    /// The body: what landed, and where.
     #[must_use]
     pub fn body(&self) -> &AcceptanceBody {
         &self.body
@@ -69,11 +69,10 @@ pub struct AcceptanceBody {
     pub state: TreeId,
     /// What landed.
     pub landed: Vec<Source>,
-    /// The statements the policy relied on.
+    /// The statements the policy relied on to accept the landing.
     pub evidence: Vec<StatementId>,
     /// The acceptance of the `policy` target in force when this one landed.
-    /// Absent only for the first acceptance of `policy`, which nothing
-    /// precedes.
+    /// Absent only for the first acceptance of `policy` itself.
     pub policy: Option<AcceptanceId>,
 }
 
@@ -88,7 +87,7 @@ fields!(AcceptanceBody {
 });
 
 impl AcceptanceBody {
-    /// Signs the body as `authority`.
+    /// Signs the body as `authority`, returning the acceptance.
     #[must_use]
     pub fn sign(self, authority: &NodeKey) -> Acceptance {
         let signature = authority.0.sign(&self.signed_bytes());
@@ -98,9 +97,9 @@ impl AcceptanceBody {
         }
     }
 
-    /// The bytes signed: the acceptance's encoding without its signature,
-    /// which starts with the object kind, so the signature can't be passed
-    /// off as one of anything else.
+    /// The bytes the authority signs: the acceptance's encoding without the
+    /// signature. They start with the object kind, so the signature can't be
+    /// reused for an object of another kind.
     fn signed_bytes(&self) -> Vec<u8> {
         let mut bytes = vec![ObjectKind::Acceptance as u8];
         self.write(&mut bytes);
@@ -168,8 +167,8 @@ mod signature_hex {
     }
 }
 
-/// A node's ed25519 key pair. As a target's authority, the node signs the
-/// acceptances it writes.
+/// A node's ed25519 key pair. A node signs the acceptances of the targets
+/// it is the authority of.
 pub struct NodeKey(SigningKey);
 
 impl NodeKey {
@@ -190,20 +189,20 @@ impl NodeKey {
         Self(SigningKey::from_bytes(secret))
     }
 
-    /// The secret key, to keep the key pair somewhere safe.
+    /// The secret key, for storing the key pair.
     #[must_use]
     pub fn to_bytes(&self) -> [u8; ed25519_dalek::SECRET_KEY_LENGTH] {
         self.0.to_bytes()
     }
 
-    /// The public half, which verifies the node's signatures.
+    /// The public key, which verifies the node's signatures.
     #[must_use]
     pub fn public(&self) -> NodePublicKey {
         NodePublicKey(self.0.verifying_key())
     }
 }
 
-/// Never prints the secret key.
+/// Prints only the public key, never the secret key.
 impl NodeKey {
     /// Signs `bytes`. They must start with a domain prefix of their own, so the
     /// signature can't pass for anything else this key signs.
@@ -250,7 +249,7 @@ impl FromStr for NodePublicKey {
     }
 }
 
-/// A signature that the claimed signer did not make.
+/// A signature the claimed signer did not make.
 #[derive(Debug, thiserror::Error)]
 #[error("the signature does not match the signer's key")]
 pub struct BadSignature(#[source] ed25519_dalek::SignatureError);

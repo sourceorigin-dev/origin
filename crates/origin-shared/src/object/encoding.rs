@@ -1,17 +1,17 @@
-//! The building blocks of record encodings. Every field has exactly one
-//! encoding, so a record has exactly one too.
+//! The building blocks of record encodings. Each field type has exactly
+//! one encoding, so each record has exactly one too.
 
 use super::DecodeError;
 
 /// A value with a canonical, self-delimiting binary encoding.
 ///
-/// Public only so the crate's public traits can require it: it isn't
-/// reachable from outside the crate, which keeps encodings internal.
+/// The trait is public only so the crate's public traits can require it.
+/// Code outside the crate can't reach it, so encodings stay internal.
 pub trait Field: Sized {
     /// Appends the encoding to `out`.
     fn write(&self, out: &mut Vec<u8>);
 
-    /// Decodes a value, rejecting any encoding [`Field::write`] wouldn't
+    /// Decodes a value. Rejects any encoding that [`Field::write`] would not
     /// produce.
     ///
     /// # Errors
@@ -70,7 +70,7 @@ macro_rules! tagged {
 
 pub(crate) use {fields, tagged};
 
-/// Little endian.
+/// Encoded as 8 bytes, little endian.
 impl Field for u64 {
     fn write(&self, out: &mut Vec<u8>) {
         out.extend_from_slice(&self.to_le_bytes());
@@ -81,7 +81,7 @@ impl Field for u64 {
     }
 }
 
-/// One byte, 0 or 1.
+/// Encoded as one byte, 0 or 1.
 impl Field for bool {
     fn write(&self, out: &mut Vec<u8>) {
         out.push(u8::from(*self));
@@ -96,7 +96,7 @@ impl Field for bool {
     }
 }
 
-/// A `u32` count, then the items.
+/// Encoded as a `u32` count, then the items.
 impl<T: Field> Field for Vec<T> {
     fn write(&self, out: &mut Vec<u8>) {
         Reader::write_len(self.len(), out);
@@ -117,7 +117,7 @@ impl<T: Field> Field for Vec<T> {
     }
 }
 
-/// A 0 byte for `None`, or a 1 byte and the value.
+/// Encoded as a 0 byte for `None`, or a 1 byte and the value.
 impl<T: Field> Field for Option<T> {
     fn write(&self, out: &mut Vec<u8>) {
         match self {
@@ -134,11 +134,11 @@ impl<T: Field> Field for Option<T> {
     }
 }
 
-/// A cursor over an encoding that fails with [`DecodeError::Truncated`]
-/// instead of panicking.
+/// A cursor over an encoding. Reading past the end fails with
+/// [`DecodeError::Truncated`] instead of panicking.
 ///
-/// Records are read with it, and other crates read their own binary formats
-/// with it too, in the same conventions: integers are little endian, and
+/// Records are read with it. Other crates read their own binary formats
+/// with it too, with the same conventions: integers are little endian and
 /// lengths are `u32`s.
 #[derive(Debug)]
 pub struct Reader<'a>(&'a [u8]);
@@ -150,8 +150,8 @@ impl<'a> Reader<'a> {
         Self(bytes)
     }
 
-    /// Writes a length as a `u32`. Nothing in a record comes close to
-    /// 4 GiB.
+    /// Writes a length as a little-endian `u32`. Panics past 4 GiB, which
+    /// nothing in a record comes close to.
     #[expect(
         clippy::expect_used,
         reason = "Nothing in a record comes close to 4 GiB."
@@ -161,13 +161,13 @@ impl<'a> Reader<'a> {
         out.extend_from_slice(&len.to_le_bytes());
     }
 
-    /// Writes a string as its [`Reader::write_len`] length and its bytes.
+    /// Writes a string as a `u32` length and its bytes.
     pub(crate) fn write_str(string: &str, out: &mut Vec<u8>) {
         Self::write_len(string.len(), out);
         out.extend_from_slice(string.as_bytes());
     }
 
-    /// Reads a length: a `u32`.
+    /// Reads a length, encoded as a `u32`.
     ///
     /// # Errors
     ///
@@ -215,7 +215,7 @@ impl<'a> Reader<'a> {
         self.array().map(u64::from_le_bytes)
     }
 
-    /// Reads bytes preceded by their [`Reader::read_len`] length.
+    /// Reads bytes preceded by their `u32` length.
     ///
     /// # Errors
     ///
@@ -225,11 +225,12 @@ impl<'a> Reader<'a> {
         self.take(len)
     }
 
-    /// Reads a 0 byte for `None`, or a 1 byte and the value `read` reads.
+    /// Reads an option: a 0 byte for `None`, or a 1 byte and the value that
+    /// `read` reads.
     ///
     /// # Errors
     ///
-    /// Fails if the tag is neither, or `read` fails.
+    /// Fails if the tag byte is neither 0 nor 1, or if `read` fails.
     pub fn option<T>(
         &mut self,
         read: impl FnOnce(&mut Self) -> Result<T, DecodeError>,
@@ -255,8 +256,7 @@ impl<'a> Reader<'a> {
         Ok(name)
     }
 
-    /// Reads a string: UTF-8 bytes preceded by their [`Reader::read_len`]
-    /// length.
+    /// Reads a string: UTF-8 bytes preceded by their `u32` length.
     ///
     /// # Errors
     ///
@@ -276,7 +276,7 @@ impl<'a> Reader<'a> {
         self.0.len()
     }
 
-    /// Ends reading, checking nothing is left.
+    /// Ends reading and checks that no bytes are left.
     ///
     /// # Errors
     ///
