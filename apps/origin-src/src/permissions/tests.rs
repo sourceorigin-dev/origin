@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use origin_platform::Native;
 use origin_shared::api::{FetchSnapshot, LandRequest};
 use origin_shared::landing::{Landing, Proposal};
@@ -60,10 +58,7 @@ impl Fixture {
             ],
         );
         repo.land(1);
-        let node = Node {
-            name: "queue".parse().unwrap(),
-            key: Arc::new(NodeKey::from_bytes(&[7; 32])),
-        };
+        let node = Node::new("queue".parse().unwrap(), NodeKey::from_bytes(&[7; 32]));
         let service = OriginService::new(repo.store.clone(), node);
         Self { repo, service }
     }

@@ -5,12 +5,12 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use origin_shared::Principal;
 use origin_shared::access::{InvalidToken, Token};
+use origin_shared::{NodePublicKey, Principal};
 use serde::Deserialize;
 
 use crate::permissions::Scope;
-use crate::service::{Caller, Node};
+use crate::service::Caller;
 
 /// Maps static credentials to principals. The server configuration's tokens are
 /// one implementation; external identity providers can be others.
@@ -47,23 +47,20 @@ impl Authenticator for StaticTokens {
     }
 }
 
-/// How a server identifies its callers: its node, which verifies the tokens it
-/// signed, and its static credentials.
+/// How a server identifies its callers: its node's public key, which verifies
+/// the tokens it signed, and its static credentials.
 #[derive(Debug)]
 pub struct Credentials {
-    node: Node,
+    key: NodePublicKey,
     authenticator: Box<dyn Authenticator>,
 }
 
 impl Credentials {
-    /// Creates the credentials of `node`'s callers, whose static credentials
-    /// `authenticator` checks.
+    /// Creates the credentials for callers of the node whose public key is `key`;
+    /// `authenticator` checks their static credentials.
     #[must_use]
-    pub fn new(node: Node, authenticator: Box<dyn Authenticator>) -> Self {
-        Self {
-            node,
-            authenticator,
-        }
+    pub fn new(key: NodePublicKey, authenticator: Box<dyn Authenticator>) -> Self {
+        Self { key, authenticator }
     }
 
     /// Returns the caller an `Authorization` header's value stands for, or an
@@ -80,7 +77,7 @@ impl Credentials {
             .strip_prefix("Bearer ")
             .ok_or(InvalidToken::Malformed)?;
         if Token::is_signed(token) {
-            let token = Token::verify(token, &self.node.key.public())?;
+            let token = Token::verify(token, &self.key)?;
             return Ok(Caller::Principal {
                 principal: token.principal,
                 scope: Some(Scope {
@@ -102,7 +99,6 @@ impl Credentials {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
     use std::time::Duration;
 
     use origin_shared::NodeKey;
@@ -113,17 +109,14 @@ mod tests {
     fn tells_callers_apart_by_token() {
         let tokens: StaticTokens =
             toml::from_str("\"user:alice\" = \"a-secret\"\n\"node:ci\" = \"c-secret\"\n").unwrap();
-        let node = Node {
-            name: "hosted".parse().unwrap(),
-            key: Arc::new(NodeKey::from_bytes(&[5; 32])),
-        };
+        let key = NodeKey::from_bytes(&[5; 32]);
         let token = Token::new(
             "user:bob".parse().unwrap(),
             vec!["write src".parse().unwrap()],
             Duration::from_mins(1),
         );
-        let signed = token.sign(&node.key);
-        let credentials = Credentials::new(node, Box::new(tokens));
+        let signed = token.sign(&key);
+        let credentials = Credentials::new(key.public(), Box::new(tokens));
         let caller = |header: Option<&str>| credentials.caller(header);
         let principal = |caller: Caller| caller.principal().map(ToString::to_string);
 

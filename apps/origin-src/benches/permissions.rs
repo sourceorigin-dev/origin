@@ -4,7 +4,7 @@
 //! and as a user whom path rules withhold one directory from and keep from
 //! writing another. Landings sync, so run it on a real disk.
 
-use std::sync::{Arc, LazyLock};
+use std::sync::LazyLock;
 
 use divan::Bencher;
 use origin_shared::api::{FetchSnapshot, LandRequest};
@@ -60,11 +60,8 @@ static SETUP: LazyLock<Setup> = LazyLock::new(|| {
     let files = tempfile::tempdir().unwrap();
     TREE.write(files.path()).unwrap();
     let repos = tempfile::tempdir().unwrap();
-    let node = Node {
-        name: "hosted".parse().unwrap(),
-        key: Arc::new(NodeKey::from_bytes(&[7; 32])),
-    };
-    let initial = Policy::initial(&node.name, &node.key.public(), None);
+    let node = Node::new("hosted".parse().unwrap(), NodeKey::from_bytes(&[7; 32]));
+    let initial = Policy::initial(&node.name, &node.key().unwrap().public(), None);
     let create = |name: &str, policy: &str| {
         OriginService::create(repos.path().join(name), node.clone(), policy).unwrap()
     };

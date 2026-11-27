@@ -1,0 +1,125 @@
+//! The `origin-ci` binary, which `origin ci` runs.
+
+use std::process::ExitCode;
+
+use anyhow::{Context as _, Result, bail};
+use clap::{Parser, Subcommand};
+use origin_ci::runner::{Outcome, Runner};
+use origin_ci::state::State;
+use origin_shared::api::At;
+use origin_shared::{ChangeId, RecordId, RevisionId};
+use origin_src::config::UserConfig;
+use origin_src::output;
+use origin_src::plugin::Context;
+use origin_src::remote::{Remote, RemoteUrl};
+
+/// Run the checks of `checks.toml` and issue their results.
+#[derive(Debug, Parser)]
+#[command(name = "origin ci", version)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Run a revision's checks here, as its own `checks.toml` defines them,
+    /// and issue their results as you, in this repository. Skips checks that a
+    /// result of yours, run or promoted, already covers. Fails if a check
+    /// fails.
+    Run {
+        /// The revision: `@` for the working copy, a change's full id for its
+        /// head, or a revision's full id.
+        #[arg(default_value = "@")]
+        rev: String,
+    },
+}
+
+fn main() -> ExitCode {
+    output::exit_quietly_on_broken_pipe();
+    match Cli::parse().run() {
+        Ok(code) => code,
+        Err(error) => {
+            eprintln!("error: {error:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+impl Cli {
+    fn run(self) -> Result<ExitCode> {
+        let config = UserConfig::load()?;
+        let context = Context::from_env()?;
+        match self.command {
+            Command::Run { rev } => {
+                let (runner, subject) = Self::here(context.as_ref(), &config, "run", &rev)?;
+                let outcomes = runner.check(subject, &At::Record(subject), None)?;
+                Ok(Self::report(&outcomes))
+            }
+        }
+    }
+
+    /// Creates a runner for the repository `origin ci <command>` runs in, as
+    /// the user, and returns it with the record `rev` names there.
+    fn here(
+        context: Option<&Context>,
+        config: &UserConfig,
+        command: &str,
+        rev: &str,
+    ) -> Result<(Runner, RecordId)> {
+        let Some(context) = context else {
+            bail!("run `origin ci {command}` in a working copy");
+        };
+        let url = RemoteUrl::Path(context.repository.clone());
+        let runner = Self::runner(&url, config)?;
+        let subject = Self::subject(&runner, context, rev)?;
+        Ok((runner, subject))
+    }
+
+    /// Prints each outcome, and the output of each failed check. Returns a
+    /// failing exit code if a check failed.
+    fn report(outcomes: &[Outcome]) -> ExitCode {
+        let mut failed = false;
+        for outcome in outcomes {
+            println!("{outcome}");
+            if let Outcome::Ran { output, .. } = outcome
+                && outcome.failed()
+            {
+                print!("{}", String::from_utf8_lossy(output));
+            }
+            failed |= outcome.failed();
+        }
+        if failed {
+            ExitCode::FAILURE
+        } else {
+            ExitCode::SUCCESS
+        }
+    }
+
+    /// Creates a runner for the repository at `url`, as the user.
+    fn runner(url: &RemoteUrl, config: &UserConfig) -> Result<Runner> {
+        let remote = Remote::open_for(url, config).with_context(|| format!("cannot open {url}"))?;
+        Ok(Runner::new(remote, config.user(), State::open(url)?)?)
+    }
+
+    /// Returns the record `rev` names: the working copy, a change's head, or a
+    /// revision.
+    fn subject(runner: &Runner, context: &Context, rev: &str) -> Result<RecordId> {
+        if rev == "@" {
+            return Ok(RecordId::Revision(context.revision));
+        }
+        if let Ok(revision) = rev.parse::<RevisionId>() {
+            return Ok(RecordId::Revision(revision));
+        }
+        let change: ChangeId = rev
+            .parse()
+            .with_context(|| format!("`{rev}` is neither `@`, a change's id nor a revision's"))?;
+        match runner.remote().revisions(change)?.heads[..] {
+            [head] => Ok(RecordId::Revision(head)),
+            _ => bail!(
+                "change {} is divergent: name one of its heads",
+                change.short()
+            ),
+        }
+    }
+}

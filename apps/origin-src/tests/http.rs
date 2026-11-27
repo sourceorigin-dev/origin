@@ -3,7 +3,6 @@
 
 use std::collections::BTreeMap;
 use std::slice;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use origin_client::{Client, Error, Repo};
@@ -51,11 +50,8 @@ impl Server {
 
     async fn start() -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let node = Node {
-            name: "hosted".parse().unwrap(),
-            key: Arc::new(NodeKey::from_bytes(&[7; 32])),
-        };
-        let open = Policy::initial(&node.name, &node.key.public(), None);
+        let node = Node::new("hosted".parse().unwrap(), NodeKey::from_bytes(&[7; 32]));
+        let open = Policy::initial(&node.name, &node.key().unwrap().public(), None);
         let strict = format!(
             "[nodes]\nhosted = \"{}\"\n[targets.policy]\nauthority = \"node:hosted\"\n\
              [targets.main]\nauthority = \"node:hosted\"\n\
@@ -64,10 +60,13 @@ impl Server {
              \"user:ci\" = [\"annotate ci.*\"]\n\
              [[paths]]\npath = \"/\"\ngrants = {{ all = \"read\", \"user:ada\" = \"write\" }}\n\
              [[paths]]\npath = \"secrets\"\ngrants = {{ all = \"none\", \"user:ada\" = \"write\" }}\n",
-            node.key.public()
+            node.key().unwrap().public()
         );
         let tokens: StaticTokens = toml::from_str(Self::TOKENS).unwrap();
-        let mut repositories = Repositories::new(Credentials::new(node.clone(), Box::new(tokens)));
+        let mut repositories = Repositories::new(Credentials::new(
+            node.key().unwrap().public(),
+            Box::new(tokens),
+        ));
         for (name, policy) in [("demo", open), ("strict", strict)] {
             let service =
                 OriginService::create(dir.path().join(name), node.clone(), &policy).unwrap();
