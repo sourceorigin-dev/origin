@@ -170,7 +170,6 @@ impl<'a, P: Durability> DurableWrite<'a, P> {
             NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
         ));
         if let Err(error) = StagedFile::write(&temp, write) {
-            // Best effort: the file is unusable either way.
             let _ = fs::remove_file(&temp);
             return Err(error);
         }
@@ -223,8 +222,6 @@ impl<'a, P: Durability> DurableWrite<'a, P> {
             .map_err(|source| Error::new(Op::Sync, holder, source))?;
         for dir in missing.into_iter().rev() {
             match fs::create_dir(dir) {
-                // Another write created it first, and may not have synced
-                // its parent yet.
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
                 result => result.map_err(|source| Error::new(Op::CreateDir, dir, source))?,
             }
@@ -291,7 +288,6 @@ impl<'a, P: Durability> DurableWrite<'a, P> {
             })
         };
         let most = files.len() / Self::RENAMES_PER_THREAD;
-        // Checked first: asking for the cores reads the cgroup's quota.
         if most <= 1 {
             return rename(files);
         }
@@ -318,8 +314,6 @@ impl<P> Drop for DurableWrite<'_, P> {
     fn drop(&mut self) {
         let staged = self.staged.get_mut();
         for (temp, _) in staged.layers.iter().flat_map(|layer| &layer.files) {
-            // Best effort: a leftover is garbage that readers skip. After a
-            // failed rename, some of these are already published.
             let _ = fs::remove_file(temp);
         }
     }

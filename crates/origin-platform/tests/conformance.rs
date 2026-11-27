@@ -162,7 +162,7 @@ mod suite {
         if let Some(path) = env::var_os(HOLDER) {
             let _held = LockedFile::open(platform, Path::new(&path), LockMode::Exclusive).unwrap();
             println!("{HELD}");
-            // Bounded, so the child cannot outlive a failed parent for long.
+            // wall-clock: bounded, so the child cannot outlive a failed parent for long.
             thread::sleep(Duration::from_secs(60));
             return;
         }

@@ -8,6 +8,7 @@ origin-src = 11
 
 [wall-clock]
 origin-ci = 1
+origin-platform = 1
 origin-src = 2
 
 [invariant]
