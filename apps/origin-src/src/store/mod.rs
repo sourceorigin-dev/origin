@@ -31,6 +31,7 @@ use std::thread;
 use std::time::{Duration, SystemTime};
 
 use origin_platform::{DurableWrite, LockMode, LockedFile, Native, Platform, WritableError};
+use origin_shared::access::PathAccess;
 use origin_shared::object::{DecodeError, IdMismatch};
 use origin_shared::{AttachmentId, EncodedObject, Head, ObjectId, TargetName, TypedId};
 use parking_lot::Mutex;
@@ -52,6 +53,9 @@ pub struct Store<P = Native> {
     packs: Arc<Packs>,
     /// The actor that the op log records as the writer.
     pub(crate) actor: Actor,
+    /// The paths this repository may read of its remote's snapshots, if the
+    /// remote withholds some (see [`Store::with_withheld`]).
+    pub(crate) readable: Option<Arc<PathAccess>>,
 }
 
 impl<P: Platform> Store<P> {
@@ -72,6 +76,7 @@ impl<P: Platform> Store<P> {
             platform,
             packs: Arc::default(),
             actor: Actor::default(),
+            readable: None,
         }
     }
 
@@ -79,6 +84,19 @@ impl<P: Platform> Store<P> {
     #[must_use]
     pub fn with_actor(self, actor: Actor) -> Self {
         Self { actor, ..self }
+    }
+
+    /// Returns the store for a repository whose remote withholds the content of
+    /// the paths `readable` doesn't allow. Their trees keep the entries, but the
+    /// store lacks the objects they point to. Tree operations never read them:
+    /// diffs skip them, merges compare them by id, and walks leave them out (see
+    /// [`crate::tree`]).
+    #[must_use]
+    pub fn with_withheld(self, readable: PathAccess) -> Self {
+        Self {
+            readable: (!readable.reads_all()).then(|| Arc::new(readable)),
+            ..self
+        }
     }
 
     /// The actor that the op log records as the writer.

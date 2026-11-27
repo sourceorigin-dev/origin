@@ -1,4 +1,9 @@
 //! Comparing trees, merging them, and looking up what they hold.
+//!
+//! In a repository whose remote withholds some paths (see
+//! [`Store::with_withheld`]), nothing here reads the withheld content:
+//! diffs skip withheld paths, merges compare them by id, and walks leave
+//! them out.
 
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
@@ -28,6 +33,12 @@ pub struct FileChange {
 }
 
 impl<P: Platform> Store<P> {
+    /// Returns the paths this repository may not read at or under `dir`, if
+    /// any. Tree operations only check paths while this is some.
+    fn withheld_under(&self, dir: &RepoPath) -> Option<&PathAccess> {
+        Self::unsettled(self.readable.as_deref(), dir)
+    }
+
     /// Whether a tree operation may read the entry at `path`, in a directory
     /// whose withheld paths are `withheld`: a file it may read, or a directory
     /// it may read something under.
@@ -35,16 +46,31 @@ impl<P: Platform> Store<P> {
         withheld.is_none_or(|access| access.reads_entry(path, entry))
     }
 
-    /// Lists the files that differ between two trees, sorted by path.
-    /// Subtrees with equal ids are skipped without being read, so the cost
-    /// follows the size of the change.
+    /// Lists the files that differ between two trees, sorted by path. Subtrees
+    /// with equal ids are skipped without being read, so the cost follows the
+    /// size of the change. Withheld paths are skipped.
     ///
     /// # Errors
     ///
     /// Fails if a tree that differs cannot be read.
     pub fn diff(&self, old: TreeId, new: TreeId) -> Result<Vec<FileChange>, StoreError> {
+        self.diff_at(&RepoPath::root(), Some(old), Some(new))
+    }
+
+    /// Lists the files that differ between two versions of the directory `dir`,
+    /// like [`Store::diff`]. `None` stands for a version that doesn't exist.
+    ///
+    /// # Errors
+    ///
+    /// Fails if a tree that differs cannot be read.
+    pub fn diff_at(
+        &self,
+        dir: &RepoPath,
+        old: Option<TreeId>,
+        new: Option<TreeId>,
+    ) -> Result<Vec<FileChange>, StoreError> {
         let mut changes = Vec::new();
-        self.diff_dir(&RepoPath::root(), Some(old), Some(new), &mut changes)?;
+        self.diff_dir(dir, old, new, &mut changes)?;
         Ok(changes)
     }
 
@@ -64,22 +90,23 @@ impl<P: Platform> Store<P> {
             read(old)?.unwrap_or_default(),
             read(new)?.unwrap_or_default(),
         );
+        let withheld = self.withheld_under(dir);
         let mut names: Vec<&EntryName> =
             old.iter().chain(new.iter()).map(|(name, _)| name).collect();
         names.sort_unstable();
         names.dedup();
         for name in names {
+            let path = dir.join(name);
+            let readable = |entry: Option<TreeEntry>| {
+                entry.filter(|entry| Self::readable(withheld, &path, entry))
+            };
             let (old, new) = (
-                old.get(name.as_str()).copied(),
-                new.get(name.as_str()).copied(),
+                readable(old.get(name.as_str()).copied()),
+                readable(new.get(name.as_str()).copied()),
             );
             if old == new {
                 continue;
             }
-            let path = dir.join(name);
-            // A name can hold a file on one side and a directory on the
-            // other: the file part is a change, the directory part is
-            // diffed against an empty tree.
             let old_file = old.and_then(TreeEntry::file);
             let new_file = new.and_then(TreeEntry::file);
             if old_file.is_some() || new_file.is_some() {
@@ -125,13 +152,14 @@ enum OnConflict<'l> {
 }
 
 impl<P: Platform> Store<P> {
-    /// Merges `ours` and `theirs`, two trees made from `base`, file by file:
-    /// a path one side changed takes that side's version, and a path both
-    /// changed, each its own way, is a conflict, where the merge keeps
-    /// `ours`. A path is a file, so two sides that changed different files
-    /// of a directory merge cleanly. Without a base, every path either side
-    /// has counts as changed. Subtrees with equal ids are never read, so the
-    /// cost follows the size of the changes.
+    /// Merges `ours` and `theirs`, two trees made from `base`, file by file. A
+    /// path that one side changed takes that side's version. A path both sides
+    /// changed differently is a conflict, and the merge keeps `ours`. So two
+    /// sides that changed different files of a directory merge cleanly. Without
+    /// a base, every path either side has counts as changed. A withheld
+    /// directory that both sides changed is a conflict, like a file. Subtrees
+    /// with equal ids are never read, so the cost follows the size of the
+    /// changes.
     ///
     /// # Errors
     ///
@@ -256,22 +284,21 @@ impl<P: Platform> Store<P> {
             .collect();
         names.sort_unstable();
         names.dedup();
+        let withheld = self.withheld_under(dir);
         let mut merged = Tree::default();
         for name in names {
             let [base, ours, theirs] =
                 [&base, &ours, &theirs].map(|tree| tree.get(name.as_str()).copied());
+            let readable = withheld.is_none_or(|access| access.reads_under(&dir.join(name)));
             let entry = if ours == theirs || base == theirs {
                 ours
             } else if base == ours {
                 theirs
-            } else if base != Some(Self::UNKNOWN)
+            } else if readable
+                && base != Some(Self::UNKNOWN)
                 && ours.is_none_or(|ours| ours.kind.is_tree())
                 && theirs.is_none_or(|theirs| theirs.kind.is_tree())
             {
-                // Both sides changed a directory, or one changed it and the
-                // other removed it: merge it file by file, unless what it was
-                // is unknown, which would take what one side removed for
-                // what the other added.
                 let subtree = |entry: Option<TreeEntry>| entry.and_then(TreeEntry::subtree);
                 self.merge_dir(
                     &dir.join(name),
@@ -291,7 +318,7 @@ impl<P: Platform> Store<P> {
                     OnConflict::Mark(labels) => self.mark(ours, theirs, labels, merge)?,
                     OnConflict::Unknown => Some(Self::UNKNOWN),
                 };
-                // Paths come in order, each once.
+                // INVARIANT: paths come in order, each once.
                 merge.conflicts.push(Conflicted {
                     path: dir.join(name),
                     written: written.map(|entry| entry.id),
@@ -343,6 +370,97 @@ impl<P: Platform> Store<P> {
         };
         merge.files.push(file);
         Ok(Some(entry))
+    }
+}
+
+impl<P: Platform> Store<P> {
+    /// Returns the working copy's tree `files`, with the withheld paths taken
+    /// from `kept`, the revision the working copy was. Files the user cannot
+    /// read are never in the working copy, so this keeps them in its snapshots
+    /// as they were. Returns the tree and the trees it made, which the store may
+    /// not have yet. Only the directories leading to withheld paths are read.
+    ///
+    /// # Errors
+    ///
+    /// Fails if a tree on the way cannot be read.
+    pub fn keep_withheld(
+        &self,
+        files: TreeId,
+        kept: TreeId,
+    ) -> Result<(TreeId, Vec<EncodedObject>), StoreError> {
+        let mut trees = Vec::new();
+        let tree = self.keep_dir(&RepoPath::root(), Some(files), Some(kept), &mut trees)?;
+        let tree = tree.unwrap_or_else(|| {
+            let empty = Tree::default().encode();
+            let id = empty.id().into();
+            trees.push(empty);
+            id
+        });
+        Ok((tree, trees))
+    }
+
+    /// Copies the withheld paths of `kept` into `files`, both versions of
+    /// `dir` (`None` for one that doesn't exist). Returns the result, or `None`
+    /// if it is empty.
+    fn keep_dir(
+        &self,
+        dir: &RepoPath,
+        files: Option<TreeId>,
+        kept: Option<TreeId>,
+        trees: &mut Vec<EncodedObject>,
+    ) -> Result<Option<TreeId>, StoreError> {
+        let Some(access) = self.withheld_under(dir) else {
+            return Ok(files);
+        };
+        if files == kept {
+            return Ok(files);
+        }
+        let read = |id: Option<TreeId>| id.map(|id| self.get(id)).transpose();
+        let (on_disk, held): (Tree, Tree) = (
+            read(files)?.unwrap_or_default(),
+            read(kept)?.unwrap_or_default(),
+        );
+        let mut names: Vec<&EntryName> = on_disk
+            .iter()
+            .chain(held.iter())
+            .map(|(name, _)| name)
+            .collect();
+        names.sort_unstable();
+        names.dedup();
+        let mut merged = Tree::default();
+        for name in names {
+            let path = dir.join(name);
+            let file = on_disk.get(name.as_str()).copied();
+            let kept = held.get(name.as_str()).copied();
+            let is_tree =
+                |entry: Option<TreeEntry>| entry.is_some_and(|entry| entry.kind.is_tree());
+            let entry = if is_tree(file) || file.is_none() && is_tree(kept) {
+                if access.reads_under(&path) {
+                    let subtree = |entry: Option<TreeEntry>| entry.and_then(TreeEntry::subtree);
+                    self.keep_dir(&path, subtree(file), subtree(kept), trees)?
+                        .map(|tree| TreeEntry {
+                            kind: EntryKind::Tree,
+                            id: tree.into(),
+                        })
+                } else {
+                    kept
+                }
+            } else if access.reads(&path) {
+                file
+            } else {
+                kept
+            };
+            if let Some(entry) = entry {
+                merged.insert(name.clone(), entry);
+            }
+        }
+        if merged.is_empty() {
+            return Ok(None);
+        }
+        let encoded = merged.encode();
+        let id = encoded.id().into();
+        trees.push(encoded);
+        Ok(Some(id))
     }
 }
 
@@ -573,6 +691,7 @@ impl<P: Platform> Store<P> {
             seen: &mut seen,
             added: &mut added,
         };
+        let access = access.or(self.readable.as_deref());
         let root = RepoPath::root();
         walk.dir(self, &root, snapshot, have, Self::unsettled(access, &root))?;
         Ok(added)
@@ -700,4 +819,405 @@ impl Walk<'_> {
 }
 
 #[cfg(test)]
-pub(crate) mod tests;
+pub(crate) mod tests {
+    use std::collections::BTreeMap;
+
+    use origin_platform::Native;
+    use origin_shared::{EncodedObject, EntryKind, Record};
+
+    use super::*;
+
+    /// Builds nested trees from files inserted by path.
+    #[derive(Debug, Default)]
+    struct TreeBuilder {
+        entries: BTreeMap<EntryName, Node>,
+    }
+
+    #[derive(Debug)]
+    enum Node {
+        File(TreeEntry),
+        Dir(TreeBuilder),
+    }
+
+    impl TreeBuilder {
+        /// Adds a file at `path`, creating parent directories.
+        fn insert(&mut self, path: &str, entry: TreeEntry) {
+            let (dir, name) = match path.rsplit_once('/') {
+                Some((dir, name)) => (Some(dir), name),
+                None => (None, path),
+            };
+            let mut builder = self;
+            for component in dir.into_iter().flat_map(|dir| dir.split('/')) {
+                let node = builder
+                    .entries
+                    .entry(EntryName::new(component).unwrap())
+                    .or_insert_with(|| Node::Dir(Self::default()));
+                let Node::Dir(child) = node else {
+                    panic!("{component} is a file")
+                };
+                builder = child;
+            }
+            builder
+                .entries
+                .insert(EntryName::new(name).unwrap(), Node::File(entry));
+        }
+
+        /// Writes every tree to the store and returns the root's id.
+        fn write(self, store: &Store) -> TreeId {
+            let tree: Tree = self
+                .entries
+                .into_iter()
+                .map(|(name, node)| {
+                    let entry = match node {
+                        Node::File(entry) => entry,
+                        Node::Dir(dir) => TreeEntry {
+                            kind: EntryKind::Tree,
+                            id: dir.write(store).into(),
+                        },
+                    };
+                    (name, entry)
+                })
+                .collect();
+            let encoded = tree.encode();
+            store.write_all(std::slice::from_ref(&encoded)).unwrap();
+            encoded.id().into()
+        }
+    }
+
+    fn file(content: &str) -> TreeEntry {
+        TreeEntry {
+            kind: EntryKind::File,
+            id: EncodedObject::blob(content.as_bytes()).id(),
+        }
+    }
+
+    pub(crate) fn build(store: &Store, files: &[(&str, &str)]) -> TreeId {
+        let mut builder = TreeBuilder::default();
+        for (path, content) in files {
+            builder.insert(path, file(content));
+        }
+        builder.write(store)
+    }
+
+    #[test]
+    fn diffs_files_across_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join(".origin"), Native::default());
+        store.init().unwrap();
+        let old = build(
+            &store,
+            &[
+                ("same", "s"),
+                ("edit", "1"),
+                ("gone", "g"),
+                ("dir/inner", "i"),
+                ("swap", "f"),
+            ],
+        );
+        let new = build(
+            &store,
+            &[
+                ("same", "s"),
+                ("edit", "2"),
+                ("added/deep", "d"),
+                ("swap/now-dir", "n"),
+            ],
+        );
+
+        let changes = store.diff(old, new).unwrap();
+        let summary: Vec<_> = changes
+            .iter()
+            .map(|c| (c.path.as_str(), c.old.is_some(), c.new.is_some()))
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                ("added/deep", false, true),
+                ("dir/inner", true, false),
+                ("edit", true, true),
+                ("gone", true, false),
+                ("swap", true, false),
+                ("swap/now-dir", false, true),
+            ]
+        );
+        assert_eq!(store.diff(old, old).unwrap(), []);
+        let empty = build(&store, &[]);
+        assert_eq!(store.diff(empty, old).unwrap().len(), 5);
+    }
+
+    #[test]
+    fn lists_what_the_haves_lack() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join(".origin"), Native::default());
+        store.init().unwrap();
+        let old = build(
+            &store,
+            &[
+                ("same/a", "1"),
+                ("edit/b", "2"),
+                ("file", "3"),
+                ("docs/x", "4"),
+            ],
+        );
+        let new = build(
+            &store,
+            &[
+                ("same/a", "1"),
+                ("edit/b", "changed"),
+                ("file/now-dir", "4"),
+                ("docs/x", "4"),
+                ("docs/copy", "4"),
+            ],
+        );
+        let paths = |placed: Vec<Placed>| -> Vec<String> {
+            placed
+                .iter()
+                .map(|placed| placed.path.to_string())
+                .collect()
+        };
+
+        assert_eq!(
+            paths(store.added(new, &[old], &[], None).unwrap()),
+            ["/", "docs", "docs/copy", "edit", "edit/b", "file"],
+            "`file/now-dir` has the content of `docs/copy`, listed first"
+        );
+        assert_eq!(
+            store.added(new, &[], &[], None).unwrap().len(),
+            8,
+            "5 trees, and 5 files of 3 contents"
+        );
+        assert_eq!(store.added(new, &[new], &[], None).unwrap(), []);
+        let empty = build(&store, &[]);
+        assert_eq!(
+            paths(store.added(new, &[empty, old], &[], None).unwrap()),
+            paths(store.added(new, &[old], &[], None).unwrap()),
+            "any have holding an object is enough"
+        );
+
+        let only = |path: &str| [RepoPath::new(path).unwrap()];
+        assert_eq!(
+            paths(store.added(new, &[], &only("edit/b"), None).unwrap()),
+            ["/", "edit", "edit/b"],
+            "the trees on the way, then the path"
+        );
+        assert_eq!(
+            paths(store.added(new, &[old], &only("same"), None).unwrap()),
+            ["/"]
+        );
+    }
+
+    /// The files of `tree`, by path, with their contents' ids.
+    fn files(store: &Store, tree: TreeId) -> Vec<(String, ObjectId)> {
+        let empty = build(store, &[]);
+        store
+            .diff(empty, tree)
+            .unwrap()
+            .into_iter()
+            .map(|change| (change.path.as_str().to_owned(), change.new.unwrap().id))
+            .collect()
+    }
+
+    #[test]
+    fn merges_changes_to_different_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join(".origin"), Native::default());
+        store.init().unwrap();
+        let base = build(
+            &store,
+            &[
+                ("src/a", "a"),
+                ("src/b", "b"),
+                ("gone/x", "x"),
+                ("same", "s"),
+            ],
+        );
+        let ours = build(&store, &[("src/a", "a2"), ("src/b", "b"), ("same", "s2")]);
+        let theirs = build(
+            &store,
+            &[
+                ("src/a", "a"),
+                ("src/b", "b2"),
+                ("gone/x", "x"),
+                ("new/deep", "n"),
+                ("same", "s2"),
+            ],
+        );
+        let merge = store.merge(Some(base), ours, theirs).unwrap();
+        assert_eq!(merge.conflicts, Conflicts::default());
+        let expected = build(
+            &store,
+            &[
+                ("src/a", "a2"),
+                ("src/b", "b2"),
+                ("new/deep", "n"),
+                ("same", "s2"),
+            ],
+        );
+        assert_eq!(files(&store, merge.tree), files(&store, expected));
+        assert_eq!(merge.tree, expected, "trees are canonical");
+        assert!(
+            merge.trees.iter().any(|tree| tree.id() == expected.into()),
+            "the merged trees are returned to be written"
+        );
+
+        let unchanged = store.merge(Some(base), ours, base).unwrap();
+        assert_eq!((unchanged.tree, unchanged.trees), (ours, Vec::new()));
+    }
+
+    #[test]
+    fn conflicts_keep_ours() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join(".origin"), Native::default());
+        store.init().unwrap();
+        let base = build(
+            &store,
+            &[("edit", "1"), ("dir/removed", "r"), ("file", "f")],
+        );
+        let ours = build(
+            &store,
+            &[("edit", "ours"), ("dir/removed", "r2"), ("file", "f")],
+        );
+        let theirs = build(
+            &store,
+            &[("edit", "theirs"), ("file/now-dir", "d"), ("other", "o")],
+        );
+        let merge = store.merge(Some(base), ours, theirs).unwrap();
+        let paths: Vec<_> = merge
+            .conflicts
+            .paths()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(
+            paths,
+            ["dir/removed", "edit"],
+            "both edited `edit`; ours edited what theirs removed"
+        );
+        let expected = build(
+            &store,
+            &[
+                ("edit", "ours"),
+                ("dir/removed", "r2"),
+                ("file/now-dir", "d"),
+                ("other", "o"),
+            ],
+        );
+        assert_eq!(files(&store, merge.tree), files(&store, expected));
+
+        let unrelated = store.merge(None, ours, theirs).unwrap();
+        let paths: Vec<_> = unrelated
+            .conflicts
+            .paths()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(paths, ["edit", "file"]);
+    }
+
+    #[test]
+    fn looks_entries_up_by_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join(".origin"), Native::default());
+        store.init().unwrap();
+        let root = build(&store, &[("src/lib.rs", "lib"), ("README", "r")]);
+        let mut snapshots = Snapshots::new(&store);
+        let mut at = |path: &str| {
+            snapshots
+                .entry_at(root, &RepoPath::new(path).unwrap())
+                .unwrap()
+        };
+
+        assert_eq!(at("src/lib.rs"), Some(file("lib")));
+        assert_eq!(at("").unwrap().id, root.into(), "the root is the snapshot");
+        assert!(at("src").unwrap().kind.is_tree());
+        for missing in ["nope", "src/nope", "README/inside"] {
+            assert_eq!(at(missing), None, "{missing}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod withheld_tests {
+    use origin_platform::Native;
+    use origin_shared::access::{Level, PathAccess};
+
+    use super::tests::build;
+    use super::*;
+
+    fn path(path: &str) -> RepoPath {
+        RepoPath::new(path).unwrap()
+    }
+
+    /// Builds a snapshot of `src/lib.rs` and `secrets/key` for each of `keys`,
+    /// the content of `secrets/key`, in a store that lacks `secrets` because its
+    /// remote withholds it.
+    fn withheld(keys: &[&str]) -> (tempfile::TempDir, Store, Vec<TreeId>) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join(".origin"), Native::default());
+        store.init().unwrap();
+        let snapshots: Vec<_> = keys
+            .iter()
+            .map(|key| build(&store, &[("src/lib.rs", "lib"), ("secrets/key", key)]))
+            .collect();
+        let secrets: Vec<ObjectId> = snapshots
+            .iter()
+            .map(|&snapshot| {
+                Snapshots::new(&store)
+                    .entry_at(snapshot, &path("secrets"))
+                    .unwrap()
+                    .unwrap()
+                    .id
+            })
+            .collect();
+        store.remove(&secrets).unwrap();
+        let readable = PathAccess::new(Level::Write, [(path("secrets"), Level::None)]);
+        (dir, store.with_withheld(readable), snapshots)
+    }
+
+    #[test]
+    fn withheld_paths_are_never_read() {
+        let (_dir, store, snapshots) = withheld(&["a", "b", "c"]);
+        let [base, ours, theirs] = snapshots[..] else {
+            unreachable!()
+        };
+        assert_eq!(
+            store.diff(base, ours).unwrap(),
+            [],
+            "only the secret differs"
+        );
+        let merge = store.merge(Some(base), ours, theirs).unwrap();
+        assert_eq!(
+            merge.conflicts.paths(),
+            [path("secrets")],
+            "compared by id, as a file"
+        );
+        assert_eq!(store.merge(Some(base), base, theirs).unwrap().tree, theirs);
+        let walked = store.added(ours, &[], &[], None).unwrap();
+        assert!(
+            walked
+                .iter()
+                .all(|placed| !placed.path.starts_with(&path("secrets")))
+        );
+    }
+
+    #[test]
+    fn snapshots_keep_withheld_paths_as_they_were() {
+        let (_dir, store, snapshots) = withheld(&["a"]);
+        let kept = snapshots[0];
+        let files = build(&store, &[("src/lib.rs", "edited"), ("new", "n")]);
+        let (tree, trees) = store.keep_withheld(files, kept).unwrap();
+        store.write_all(&trees).unwrap();
+        let changes = store.diff(kept, tree).unwrap();
+        let paths: Vec<_> = changes.iter().map(|change| change.path.as_str()).collect();
+        assert_eq!(paths, ["new", "src/lib.rs"]);
+        let secrets = |tree| {
+            Snapshots::new(&store)
+                .entry_at(tree, &path("secrets"))
+                .unwrap()
+        };
+        assert_eq!(secrets(tree), secrets(kept), "the secret stays as it was");
+
+        let unchanged = build(&store, &[("src/lib.rs", "lib")]);
+        assert_eq!(store.keep_withheld(unchanged, kept).unwrap().0, kept);
+    }
+}
