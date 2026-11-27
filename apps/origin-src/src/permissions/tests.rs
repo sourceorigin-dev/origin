@@ -891,6 +891,21 @@ fn statement(subject: RecordId, kind: &str, issuer: &str) -> Statement {
     }
 }
 
+/// A passing result of `kind` by ada about `subject`. It reads only the
+/// README, so every revision of `main` shares its input digest.
+fn readme_result(subject: RecordId, kind: &str) -> Statement {
+    Statement {
+        verdict: Some(origin_shared::Verdict::Pass),
+        inputs: Some(origin_shared::Inputs {
+            paths: vec![path("README.md")],
+            definition: origin_shared::Digest::of(b"test"),
+            toolchain: origin_shared::Digest::of(b""),
+            external: false,
+        }),
+        ..statement(subject, kind, "user:ada")
+    }
+}
+
 /// A caller for `principal`, with a token narrowing them to `scope` that
 /// expires at `expires`.
 fn scoped(principal: &str, scope: &[&str], expires: u64) -> Caller {
@@ -949,19 +964,7 @@ fn statements_are_about_what_their_issuer_sees_and_annotates() {
         hidden
     );
 
-    let result = |subject| {
-        Statement {
-            verdict: Some(origin_shared::Verdict::Pass),
-            inputs: Some(origin_shared::Inputs {
-                paths: vec![path("README.md")],
-                definition: origin_shared::Digest::of(b"test"),
-                toolchain: origin_shared::Digest::of(b""),
-                external: false,
-            }),
-            ..statement(subject, "ci.test", "user:ada")
-        }
-        .encode()
-    };
+    let result = |subject| readme_result(subject, "ci.test").encode();
     let (of_hidden, of_visible) = (result(hidden), result(visible));
     repo.store
         .write_all(&[of_hidden.clone(), of_visible.clone()])
@@ -997,6 +1000,62 @@ fn statements_are_about_what_their_issuer_sees_and_annotates() {
         RecordId::Statement(of_hidden.id().into())
     );
     fixture.put(&eve, vec![review(&of_visible)]).unwrap();
+}
+
+#[test]
+fn promoting_copies_nothing_the_caller_cannot_see() {
+    let fixture = Fixture::new();
+    let repo = &fixture.repo;
+    let hidden = RecordId::Revision(repo.change_on_main(2, &[("secrets/key", "new")]));
+    let visible = RecordId::Revision(repo.change_on_main(3, &[("src/lib.rs", "fn b() {}")]));
+    let payload = EncodedObject::attachment(b"a review of the new secret");
+    let review = Statement {
+        payload: Some(payload.id().into()),
+        ..readme_result(hidden, "review")
+    };
+    repo.store.write_all(&[payload, review.encode()]).unwrap();
+    let promote = |who: &str| fixture.service.promote(&caller(who), visible).unwrap();
+    assert_eq!(promote("user:eve").len(), 0);
+    let [promoted] = &promote("user:ada")[..] else {
+        panic!("ada sees the review")
+    };
+    assert_eq!(promoted.statement.payload, review.payload);
+
+    let eve = caller("user:eve");
+    let naming = Statement {
+        payload: review.payload,
+        ..statement(visible, "review", "user:eve")
+    };
+    assert!(matches!(
+        forbidden(fixture.put(&eve, vec![naming.encode()])),
+        Forbidden::UnsuppliedAttachment { .. }
+    ));
+    let main = TargetName::MAIN;
+    let (_, records) = Fixture::revision(
+        5,
+        "user:eve",
+        fixture.tip(&main),
+        Vec::new(),
+        fixture.state(&main),
+    );
+    let mut revision: Revision = records[1].decode_as().unwrap();
+    revision.description = review.payload.unwrap();
+    assert!(matches!(
+        forbidden(fixture.put(&eve, vec![revision.encode()])),
+        Forbidden::UnsuppliedAttachment { .. }
+    ));
+    let promotion = Statement {
+        subject: visible,
+        issuer: "user:eve".parse().unwrap(),
+        promoted_from: Some(review.encode().id().into()),
+        ..review.clone()
+    };
+    match fixture.put(&eve, vec![review.encode(), promotion.encode()]) {
+        Err(ServiceError::UnknownRecord(record)) => {
+            assert_eq!(record, RecordId::Statement(review.encode().id().into()));
+        }
+        other => panic!("expected an unknown record, got {other:?}"),
+    }
 }
 
 #[test]

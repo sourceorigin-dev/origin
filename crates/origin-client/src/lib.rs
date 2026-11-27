@@ -22,8 +22,8 @@ use origin_shared::access::Rights;
 use origin_shared::api::{
     Annotation, ApiError, BrowseQuery, EventsQuery, FetchRecords, FetchSnapshot, Inventory,
     InventoryRequest, IssuedToken, LandRequest, Landings, Listing, LogEntry, LogQuery, MORE,
-    NewTarget, PutQuery, RepoName, RepoSummary, Revisions, StatementsQuery, Stored, TargetInfo,
-    TokenRequest,
+    NewTarget, PromoteRequest, PutQuery, RepoName, RepoSummary, Revisions, StatementsQuery, Stored,
+    TargetInfo, TokenRequest,
 };
 use origin_shared::event::Page;
 use origin_shared::landing::Pending;
@@ -93,6 +93,11 @@ endpoints! {
         /// received them.
         fn statements(query: &StatementsQuery) -> Vec<Annotation> =
             GET "statements", query(query) => json;
+        /// Promotes results to a record from the records with the same input
+        /// digest, as statements the server issues. Returns those statements, and
+        /// retries the landings waiting for them.
+        fn promote(request: &PromoteRequest) -> Vec<Annotation> =
+            POST "promote", json(request) => json;
         /// Returns what the server holds of some changes: the ids of their
         /// revisions, heads and statements.
         fn inventory(request: &InventoryRequest) -> Vec<Inventory> =
