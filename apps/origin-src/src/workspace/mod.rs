@@ -50,6 +50,7 @@ mod annotate;
 mod land;
 mod ops;
 mod registry;
+mod remote;
 
 pub use annotate::{Annotated, Payload};
 
@@ -59,7 +60,7 @@ use std::fs;
 use std::io;
 use std::mem;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use origin_platform::{LockedFile, Native};
 use origin_shared::api::{LogQuery, RevisionEntry, Revisions};
@@ -78,8 +79,11 @@ use crate::oplog::{Actor, Effect, Move, Why};
 use crate::output::FileDiff;
 use crate::policy::{Policy, PolicyError};
 use crate::queue::{LandError, Queue};
+use crate::remote::{Remote, RemoteError, RemoteUrl};
 use crate::service::{Caller, Node, OriginService, ServiceError};
 use crate::store::{Store, StoreError};
+use crate::sync::SyncError;
+use crate::tree::FileChange;
 use crate::worktree::{CloneSource, SnapshotError, StatCache, Worktree};
 
 /// A working copy and its repository.
@@ -96,6 +100,8 @@ pub struct Workspace {
     /// The path of a `moving` file, left by a crash, that couldn't be read. The
     /// working copy doesn't move while it's there.
     unreadable_move: Option<PathBuf>,
+    /// The repository's remote, once opened: see [`Workspace::remote`].
+    remote: OnceLock<Option<Remote>>,
 }
 
 /// The working copy as of a snapshot.
@@ -249,14 +255,7 @@ impl Workspace {
             author: config.user(),
         };
         let encoded = revision.encode();
-        let mut workspace = Self {
-            root,
-            store,
-            config,
-            revision: encoded.id().into(),
-            unlogged: None,
-            unreadable_move: None,
-        };
+        let mut workspace = Self::at(root, store, config, encoded.id().into());
         workspace.write(&[vec![empty_description], vec![encoded]])?;
         workspace.publish_pointer(None, workspace.revision, Why::Command)?;
         println!(
@@ -303,17 +302,25 @@ impl Workspace {
         };
         let revision =
             Self::read_pointer(root)?.ok_or_else(|| WorkspaceError::Incomplete(root.to_owned()))?;
-        let mut workspace = Self {
-            root: root.to_owned(),
-            store: Store::open_writable(store, Native::default())?
-                .with_actor(actor.in_workspace(root)),
+        let store = Store::open_writable(store, Native::default())?;
+        let store = store.with_actor(actor.in_workspace(root));
+        let mut workspace = Self::at(root.to_owned(), store, config, revision);
+        workspace.finish_move()?;
+        Ok(workspace)
+    }
+
+    /// Returns the working copy at `root`, of the repository in `store`, on
+    /// `revision`.
+    fn at(root: PathBuf, store: Store, config: UserConfig, revision: RevisionId) -> Self {
+        Self {
+            root,
+            store,
             config,
             revision,
             unlogged: None,
             unreadable_move: None,
-        };
-        workspace.finish_move()?;
-        Ok(workspace)
+            remote: OnceLock::new(),
+        }
     }
 
     /// Finishes the move that `moving` records, if a crash cut it short. It only
@@ -408,14 +415,23 @@ impl Workspace {
     /// API also offers go through it. It finds records through `index` if the
     /// command already read it, or else reads the index when needed.
     fn service(&self, index: Option<Index>) -> Result<OriginService, WorkspaceError> {
-        let node = Node {
-            name: self.config.node().clone(),
-            key: Arc::new(self.config.node_key()?),
-        };
-        let service = OriginService::new(self.store.clone(), node);
+        let service = OriginService::new(self.store.clone(), self.node()?);
         Ok(match index {
             Some(index) => service.with_index(index),
             None => service,
+        })
+    }
+
+    /// Returns this node, with its key.
+    fn node(&self) -> Result<Node, WorkspaceError> {
+        Self::node_of(&self.config)
+    }
+
+    /// Returns the node `config` names, with its key.
+    fn node_of(config: &UserConfig) -> Result<Node, WorkspaceError> {
+        Ok(Node {
+            name: config.node().clone(),
+            key: Arc::new(config.node_key()?),
         })
     }
 
@@ -782,8 +798,13 @@ impl Workspace {
     ) -> Result<(), WorkspaceError> {
         // Before changing any file.
         self.may_move()?;
+        let changes = if revision.snapshot == working_copy.files {
+            Vec::new()
+        } else {
+            self.changes(working_copy.files, revision.snapshot)?
+        };
         // The files stay as they are: there's nothing to finish.
-        if revision.snapshot == working_copy.files {
+        if changes.is_empty() {
             self.write(unwritten)?;
             return self.point_at(to, why);
         }
@@ -794,11 +815,7 @@ impl Workspace {
             why,
         };
         self.publish_moving(&moving)?;
-        let checkout = self.checkout(
-            working_copy.files,
-            revision.snapshot,
-            Some(&working_copy.cache),
-        );
+        let checkout = self.checkout(&changes, Some(&working_copy.cache));
         if let Err(error) = checkout.and_then(|()| self.write(unwritten)) {
             // So a crash finishes taking the files back, not the move, whose
             // revision may exist. Best effort: the error says what went
@@ -844,17 +861,32 @@ impl Workspace {
         Ok(Worktree::new(&self.root, &self.store).restore(&changes)?)
     }
 
-    /// Makes the files match `to`, given that they match `from`, durably, cloning
-    /// the files other workspaces already have. With `unchanged`, the stat cache of
-    /// the snapshot that found `from`, it changes nothing if a file it would change
-    /// was edited since.
+    /// Returns the changes that turn the files of `from` into those of `to`, after
+    /// fetching what the repository lacks of `to`. Moves call it before they write
+    /// `moving`, so a failed fetch moves nothing.
+    fn changes(&self, from: TreeId, to: TreeId) -> Result<Vec<FileChange>, WorkspaceError> {
+        self.need(&[to])?;
+        Ok(match self.store.diff(from, to) {
+            Err(StoreError::NotFound(missing)) => match self.remote()? {
+                Some(remote) => {
+                    self.sync(remote).repair(to)?;
+                    self.store.diff(from, to)?
+                }
+                None => return Err(StoreError::NotFound(missing).into()),
+            },
+            changes => changes?,
+        })
+    }
+
+    /// Makes the files match a snapshot, given `changes`, how they differ from it,
+    /// durably, cloning the files other workspaces already have. With `unchanged`,
+    /// the stat cache of the snapshot `changes` start from, it changes nothing if a
+    /// file it would change was edited since.
     fn checkout(
         &self,
-        from: TreeId,
-        to: TreeId,
+        changes: &[FileChange],
         unchanged: Option<&StatCache>,
     ) -> Result<(), WorkspaceError> {
-        let changes = self.store.diff(from, to)?;
         if changes.is_empty() {
             return Ok(());
         }
@@ -867,7 +899,7 @@ impl Workspace {
                 CloneSource::saved(root, cache)
             })
             .collect();
-        Ok(Worktree::new(&self.root, &self.store).checkout(&changes, &sources, unchanged)?)
+        Ok(Worktree::new(&self.root, &self.store).checkout(changes, &sources, unchanged)?)
     }
 
     /// `origin status`: prints the working copy's change, what it is on
@@ -946,7 +978,7 @@ impl Workspace {
             let files = files.unwrap_or(revision.snapshot);
             println!(
                 "Change {}{}",
-                revision.change.short(),
+                revision.change,
                 self.flags(index, revision.change)?
             );
             let edited = if files == revision.snapshot {
@@ -976,6 +1008,7 @@ impl Workspace {
     /// Prints the changes `snapshot` makes to `base`, line by line.
     fn print_diff(&self, base: Base, snapshot: TreeId) -> Result<(), WorkspaceError> {
         let base = self.base_tree(base)?;
+        self.need(&[snapshot])?;
         for change in self.store.diff(base, snapshot)? {
             print!("{}", FileDiff::new(&self.store, &change)?);
         }
@@ -1192,6 +1225,11 @@ impl Workspace {
             heads[heads.len() - 1]
         };
         let kept_revision: Revision = self.store.get(kept)?;
+        let snapshots = heads
+            .iter()
+            .map(|&head| Ok(self.store.get(head)?.snapshot))
+            .collect::<Result<Vec<_>, WorkspaceError>>()?;
+        self.need(&snapshots)?;
         let base = self.merge_base(&heads)?;
         let mut snapshot = kept_revision.snapshot;
         let mut merged = Conflicts::default();
@@ -1267,13 +1305,16 @@ impl Workspace {
     /// snapshot of the newest revision they all evolve from. If several such
     /// revisions exist and none evolves from another, returns their
     /// [merge](Ancestry::merge_base). Returns `None` if the heads have no common
-    /// revision.
+    /// revision. Fetches the snapshots it reads that a clone lacks.
     fn merge_base(&self, heads: &[RevisionId]) -> Result<Option<TreeId>, WorkspaceError> {
         let ancestry = Ancestry::walk(heads, |id| {
             let revision: Revision = self.store.get(id)?;
             Ok::<_, StoreError>((revision.predecessors, revision.snapshot))
         })?;
-        Ok(ancestry.merge_base(&self.store, heads)?)
+        ancestry.merge_base(&self.store, heads, |id| {
+            let revision: Revision = self.store.get(id)?;
+            self.need(&[revision.snapshot])
+        })
     }
 
     /// `origin log [<target>]`: prints the working copy's stack of changes
@@ -1488,12 +1529,15 @@ impl Workspace {
         shorts.join(", ")
     }
 
-    /// The snapshot a revision was made on top of.
+    /// Returns the snapshot a revision was made on top of, fetching it if the
+    /// repository lacks it.
     fn base_tree(&self, base: Base) -> Result<TreeId, WorkspaceError> {
-        Ok(match base {
+        let tree = match base {
             Base::Acceptance(id) => self.store.get(id)?.body().state,
             Base::Revision(id) => self.store.get(id)?.snapshot,
-        })
+        };
+        self.need(&[tree])?;
+        Ok(tree)
     }
 
     fn describe_base(&self, base: Base) -> Result<String, WorkspaceError> {
@@ -1548,6 +1592,23 @@ pub enum WorkspaceError {
     /// No target has this name.
     #[error("no target is named `{0}`")]
     UnknownTarget(TargetName),
+    /// No revision of the change is known.
+    #[error("change {} has no revisions", .0.short())]
+    UnknownChange(ChangeId),
+    /// A command needs a remote, and the repository has none.
+    #[error("this repository has no remote: set one with `origin remote <url>`")]
+    NoRemote,
+    /// The remote is a repository on a local path that has a remote of its own,
+    /// such as a clone: it only holds the snapshots it read, but syncing needs a
+    /// remote that holds them all.
+    #[error(
+        "{0} has a remote of its own, so it lacks the snapshots it never read: use that remote \
+         instead"
+    )]
+    RemoteWithRemote(RemoteUrl),
+    /// `clone` was given no path, and the URL names no directory.
+    #[error("cannot tell the repository's name from its URL: pass a path")]
+    Unnamed,
     /// An acceptance belongs to a target this repository doesn't have.
     #[error("no target has the id {0}")]
     UnknownTargetId(TargetId),
@@ -1661,6 +1722,12 @@ pub enum WorkspaceError {
     /// The repository's service refused a call.
     #[error(transparent)]
     Service(#[from] ServiceError),
+    /// The remote cannot be opened, or refused a call.
+    #[error(transparent)]
+    Remote(#[from] RemoteError),
+    /// Syncing with the remote failed.
+    #[error(transparent)]
+    Sync(#[from] SyncError),
     /// `undo` found no operation of this workspace to take back.
     #[error("nothing to undo: no operation moved this workspace's working copy")]
     NothingToUndo,

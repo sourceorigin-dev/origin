@@ -186,7 +186,7 @@ impl<'a, P: Platform> Queue<'a, P> {
         let state = self.store.get(tip.acceptance)?.body().state;
         let tips = [session.tip.acceptance, tip.acceptance];
         let history = session.history(&tips)?;
-        let base = history.merge_base(self.store, &tips)?;
+        let base = history.merge_base(self.store, &tips, |_| Ok::<_, StoreError>(()))?;
         let merge = self.store.merge(base, state, session.state)?;
         let proposal = Proposal::Target(source.clone());
         if !merge.conflicts.is_empty() {
