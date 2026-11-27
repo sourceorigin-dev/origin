@@ -1,12 +1,12 @@
-//! Enforces what callers may do, as their [`Rights`] say: what they read
-//! of a repository's records, and what the records they put may hold.
+//! Enforces what callers may read and put, as their [`Rights`] say.
 //!
 //! A caller who reads no path does not see the repository at all. Otherwise
 //! they see the targets, acceptances, revisions that change a path they read
 //! or nothing, and statements about what they see; snapshots withhold the
-//! content of the other paths (see [`Store::added`]). Every record put must be
-//! the caller's, of a kind they may annotate, about what they see, and bring the
-//! attachments it carries (see [`Batch`]). `docs/design.md` lists the rules.
+//! other paths (see [`Store::added`]). Every record put must be the caller's,
+//! of a kind they may annotate, about what they see, and bring its attachments
+//! ([`Batch`]); a revision only evolves from what they see and holds only
+//! content they supply ([`Store::unsupplied`]). `docs/design.md` has the rules.
 
 use std::collections::{HashMap, HashSet};
 use std::iter;
@@ -15,7 +15,7 @@ use origin_platform::Platform;
 use origin_shared::access::{Capability, PathAccess, Rights};
 use origin_shared::event::EventKind;
 use origin_shared::{
-    Kind, Object, ObjectId, Principal, RecordId, RepoPath, Revision, RevisionId, Statement,
+    Base, Kind, Object, ObjectId, Principal, RecordId, RepoPath, Revision, RevisionId, Statement,
 };
 
 use crate::annotations::RevisionView;
@@ -261,6 +261,45 @@ impl<'a, P: Platform> Writer<'a, P> {
         }
         Ok(())
     }
+
+    /// Checks a revision being put, whose objects are already written.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the caller isn't its author, doesn't see a revision it evolves
+    /// from, or it holds content they neither supplied nor share with a
+    /// snapshot it refers to, or if a tree cannot be read.
+    pub fn revision(&mut self, id: RevisionId, revision: &Revision) -> Result<(), PutError> {
+        if revision.author != *self.principal {
+            return Err(Forbidden::NotYours {
+                record: "revision",
+                by: revision.author.clone(),
+                caller: self.principal.clone(),
+            }
+            .into());
+        }
+        let base = match revision.base {
+            Base::Revision(id) => self.batch.revision(id)?.snapshot,
+            Base::Acceptance(_) => self.batch.store.base_snapshot(revision.base)?,
+        };
+        let mut references = vec![base];
+        for &id in &revision.predecessors {
+            if !self.sees(RecordId::Revision(id))? {
+                return Err(PutError::Unseen(RecordId::Revision(id)));
+            }
+            references.push(self.batch.revision(id)?.snapshot);
+        }
+        self.brings("revision", revision.description.into())?;
+        if !self.rights.paths.reads_all() {
+            let store = self.batch.store;
+            let unsupplied =
+                store.unsupplied(revision.snapshot, &references, &self.batch.supplied)?;
+            if let Some(path) = unsupplied {
+                return Err(Forbidden::Unsupplied { revision: id, path }.into());
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Something a caller may not do.
@@ -288,6 +327,19 @@ pub enum Forbidden {
     /// A path the caller may not read.
     #[error("you may not read `{0}`")]
     Read(RepoPath),
+    /// A revision holds content its writer didn't supply, at a path where no
+    /// snapshot it refers to has that content.
+    #[error(
+        "revision {} holds content at `{path}` that it neither brings nor shares with a \
+         snapshot it refers to",
+        revision.short()
+    )]
+    Unsupplied {
+        /// The revision.
+        revision: RevisionId,
+        /// The path.
+        path: RepoPath,
+    },
     /// A record carries an attachment the repository has, as a revision's
     /// description or a statement's payload, but its batch doesn't bring it.
     #[error("the {record} carries attachment {attachment}, which it doesn't bring")]
