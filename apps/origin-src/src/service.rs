@@ -40,18 +40,10 @@ use parking_lot::{Condvar, Mutex, MutexGuard};
 use crate::annotations::{AnnotateError, Annotations};
 use crate::events::{Events, Wakeup};
 use crate::index::Index;
+pub use crate::permissions::Caller;
 use crate::policy::{Policy, PolicyError};
 use crate::queue::{LandError, Queue};
 use crate::store::{Store, StoreError};
-
-/// Who is calling the service.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Caller {
-    /// The node's own user, through the command line.
-    Owner,
-    /// A client of a server that sent no credentials.
-    Anonymous,
-}
 
 /// A node: its name, and the key it signs acceptances with as the authority of
 /// the targets its repositories' policies name it for. All repositories on a

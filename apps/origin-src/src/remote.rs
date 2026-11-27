@@ -19,6 +19,7 @@ use origin_shared::event::Page;
 use origin_shared::landing::Pending;
 use origin_shared::pack::{Pack, Part};
 
+use crate::config::UserConfig;
 use crate::service::{Caller, Node, OriginService, ServiceError};
 use crate::workspace::Workspace;
 
@@ -93,22 +94,29 @@ calls! {
 }
 
 impl Remote {
-    /// Opens the remote at `url`: an `http://` URL whose last path segment
-    /// names the repository, or the path of a repository, which `node`
-    /// serves in-process.
+    /// Opens the remote at `url`: an `http://` URL whose last path segment names
+    /// the repository, called with `token` if there is one, or the path of a
+    /// repository, which `node` serves in-process, to its owner.
     ///
     /// # Errors
     ///
     /// Fails if the URL names no repository, or the path holds none.
-    pub fn open(url: &RemoteUrl, node: Node) -> Result<Self, RemoteError> {
+    pub fn open(url: &RemoteUrl, node: Node, token: Option<String>) -> Result<Self, RemoteError> {
         match url {
-            RemoteUrl::Http { base, repo } => Ok(Self::Http {
-                runtime: tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .map_err(RemoteError::Runtime)?,
-                repo: Client::new(base).repo(repo.clone()),
-            }),
+            RemoteUrl::Http { base, repo } => {
+                let client = Client::new(base);
+                let client = match token {
+                    Some(token) => client.with_token(token),
+                    None => client,
+                };
+                Ok(Self::Http {
+                    runtime: tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .map_err(RemoteError::Runtime)?,
+                    repo: client.repo(repo.clone()),
+                })
+            }
             RemoteUrl::Path(path) => {
                 let meta = path.join(Workspace::META_DIR);
                 let root = if meta.is_dir() { meta } else { path.clone() };
@@ -135,6 +143,16 @@ pub enum RemoteUrl {
 }
 
 impl RemoteUrl {
+    /// Returns the token the user of `config` sends this remote, if any. A local
+    /// path gets none: it serves the user as its owner.
+    #[must_use]
+    pub fn token(&self, config: &UserConfig) -> Option<String> {
+        match self {
+            Self::Http { base, .. } => config.token(base),
+            Self::Path(_) => None,
+        }
+    }
+
     /// Parses a remote URL: `http://host[:port]/<repository>`, or a path, which it
     /// makes absolute so the URL works from any directory.
     ///

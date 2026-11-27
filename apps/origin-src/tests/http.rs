@@ -19,6 +19,7 @@ use origin_shared::{
     NodeKey, Period, Record, RecordId, RepoPath, Revision, RevisionId, Source, Statement,
     TargetName, Tree, TreeEntry, TreeId, Verdict,
 };
+use origin_src::auth::{Credentials, StaticTokens};
 use origin_src::http::Api;
 use origin_src::policy::Policy;
 use origin_src::server::Repositories;
@@ -26,7 +27,8 @@ use origin_src::service::{Node, OriginService};
 
 /// A server hosting two repositories: `demo`, whose policy requires nothing,
 /// and `strict`, whose `main` requires a passing `ci.test` from `user:ci`.
-/// The server's node, `hosted`, orders both.
+/// The server's node, `hosted`, orders both. `user:ada` and `user:ci` have
+/// static tokens.
 struct Server {
     _dir: tempfile::TempDir,
     client: Client,
@@ -35,6 +37,8 @@ struct Server {
 }
 
 impl Server {
+    const TOKENS: &str = "\"user:ada\" = \"ada-token\"\n\"user:ci\" = \"ci-token\"\n";
+
     async fn start() -> Self {
         let dir = tempfile::tempdir().unwrap();
         let node = Node {
@@ -48,7 +52,8 @@ impl Server {
              require = [{{ kind = \"ci.test\", verdict = \"pass\", issuer = \"user:ci\" }}]\n",
             node.key.public()
         );
-        let mut repositories = Repositories::default();
+        let tokens: StaticTokens = toml::from_str(Self::TOKENS).unwrap();
+        let mut repositories = Repositories::new(Credentials::new(node.clone(), Box::new(tokens)));
         for (name, policy) in [("demo", open), ("strict", strict)] {
             let service =
                 OriginService::create(dir.path().join(name), node.clone(), &policy).unwrap();
@@ -58,7 +63,7 @@ impl Server {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, Api::router(repositories)).await });
-        let client = Client::new(&format!("http://{address}"));
+        let client = Client::new(&format!("http://{address}")).with_token("ada-token");
         Self {
             _dir: dir,
             demo: client.repo("demo".parse().unwrap()),

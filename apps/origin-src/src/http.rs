@@ -1,8 +1,10 @@
 //! The HTTP API: routes that translate requests into [`OriginService`] calls on
 //! the repository they name. `utoipa` documents every route and generates the
 //! OpenAPI document; `origin-client` is the Rust SDK for it.
+//!
+//! Callers authenticate with `Authorization: Bearer <token>` (see
+//! [`Credentials`](crate::auth::Credentials)); without it, they are anonymous.
 
-use std::convert::Infallible;
 use std::sync::Arc;
 
 use axum::body::Bytes;
@@ -13,6 +15,7 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use origin_shared::ChangeId;
 use origin_shared::Head;
+use origin_shared::access::InvalidToken;
 use origin_shared::api::{
     Annotation, ApiError, ErrorCode, EventsQuery, FetchRecords, FetchSnapshot, Inventory,
     InventoryRequest, LandRequest, Landings, LogEntry, LogQuery, MORE, NewTarget, PutQuery,
@@ -81,15 +84,23 @@ impl Api {
     }
 }
 
-/// Makes every request anonymous: nothing authenticates callers yet.
+/// Identifies the caller of a request by its bearer token.
 impl FromRequestParts<Arc<Repositories>> for Caller {
-    type Rejection = Infallible;
+    type Rejection = HttpError;
 
     fn from_request_parts(
-        _parts: &mut Parts,
-        _repositories: &Arc<Repositories>,
-    ) -> impl Future<Output = Result<Self, Infallible>> + Send {
-        std::future::ready(Ok(Self::Anonymous))
+        parts: &mut Parts,
+        repositories: &Arc<Repositories>,
+    ) -> impl Future<Output = Result<Self, HttpError>> + Send {
+        let authorization = parts
+            .headers
+            .get(header::AUTHORIZATION)
+            .map(|value| value.to_str().map_err(|_| InvalidToken::Malformed))
+            .transpose();
+        let caller = authorization
+            .and_then(|authorization| repositories.credentials().caller(authorization))
+            .map_err(HttpError::Unauthorized);
+        std::future::ready(caller)
     }
 }
 
@@ -161,12 +172,17 @@ async fn call<T: Send + 'static, E: From<ServiceError> + Into<HttpError> + Send 
 }
 
 /// A failed request, rendered as an [`ApiError`].
-enum HttpError {
+pub enum HttpError {
+    /// The service refused or failed.
     Service(ServiceError),
+    /// The request's pack is invalid.
     Pack(PackError),
+    /// The caller's credentials are invalid.
+    Unauthorized(InvalidToken),
     /// axum rejected the request's path, query or body, with this status. It is the
     /// client's error, unless a route doesn't match its handler.
     Rejected(StatusCode, String),
+    /// The service panicked.
     Panicked(String),
 }
 
@@ -185,6 +201,7 @@ impl IntoResponse for HttpError {
             }
             Self::Service(error) => (error.code(), error.to_string()),
             Self::Pack(error) => (ErrorCode::BadRequest, format!("invalid pack: {error}")),
+            Self::Unauthorized(error) => (ErrorCode::Unauthorized, error.to_string()),
             Self::Rejected(status, message) if status.is_server_error() => {
                 tracing::error!(%message, "request rejected");
                 (ErrorCode::Internal, "internal server error".to_owned())
@@ -200,6 +217,7 @@ impl IntoResponse for HttpError {
             ErrorCode::NotFound => StatusCode::NOT_FOUND,
             ErrorCode::Conflict => StatusCode::CONFLICT,
             ErrorCode::Expired => StatusCode::GONE,
+            ErrorCode::Unauthorized => StatusCode::UNAUTHORIZED,
             ErrorCode::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (status, Json(ApiError { code, message })).into_response()
@@ -226,7 +244,10 @@ impl utoipa::ToSchema for Binary {}
     get,
     path = "/api/v1/repos",
     operation_id = "list_repos",
-    responses((status = 200, description = "The repositories, by name", body = Vec<RepoSummary>))
+    responses(
+        (status = 200, description = "The repositories, by name", body = Vec<RepoSummary>),
+        (status = 401, description = "The token is invalid or expired", body = ApiError)
+    )
 )]
 async fn list_repos(State(repositories): Repos, caller: Caller) -> Json<Vec<RepoSummary>> {
     Json(repositories.list(&caller))
@@ -545,7 +566,9 @@ async fn landings(
 }
 
 /// Reads the events after a cursor, waiting up to `wait` for some to arrive (a
-/// long-poll). Pass the page's `next` as the next request's cursor.
+/// long-poll). Pass the page's `next` as the next request's cursor. While too
+/// many long-polls are waiting on the server, a request first waits for one of
+/// them to end, and that time counts toward `wait`.
 #[utoipa::path(
     get,
     path = "/api/v1/repos/{repo}/events",
@@ -558,12 +581,14 @@ async fn landings(
     )
 )]
 async fn events(
-    repos: Repos,
+    State(repositories): Repos,
     Path(repo): Path<RepoName>,
     caller: Caller,
-    Query(query): Query<EventsQuery>,
+    Query(mut query): Query<EventsQuery>,
 ) -> Result<Json<Page>, HttpError> {
-    call(repos, repo, caller, move |service, caller| {
+    let permit = repositories.poll(&mut query).await;
+    call(State(repositories), repo, caller, move |service, caller| {
+        let _permit = permit;
         service.events(caller, &query)
     })
     .await

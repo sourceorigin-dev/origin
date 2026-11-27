@@ -110,7 +110,9 @@ Changes are named by a unique prefix of their id, or `@` for the working
 copy's. A revision is `@`, a change (for its head), or a unique prefix of
 the revision's id. Your name and node key live in `$ORIGIN_CONFIG_DIR`, or
 else `origin` in `$XDG_CONFIG_HOME` or `~/.config`: set `user = "<name>"`
-in its `config.toml` if `$USER` isn't the name you want. See
+in its `config.toml` if `$USER` isn't the name you want, and the token to
+send each server under `[tokens]`, by its URL
+(`"http://127.0.0.1:7878" = "<token>"`), or in `$ORIGIN_TOKEN`. See
 [the design](docs/design.md) for the model.
 
 `converge` merges the files of a change's heads. A text file two heads
@@ -142,6 +144,9 @@ key = "node.key"         # its secret key, created if missing
 
 [repos]
 demo = "repos/demo"
+
+[tokens]                 # static tokens, by principal
+"user:alice" = "a long random secret"
 ```
 
 The HTTP API, under `/api/v1`, puts records in batches, if the changes
@@ -157,8 +162,8 @@ generation of the op log it's of: pass it back as `generation`, and a
 cursor of another log, such as from before the repository was restored,
 is refused as expired.
 [`docs/openapi.json`](docs/openapi.json) describes it, and
-[`origin-client`](crates/origin-client) is its Rust SDK. Nothing
-authenticates callers yet.
+[`origin-client`](crates/origin-client) is its Rust SDK. Callers send
+`Authorization: Bearer <token>`; without one, they are anonymous.
 
 ## Development
 
