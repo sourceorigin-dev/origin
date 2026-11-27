@@ -155,31 +155,31 @@ fn lists_what_the_haves_lack() {
     };
 
     assert_eq!(
-        paths(store.added(new, &[old], &[]).unwrap()),
+        paths(store.added(new, &[old], &[], None).unwrap()),
         ["/", "docs", "docs/copy", "edit", "edit/b", "file"],
         "`file/now-dir` has the content of `docs/copy`, listed first"
     );
     assert_eq!(
-        store.added(new, &[], &[]).unwrap().len(),
+        store.added(new, &[], &[], None).unwrap().len(),
         8,
         "5 trees, and 5 files of 3 contents"
     );
-    assert_eq!(store.added(new, &[new], &[]).unwrap(), []);
+    assert_eq!(store.added(new, &[new], &[], None).unwrap(), []);
     let empty = build(&store, &[]);
     assert_eq!(
-        paths(store.added(new, &[empty, old], &[]).unwrap()),
-        paths(store.added(new, &[old], &[]).unwrap()),
+        paths(store.added(new, &[empty, old], &[], None).unwrap()),
+        paths(store.added(new, &[old], &[], None).unwrap()),
         "any have holding an object is enough"
     );
 
     let only = |path: &str| [RepoPath::new(path).unwrap()];
     assert_eq!(
-        paths(store.added(new, &[], &only("edit/b")).unwrap()),
+        paths(store.added(new, &[], &only("edit/b"), None).unwrap()),
         ["/", "edit", "edit/b"],
         "the trees on the way, then the path"
     );
     assert_eq!(
-        paths(store.added(new, &[old], &only("same")).unwrap()),
+        paths(store.added(new, &[old], &only("same"), None).unwrap()),
         ["/"]
     );
 }

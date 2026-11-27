@@ -29,7 +29,7 @@
     },
     "/api/v1/repos": {
       "get": {
-        "summary": "Lists the repositories on the server.",
+        "summary": "Lists the repositories on the server that the caller sees.",
         "operationId": "list_repos",
         "responses": {
           "200": {
@@ -1354,13 +1354,13 @@
             "items": {
               "$ref": "#/components/schemas/ObjectId"
             },
-            "description": "The ids of the records, which are returned in this order, each followed\nby its attachment. A response with the [`MORE`] header stops short. Ask\nagain for the records after the last one it holds."
+            "description": "The ids of the records, which are returned in this order, each followed\nby its attachment. Records the caller may not read are left out. A\nresponse with the [`MORE`] header stops short. Ask again for the records\nafter the last one it holds."
           }
         }
       },
       "FetchSnapshot": {
         "type": "object",
-        "description": "A request for the trees and blobs of a snapshot that the caller lacks,\nwalked from its root. This is the only way blobs and trees leave a\nrepository, so the server can check what each caller may read by path.",
+        "description": "A request for the trees and blobs of a snapshot that the caller lacks,\nwalked from its root. This is the only way blobs and trees leave a\nrepository, so the server checks what each caller may read by path. The\ncontent of paths the caller may not read is withheld, but its entries\nstay in the trees.",
         "required": [
           "of"
         ],
