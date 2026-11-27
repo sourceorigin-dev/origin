@@ -2,7 +2,7 @@ use std::fs::File;
 use std::io;
 use std::os::unix::fs::FileExt;
 
-/// Reads at an offset without moving a file's cursor, so any number of
+/// Reads at an offset without moving the file's cursor, so any number of
 /// threads can read one open file at once.
 ///
 /// The default method uses `pread`, which every supported platform has.

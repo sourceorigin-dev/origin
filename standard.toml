@@ -109,5 +109,4 @@ paths = [
     "apps/origin-src/src/workspace/mod.rs",
     "apps/origin-src/src/workspace/ops.rs",
     "apps/origin-src/src/worktree/mod.rs",
-    "crates/origin-platform/src/durability/mod.rs",
 ]

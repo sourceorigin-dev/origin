@@ -1,6 +1,5 @@
 //! The implementations of the platform traits, one module per supported
-//! platform. Each calls its platform's own system calls, so only the one for
-//! the build target is compiled.
+//! platform. Only the module for the build target is compiled.
 
 cfg_select! {
     target_os = "linux" => {

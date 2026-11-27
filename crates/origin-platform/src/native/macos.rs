@@ -1,6 +1,7 @@
-//! macOS: `F_FULLFSYNC`, which also flushes the drive's cache, `flock`,
-//! clones with `clonefile` (APFS), `pread`, and file systems told apart by
-//! their `statfs` type name.
+//! The macOS platform. It syncs with `fsync` and `F_FULLFSYNC`, which also
+//! flushes the drive's cache, locks with `flock`, clones with `clonefile`
+//! (APFS), reads with `pread`, and identifies file systems by their
+//! `statfs` type name.
 
 use std::fs::File;
 use std::io::{self, ErrorKind};
@@ -13,11 +14,12 @@ use crate::{CloneFile, Durability, Error, FileLock, FileSystem, FsKind, Op, Proc
 pub struct MacOs;
 
 impl MacOs {
-    /// The file system cannot clone. The standard library leaves this code
-    /// uncategorized, since it differs from `EOPNOTSUPP` on macOS.
+    /// The `ENOTSUP` error code: the file system cannot clone. It differs from
+    /// `EOPNOTSUPP` on macOS, and the standard library leaves it
+    /// uncategorized.
     const ENOTSUP: i32 = 45;
 
-    /// Network file systems by type name.
+    /// The type names and display names of network file systems.
     const NETWORK: [(&str, &str); 4] = [
         ("nfs", "NFS"),
         ("smbfs", "SMB"),
@@ -28,8 +30,8 @@ impl MacOs {
     /// The type names of macFUSE, which serves sshfs as well as local disks.
     const FUSE: [&str; 3] = ["macfuse", "osxfuse", "osxfusefs"];
 
-    /// Classifies a file system by its type name. Any file system not known
-    /// to be networked is local, except FUSE.
+    /// Classifies a file system by its type name. macFUSE is `Unknown`, known
+    /// network file systems are `Network`, and everything else is `Local`.
     fn classify(name: &[u8]) -> FsKind {
         if Self::FUSE.iter().any(|fuse| fuse.as_bytes() == name) {
             return FsKind::Unknown("macFUSE");
@@ -42,9 +44,9 @@ impl MacOs {
 }
 
 impl Durability for MacOs {
-    /// A plain `fsync` of each file, which hands its data to the drive
-    /// without flushing the drive's cache, then a single `F_FULLFSYNC` that
-    /// flushes the cache for all of them, as SQLite does.
+    /// Syncs each file with a plain `fsync`, which hands its data to the drive
+    /// without flushing the drive's cache, then flushes the cache once for all
+    /// of them with `F_FULLFSYNC`, as SQLite does.
     fn sync_batch<'f>(&self, files: impl IntoIterator<Item = &'f Path>) -> Result<(), Error> {
         let mut last = None;
         for path in files {
@@ -74,8 +76,8 @@ impl Processes for MacOs {
 impl ReadAt for MacOs {}
 
 impl CloneFile for MacOs {
-    /// `clonefile` reports `ENOTSUP` on file systems that cannot clone and
-    /// `EXDEV` across volumes.
+    /// Returns true for the errors `clonefile` reports when it cannot clone:
+    /// `ENOTSUP` (the file system cannot clone) and `EXDEV` (across volumes).
     fn cannot_clone(&self, error: &io::Error) -> bool {
         matches!(
             error.kind(),
@@ -85,7 +87,8 @@ impl CloneFile for MacOs {
 }
 
 impl FileSystem for MacOs {
-    /// The type name is a NUL-terminated C string.
+    /// Reads the type name with `statfs`. The name is a NUL-terminated C
+    /// string.
     fn file_system(&self, path: &Path) -> io::Result<FsKind> {
         let stat = rustix::fs::statfs(path)?;
         let name = stat.f_fstypename.map(|c| c.to_ne_bytes()[0]);

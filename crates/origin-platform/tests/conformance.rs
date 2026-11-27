@@ -1,9 +1,10 @@
-//! The conformance suite every [`Platform`] must pass, run against the one
-//! built for this target.
+//! The conformance suite every [`Platform`] must pass, run against the
+//! platform for this build target.
 
 use origin_platform::Native;
 
-/// Runs each test of the suite against a platform.
+/// Generates one `#[test]` per named test of the suite, each run against
+/// the given platform.
 macro_rules! conformance {
     ($platform:expr; $($test:ident),* $(,)?) => {
         $(
@@ -52,9 +53,9 @@ mod suite {
         Processes, WritableError,
     };
 
-    /// Stages a batch from several threads, large enough to be renamed from
-    /// several too, then reads it back through fresh opens once the write is
-    /// gone.
+    /// Stages 512 files from several threads, enough for the commit to rename
+    /// them on several threads too, then checks that each file reads back and
+    /// that no temporary file is left.
     pub fn batches_survive_reopen(platform: &impl Platform) {
         let root = tempfile::tempdir().unwrap();
         let path = |file: usize| root.path().join(format!("objects/{:02x}/{file}", file % 4));
@@ -155,8 +156,8 @@ mod suite {
     /// What the child prints once it holds the lock.
     const HELD: &str = "origin: lock held";
 
-    /// Reruns this test binary as a child that holds a lock, then kills it
-    /// as a crash would.
+    /// Runs this test binary again as a child that holds a lock, kills the
+    /// child as a crash would, and checks that the lock is released.
     pub fn locks_are_released_when_the_holder_dies(platform: &impl Platform) {
         if let Some(path) = env::var_os(HOLDER) {
             let _held = LockedFile::open(platform, Path::new(&path), LockMode::Exclusive).unwrap();
@@ -188,8 +189,9 @@ mod suite {
         assert!(other.is_some(), "the lock outlived its holder");
     }
 
-    /// Clones where the test's file system can, and reports it can't
-    /// otherwise.
+    /// Clones a file and checks that the clone is independent of the
+    /// original. On a file system that cannot clone, checks that the clone
+    /// fails with `Unsupported` and leaves no file behind.
     #[expect(clippy::panic, reason = "A test helper fails by panicking.")]
     pub fn clones_are_independent_or_unsupported(platform: &impl Platform) {
         let root = tempfile::tempdir().unwrap();
@@ -208,7 +210,9 @@ mod suite {
         }
     }
 
-    /// Callers copy on `Unsupported`, which must not hide real failures.
+    /// Checks that a missing source or an existing target fails with `Io`,
+    /// not `Unsupported`: callers copy on `Unsupported`, which would hide the
+    /// failure.
     pub fn clone_failures_are_not_unsupported(platform: &impl Platform) {
         let root = tempfile::tempdir().unwrap();
         let (from, to) = (root.path().join("from"), root.path().join("to"));

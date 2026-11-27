@@ -17,18 +17,18 @@ use crate::{CloneFile, Durability, Error, FileLock, FileSystem, FsKind, Op, Proc
 pub struct Linux;
 
 impl Linux {
-    /// The most files a batch syncs each on its own, rather than with
+    /// The most files a batch syncs one by one. A larger batch uses a single
     /// `syncfs`.
     const SYNC_EACH: usize = 2;
 
-    /// The file system has no clone ioctl at all.
+    /// The `ENOTTY` error code: the file system has no clone ioctl at all.
     const ENOTTY: i32 = 25;
 
     /// The magic number every FUSE file system reports.
     const FUSE: u32 = 0x6573_5546;
 
-    /// Network file systems by magic number, from `linux/magic.h` and the
-    /// file systems' own sources.
+    /// The magic numbers and names of network file systems, from
+    /// `linux/magic.h` and the file systems' own sources.
     const NETWORK: [(u32, &str); 11] = [
         (0x6969, "NFS"),
         (0x517B, "SMB"),
@@ -49,9 +49,9 @@ impl Linux {
         sync(&file).map_err(|source| Error::new(Op::Sync, path, source))
     }
 
-    /// Classifies a file system by its magic number. Any file system not
-    /// known to be networked is local, except FUSE: sshfs and local disks
-    /// served through it share one magic number.
+    /// Classifies a file system by its magic number. FUSE is `Unknown`, since
+    /// sshfs and local disks served through it share one magic number. Known
+    /// network file systems are `Network`, and everything else is `Local`.
     fn classify(magic: u32) -> FsKind {
         if magic == Self::FUSE {
             return FsKind::Unknown("FUSE");
@@ -64,14 +64,14 @@ impl Linux {
 }
 
 impl Durability for Linux {
-    /// One `syncfs` of the file system holding the files, which costs about
-    /// as much as two `fdatasync`s however many files there are.
+    /// Syncs a batch of up to two files by syncing each file, in parallel.
+    /// Syncs a larger batch with one `syncfs` of the file system holding the
+    /// first file, which costs about as much as two `fdatasync`s however many
+    /// files there are.
     ///
-    /// `syncfs` also waits for every other process's unwritten data on that
-    /// file system, so a busy disk slows it down. Batches of up to two
-    /// files, such as a record and the index log, sync each on its own
-    /// instead, all at once: a journaling file system commits them together,
-    /// for about the cost of one `fdatasync`.
+    /// `syncfs` also waits for other processes' unwritten data on that file
+    /// system, which is why small batches, such as a record and the index log,
+    /// sync each file instead.
     fn sync_batch<'f>(&self, files: impl IntoIterator<Item = &'f Path>) -> Result<(), Error> {
         let first: Vec<_> = files.into_iter().take(Self::SYNC_EACH + 1).collect();
         let Some((&one, others)) = first.split_first() else {
@@ -146,9 +146,10 @@ impl Linux {
 impl ReadAt for Linux {}
 
 impl CloneFile for Linux {
-    /// `FICLONE` reports `EOPNOTSUPP` on file systems that cannot clone,
-    /// `EXDEV` across file systems, `EINVAL` when the file system cannot
-    /// clone these particular files, and `ENOTTY` without the ioctl.
+    /// Returns true for the errors `FICLONE` reports when it cannot clone:
+    /// `EOPNOTSUPP` (the file system cannot clone), `EXDEV` (across file
+    /// systems), `EINVAL` (it cannot clone these files) and `ENOTTY` (no clone
+    /// ioctl).
     fn cannot_clone(&self, error: &io::Error) -> bool {
         matches!(
             error.kind(),
@@ -158,8 +159,8 @@ impl CloneFile for Linux {
 }
 
 impl FileSystem for Linux {
-    /// Magic numbers are 32 bits wide, in a field as wide as a pointer: one
-    /// that doesn't fit is no file system origin knows.
+    /// Reads the magic number with `statfs`. A value that doesn't fit in 32
+    /// bits is no known file system, so it is `Unknown`.
     fn file_system(&self, path: &Path) -> io::Result<FsKind> {
         let stat = rustix::fs::statfs(path)?;
         Ok(u32::try_from(stat.f_type).map_or(FsKind::Unknown("unrecognized"), Self::classify))

@@ -1,7 +1,7 @@
 use super::*;
 
-/// Records syncs instead of performing them, and fails batches when
-/// asked to.
+/// A `Durability` that records syncs instead of performing them, and fails
+/// batch syncs when `fail_batches` is set.
 #[derive(Default)]
 struct Recorder {
     calls: Mutex<Vec<Call>>,
@@ -11,8 +11,8 @@ struct Recorder {
 #[derive(Debug, PartialEq, Eq)]
 enum Call {
     Dir(PathBuf),
-    /// A batch sync, with how many of its files were still unpublished
-    /// temporary files.
+    /// A batch sync, with how many of its files existed when it ran: staged
+    /// files not yet renamed, or files written in place.
     Batch(usize),
 }
 
@@ -43,7 +43,7 @@ impl Durability for Recorder {
     }
 }
 
-/// The names in `dir`, sorted.
+/// Returns the names in `dir`, sorted.
 fn names(dir: &Path) -> Vec<String> {
     let mut names: Vec<_> = fs::read_dir(dir)
         .unwrap()
