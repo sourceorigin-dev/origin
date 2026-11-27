@@ -6,8 +6,9 @@
 //! A service lives as long as its process; its calls run concurrently, up to
 //! [`OriginService::MAX_INDEXES`] (see "The landing queue" in `docs/design.md`).
 //!
-//! Every method takes the [`Caller`] and filters what they read by their
-//! [`Rights`] (see [`permissions`](crate::permissions)); nothing checks what they write yet.
+//! Every method takes the [`Caller`], and does only what their [`Rights`] under
+//! the policy in force allow, as [`permissions`](crate::permissions) explains:
+//! it filters what they read, and checks what they write.
 
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
@@ -28,8 +29,9 @@ use origin_shared::landing::{Pending, Proposal};
 use origin_shared::object::DecodeError;
 use origin_shared::pack::{Pack, Packer, Part};
 use origin_shared::{
-    AcceptanceId, Base, ChangeId, Head, Kind, NodeKey, Object, ObjectId, ObjectKind, Principal,
-    PrincipalName, RecordId, RepoPath, Statement, StatementId, TargetName, TreeEntry, TreeId,
+    AcceptanceId, Base, ChangeId, EncodedObject, Head, Kind, NodeKey, Object, ObjectId, ObjectKind,
+    Principal, PrincipalName, RecordId, RepoPath, Statement, StatementId, TargetName, TreeEntry,
+    TreeId,
 };
 use parking_lot::{Condvar, Mutex, MutexGuard};
 
@@ -37,7 +39,7 @@ use crate::annotations::{AnnotateError, Annotations};
 use crate::events::{Events, Wakeup};
 use crate::index::Index;
 pub use crate::permissions::Caller;
-use crate::permissions::{Forbidden, Reader};
+use crate::permissions::{Batch, Forbidden, PutError, Reader, Writer};
 use crate::policy::{Policy, PolicyError};
 use crate::queue::{LandError, Queue};
 use crate::store::{Store, StoreError};
@@ -87,7 +89,9 @@ impl OriginService {
     pub const MAX_WAIT: Duration = Duration::from_mins(1);
 
     /// The most indexes open at once, in use or kept free for calls, but for one
-    /// more that a call holding the push lock may open.
+    /// more that a call holding the push lock may open. Each holds everything in
+    /// memory, so past it calls wait for one. Landings on one target still run one
+    /// at a time, under the target's queue lock.
     pub const MAX_INDEXES: usize = 8;
 
     /// Creates the service of the repository in `store`, served by `node`.
@@ -582,15 +586,15 @@ impl OriginService {
     }
 
     /// Writes the objects of `pack`: snapshots, attachments, revisions and
-    /// statements, each well formed, with what it needs in the repository or the
-    /// pack, of the right kind (see "Sync" in `docs/design.md`). Acceptances are
-    /// refused. Issues `core.divergent` for each change the new revisions made diverge.
+    /// statements, all of which must be well formed with everything they need in
+    /// the repository or the pack, so it never holds a record it cannot use.
+    /// Other callers put only what [`permissions`](crate::permissions) allow.
+    /// Issues `core.divergent` for each diverging change. See `docs/design.md`.
     ///
     /// # Errors
     ///
-    /// Fails if an object is malformed, an acceptance, or needs a missing object or
-    /// one of another kind, if a promotion doesn't match its original (the other
-    /// records stay stored), or if the objects cannot be written.
+    /// Fails if the caller may not put a record, if an object is malformed,
+    /// refused or lacks what it needs, or if the objects cannot be written.
     pub fn put_records(&self, caller: &Caller, pack: Pack) -> Result<Stored, ServiceError> {
         self.push(caller, pack, &[])
     }
@@ -612,6 +616,9 @@ impl OriginService {
         pack: Pack,
         expect: &[Expected],
     ) -> Result<Stored, ServiceError> {
+        if *caller == Caller::Anonymous {
+            return Err(Forbidden::Anonymous.into());
+        }
         // Objects this finds stored stay until what refers to them is.
         let _held = self.store.hold_objects()?;
         let held: HashMap<ObjectId, Option<ObjectKind>> = pack
@@ -625,17 +632,18 @@ impl OriginService {
         // The dependencies the repository has, whose kinds are read once
         // every object is checked otherwise.
         let mut stored: HashMap<ObjectId, (ObjectId, ObjectKind)> = HashMap::new();
-        let mut snapshots = Vec::new();
+        let mut snapshots = SnapshotLayers::default();
         let mut statements = Vec::new();
         let mut revisions = Vec::new();
         let mut promotions = Vec::new();
+        let mut decoded = Vec::new();
         let mut changes = HashSet::new();
         for object in pack.objects {
             let id = object.id();
-            let decoded = object
+            let record = object
                 .decode()
                 .map_err(|source| ServiceError::Malformed { id, source })?;
-            for (needed, kind) in Dependencies::of(&decoded).all() {
+            for (needed, kind) in Dependencies::of(&record).all() {
                 match held.get(&needed) {
                     Some(&held) if held != Some(kind) => {
                         return Err(ServiceError::WrongKind { id, needed, kind });
@@ -655,34 +663,40 @@ impl OriginService {
                     None => return Err(ServiceError::Missing { id, needed }),
                 }
             }
-            Self::check_payload(id, &decoded, |id| match held.get(&id) {
+            Self::check_payload(id, &record, |id| match held.get(&id) {
                 Some(&kind) => Ok(kind),
-                None => Ok(self
+                None if dependencies.depend(id)? => Ok(self
                     .store
                     .try_read(id)?
                     .and_then(|object| object.kind().ok())),
+                None => Ok(None),
             })?;
-            match decoded {
+            match record {
                 Object::Acceptance(_) => return Err(ServiceError::Acceptance(id.into())),
-                Object::Blob(_) | Object::Tree(_) | Object::Attachment(_) => snapshots.push(object),
-                Object::Revision(revision) => {
+                Object::Blob(_) | Object::Tree(_) | Object::Attachment(_) => {
+                    snapshots.add(object, &record);
+                }
+                Object::Revision(ref revision) => {
                     if !revision.predecessors.is_empty() {
                         changes.insert(revision.change);
                     }
                     revisions.push(object);
+                    decoded.push((id, record));
                 }
-                Object::Statement(statement) if statement.promoted_from.is_some() => {
-                    promotions.push((object, statement));
+                Object::Statement(ref statement) if statement.promoted_from.is_some() => {
+                    promotions.push((object, statement.clone()));
+                    decoded.push((id, record));
                 }
-                Object::Statement(_) => statements.push(object),
+                Object::Statement(_) => {
+                    statements.push(object);
+                    decoded.push((id, record));
+                }
             }
         }
         self.check_kinds(&stored)?;
         dependencies.commit()?;
-        let mut new = 0;
-        if !snapshots.is_empty() {
-            new += self.store.write_all(&snapshots)?;
-        }
+        let mut new = self.store.write_layers(&snapshots.layers())?;
+        self.check_writes(caller, &held, &decoded)?;
         // INVARIANT: held until the records are published; see `Store::lock_pushes`.
         let _pushing = if !revisions.is_empty() || !expect.is_empty() {
             let lock = self.store.lock_pushes()?;
@@ -699,21 +713,7 @@ impl OriginService {
                 new += self.store.write_all(&layer)?;
             }
         }
-        // An original is never a promotion, so it's stored by now.
-        let mut checked = Vec::new();
-        for (object, statement) in promotions {
-            let id = object.id().into();
-            self.store
-                .claim(id, statement)?
-                .map_err(|invalid| ServiceError::Statement {
-                    id,
-                    source: Box::new(invalid.into()),
-                })?;
-            checked.push(object);
-        }
-        if !checked.is_empty() {
-            new += self.store.write_all(&checked)?;
-        }
+        new += self.put_promotions(promotions)?;
         if !changes.is_empty() {
             self.annotations_pushing(|annotations| {
                 for &change in &changes {
@@ -726,29 +726,60 @@ impl OriginService {
         Ok(Stored { new: new as u64 })
     }
 
-    /// Checks that each change in `expect` has the heads it names, among those the
-    /// caller sees.
-    fn check_heads(&self, caller: &Caller, expect: &[Expected]) -> Result<(), ServiceError> {
+    /// Checks that the caller may put the records of `decoded`, which come in a
+    /// batch of the objects `held`. A statement of a reserved kind must come from
+    /// whom [`Policy::authorizes`] names, whoever puts it. A caller other than the
+    /// owner may only put records that are theirs, as
+    /// [`permissions`](crate::permissions) explains.
+    fn check_writes(
+        &self,
+        caller: &Caller,
+        held: &HashMap<ObjectId, Option<ObjectKind>>,
+        decoded: &[(ObjectId, Object)],
+    ) -> Result<(), ServiceError> {
+        let policy = self.policy()?;
         let rights = self.rights(caller)?;
-        let mut reader = Reader::new(&self.store, &rights.paths);
-        self.annotations_pushing(|annotations| {
-            for expected in expect {
-                let mut heads = Vec::new();
-                for head in annotations.index().heads(expected.change) {
-                    if reader.sees(RecordId::Revision(head))? {
-                        heads.push(head);
-                    }
-                }
-                let now: HashSet<_> = heads.iter().collect();
-                if now != expected.heads.iter().collect() {
-                    return Err(ServiceError::Moved {
-                        change: expected.change,
-                        heads,
-                    });
-                }
+        let batch = Batch::new(&self.store, held.keys().copied().collect(), decoded);
+        let Some(principal) = caller.principal() else {
+            return self.check_records(&batch, decoded, None, |issuer| {
+                policy.rights(Some(issuer)).admin
+            });
+        };
+        let writer = Writer::new(&batch, principal, &rights);
+        self.check_records(&batch, decoded, Some(writer), |_| rights.admin)
+    }
+
+    /// Checks the records of `batch` (`decoded`), as
+    /// [`OriginService::check_writes`] describes. Runs `writer`'s checks too if the
+    /// caller is signed in. `admin` tells whether a statement's issuer is an admin.
+    fn check_records(
+        &self,
+        batch: &Batch<'_, Native>,
+        decoded: &[(ObjectId, Object)],
+        mut writer: Option<Writer<'_, Native>>,
+        admin: impl Fn(&Principal) -> bool,
+    ) -> Result<(), ServiceError> {
+        for (id, record) in decoded {
+            if self.store.contains(*id)? {
+                continue;
             }
-            Ok(())
-        })
+            let Object::Statement(statement) = record else {
+                continue;
+            };
+            if !Policy::authorizes_admin(batch, statement, admin(&statement.issuer))? {
+                return Err(ServiceError::Statement {
+                    id: (*id).into(),
+                    source: Box::new(AnnotateError::Reserved {
+                        kind: statement.kind.clone(),
+                        issuer: statement.issuer.clone(),
+                    }),
+                });
+            }
+            if let Some(writer) = &mut writer {
+                writer.statement(statement)?;
+            }
+        }
+        Ok(())
     }
 
     /// Checks that each object of `stored`, which the repository has, is of the
@@ -795,6 +826,55 @@ impl OriginService {
             }),
             _ => Ok(()),
         }
+    }
+
+    /// Checks that each change in `expect` has the heads it names, among those the
+    /// caller sees.
+    fn check_heads(&self, caller: &Caller, expect: &[Expected]) -> Result<(), ServiceError> {
+        let rights = self.rights(caller)?;
+        let mut reader = Reader::new(&self.store, &rights.paths);
+        self.annotations_pushing(|annotations| {
+            for expected in expect {
+                let mut heads = Vec::new();
+                for head in annotations.index().heads(expected.change) {
+                    if reader.sees(RecordId::Revision(head))? {
+                        heads.push(head);
+                    }
+                }
+                let now: HashSet<_> = heads.iter().collect();
+                if now != expected.heads.iter().collect() {
+                    return Err(ServiceError::Moved {
+                        change: expected.change,
+                        heads,
+                    });
+                }
+            }
+            Ok(())
+        })
+    }
+
+    /// Writes the `promotions` that [`OriginService::put_records`] puts, each once
+    /// [`Store::claim`] accepts it, and returns how many were new. Their originals
+    /// are never promotions, so they are already stored.
+    fn put_promotions(
+        &self,
+        promotions: Vec<(EncodedObject, Statement)>,
+    ) -> Result<usize, ServiceError> {
+        let mut checked = Vec::new();
+        for (object, statement) in promotions {
+            let id = object.id().into();
+            self.store
+                .claim(id, statement)?
+                .map_err(|invalid| ServiceError::Statement {
+                    id,
+                    source: Box::new(invalid.into()),
+                })?;
+            checked.push(object);
+        }
+        if checked.is_empty() {
+            return Ok(0);
+        }
+        Ok(self.store.write_all(&checked)?)
     }
 
     /// Returns the statements about `subject`, in the order the repository received
@@ -1102,6 +1182,66 @@ impl Drop for Taken<'_> {
     }
 }
 
+/// The blobs, trees and attachments of a pack, which [`OriginService::push`]
+/// writes in layers: blobs and attachments first, then each tree after the
+/// trees it holds that the pack has. So neither a crash nor a failed write
+/// leaves a tree in the repository without its contents, which a later pack
+/// needing the tree relies on.
+#[derive(Debug, Default)]
+struct SnapshotLayers {
+    objects: Vec<EncodedObject>,
+    /// The subtrees of each tree in `objects`.
+    subtrees: HashMap<ObjectId, Vec<ObjectId>>,
+}
+
+impl SnapshotLayers {
+    /// Adds `object`, which decodes as `record`.
+    fn add(&mut self, object: EncodedObject, record: &Object) {
+        if let Object::Tree(tree) = record {
+            let subtrees = tree
+                .iter()
+                .filter_map(|(_, entry)| entry.subtree())
+                .map(ObjectId::from)
+                .collect();
+            self.subtrees.insert(object.id(), subtrees);
+        }
+        self.objects.push(object);
+    }
+
+    /// Returns the objects by layer. Blobs and attachments are in the first layer;
+    /// a tree is one layer past the highest of its subtrees in the pack.
+    fn layers(self) -> Vec<Vec<EncodedObject>> {
+        let mut heights: HashMap<ObjectId, usize> = HashMap::new();
+        let mut stack: Vec<ObjectId> = self.subtrees.keys().copied().collect();
+        while let Some(&id) = stack.last() {
+            if heights.contains_key(&id) {
+                stack.pop();
+                continue;
+            }
+            let subtrees = &self.subtrees[&id];
+            let before = stack.len();
+            stack.extend(subtrees.iter().filter(|&subtree| {
+                self.subtrees.contains_key(subtree) && !heights.contains_key(subtree)
+            }));
+            if stack.len() == before {
+                let highest = subtrees
+                    .iter()
+                    .filter_map(|subtree| heights.get(subtree))
+                    .max();
+                heights.insert(id, highest.map_or(1, |height| height + 1));
+                stack.pop();
+            }
+        }
+        let mut layers: Vec<Vec<_>> = iter::repeat_with(Vec::new)
+            .take(heights.values().max().map_or(1, |height| height + 1))
+            .collect();
+        for object in self.objects {
+            layers[heights.get(&object.id()).copied().unwrap_or(0)].push(object);
+        }
+        layers
+    }
+}
+
 /// What an object needs the repository to have to be usable, as
 /// [`OriginService::put_records`] lists, and the kind each must be: the records
 /// it refers to, and its content (trees and blobs). A revision's predecessors
@@ -1269,7 +1409,8 @@ pub enum ServiceError {
     #[error("the cursor is of another op log, generation {0}: read from the end")]
     OtherLog(String),
     /// A put statement the repository doesn't accept: a promotion that doesn't
-    /// match its original.
+    /// match its original, or a statement of a reserved kind from an issuer who may
+    /// not issue it.
     #[error("statement {} cannot be put", .id.short())]
     Statement {
         /// The statement.
@@ -1286,6 +1427,16 @@ pub enum ServiceError {
     /// Records cannot be read or written.
     #[error(transparent)]
     Store(#[from] StoreError),
+}
+
+impl From<PutError> for ServiceError {
+    fn from(error: PutError) -> Self {
+        match error {
+            PutError::Forbidden(error) => Self::Forbidden(error),
+            PutError::Unseen(record) => Self::UnknownRecord(record),
+            PutError::Store(error) => Self::Store(error),
+        }
+    }
 }
 
 impl ServiceError {
@@ -1310,6 +1461,7 @@ impl ServiceError {
             | Self::Missing { .. } => ErrorCode::BadRequest,
             Self::Statement { source, .. } => match &**source {
                 AnnotateError::Store(error) => Self::store_code(error),
+                AnnotateError::Reserved { .. } => ErrorCode::Forbidden,
                 _ => ErrorCode::BadRequest,
             },
             Self::Forbidden(_) => ErrorCode::Forbidden,
@@ -1350,7 +1502,7 @@ mod tests {
     use std::sync::Barrier;
     use std::thread;
 
-    use origin_shared::{EncodedObject, Record, RepoPath};
+    use origin_shared::{EncodedObject, EntryKind, Record, RepoPath, Tree};
 
     use super::*;
 
@@ -1476,6 +1628,35 @@ mod tests {
             .put_records(&Caller::Owner, Pack { objects: without })
             .unwrap();
         assert!(repo.store.contains(conflict.id()).unwrap());
+    }
+
+    #[test]
+    fn trees_are_written_after_the_trees_they_hold() {
+        let tree = |entries: &[(&str, EntryKind, ObjectId)]| {
+            let mut tree = Tree::default();
+            for &(name, kind, id) in entries {
+                tree.insert(name.parse().unwrap(), TreeEntry { kind, id });
+            }
+            tree.encode()
+        };
+        let blob = EncodedObject::blob(b"file");
+        let leaf = tree(&[("file", EntryKind::File, blob.id())]);
+        let middle = tree(&[("leaf", EntryKind::Tree, leaf.id())]);
+        let stored = Tree::default().encode();
+        let root = tree(&[
+            ("leaf", EntryKind::Tree, leaf.id()),
+            ("middle", EntryKind::Tree, middle.id()),
+            ("stored", EntryKind::Tree, stored.id()),
+        ]);
+
+        let mut snapshots = SnapshotLayers::default();
+        for object in [&root, &blob, &middle, &leaf] {
+            snapshots.add(object.clone(), &object.decode().unwrap());
+        }
+        assert_eq!(
+            snapshots.layers(),
+            [vec![blob], vec![leaf], vec![middle], vec![root]]
+        );
     }
 
     #[test]

@@ -1,20 +1,24 @@
-//! Enforces what callers may do, as their
-//! [`Rights`](origin_shared::access::Rights) say: what they read of a
-//! repository's records.
+//! Enforces what callers may do, as their [`Rights`] say: what they read
+//! of a repository's records, and what the records they put may hold.
 //!
-//! **Reading.** A caller who reads no path does not see the repository at
-//! all. Otherwise they see its targets and acceptances, every revision that
-//! changes a path they read or changes nothing, and the statements about
-//! what they see. Snapshots withhold the content of the paths they don't
-//! read (see [`Store::added`]).
+//! A caller who reads no path does not see the repository at all. Otherwise
+//! they see the targets, acceptances, revisions that change a path they read
+//! or nothing, and statements about what they see; snapshots withhold the
+//! content of the other paths (see [`Store::added`]). Every record put must be
+//! the caller's, of a kind they may annotate, about what they see, and bring the
+//! attachments it carries (see [`Batch`]). `docs/design.md` lists the rules.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::iter;
 
 use origin_platform::Platform;
-use origin_shared::access::{Capability, PathAccess};
+use origin_shared::access::{Capability, PathAccess, Rights};
 use origin_shared::event::EventKind;
-use origin_shared::{Principal, RecordId, RepoPath, Revision, RevisionId};
+use origin_shared::{
+    Kind, Object, ObjectId, Principal, RecordId, RepoPath, Revision, RevisionId, Statement,
+};
 
+use crate::annotations::RevisionView;
 use crate::store::{Store, StoreError};
 
 /// Who calls the service.
@@ -138,18 +142,179 @@ impl<'a, P: Platform> Reader<'a, P> {
     }
 }
 
+/// The records a batch puts. They are read before those of the store the
+/// batch is put in, so a record may refer to another record of the same
+/// batch.
+pub struct Batch<'a, P> {
+    store: &'a Store<P>,
+    /// Every object in the batch.
+    supplied: HashSet<ObjectId>,
+    revisions: HashMap<RevisionId, &'a Revision>,
+}
+
+impl<'a, P: Platform> Batch<'a, P> {
+    /// Creates the batch of objects `supplied`, whose decoded records are
+    /// `decoded`, to be put in `store`.
+    pub fn new(
+        store: &'a Store<P>,
+        supplied: HashSet<ObjectId>,
+        decoded: &'a [(ObjectId, Object)],
+    ) -> Self {
+        let mut batch = Self {
+            store,
+            supplied,
+            revisions: HashMap::new(),
+        };
+        for (id, object) in decoded {
+            if let Object::Revision(revision) = object {
+                batch.revisions.insert((*id).into(), revision);
+            }
+        }
+        batch
+    }
+
+    /// Whether the batch holds `record`.
+    fn holds(&self, record: RecordId) -> bool {
+        self.supplied.contains(&record.into())
+    }
+}
+
+impl<P: Platform> RevisionView for Batch<'_, P> {
+    fn revision(&self, id: RevisionId) -> Result<Revision, StoreError> {
+        match self.revisions.get(&id) {
+            Some(&revision) => Ok(revision.clone()),
+            None => self.store.get(id),
+        }
+    }
+}
+
+/// Checks the records of a batch an authenticated caller puts, by the
+/// rules in the module docs.
+pub struct Writer<'a, P> {
+    batch: &'a Batch<'a, P>,
+    principal: &'a Principal,
+    rights: &'a Rights,
+    reader: Reader<'a, P>,
+}
+
+impl<'a, P: Platform> Writer<'a, P> {
+    /// Checks `batch` for `principal`, with `rights`.
+    #[must_use]
+    pub fn new(batch: &'a Batch<'a, P>, principal: &'a Principal, rights: &'a Rights) -> Self {
+        Self {
+            batch,
+            principal,
+            rights,
+            reader: Reader::new(batch.store, &rights.paths),
+        }
+    }
+
+    /// Whether the caller sees `record`. They see the records the batch adds,
+    /// but a record the store already had only if they saw it before.
+    fn sees(&mut self, record: RecordId) -> Result<bool, StoreError> {
+        let new = self.batch.holds(record) && !self.batch.store.contains(record.into())?;
+        Ok(new || self.reader.sees(record)?)
+    }
+
+    /// Checks that `attachment`, which a `record` carries, comes in the batch
+    /// if the store already has it. Callers who read every path skip this
+    /// check.
+    fn brings(&self, record: &'static str, attachment: ObjectId) -> Result<(), PutError> {
+        if self.rights.paths.reads_all()
+            || self.batch.supplied.contains(&attachment)
+            || !self.batch.store.contains(attachment)?
+        {
+            return Ok(());
+        }
+        Err(Forbidden::UnsuppliedAttachment { record, attachment }.into())
+    }
+
+    /// Checks a statement being put.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the caller isn't its issuer, may not issue its kind, or
+    /// doesn't see what it is about or the original it promotes, or if a
+    /// record cannot be read.
+    pub fn statement(&mut self, statement: &Statement) -> Result<(), PutError> {
+        if statement.issuer != *self.principal {
+            return Err(Forbidden::NotYours {
+                record: "statement",
+                by: statement.issuer.clone(),
+                caller: self.principal.clone(),
+            }
+            .into());
+        }
+        if !statement.kind.is_reserved() && !self.rights.may_annotate(&statement.kind) {
+            return Err(Forbidden::Annotate(statement.kind.clone()).into());
+        }
+        let original = statement.promoted_from.map(RecordId::Statement);
+        for record in iter::once(statement.subject).chain(original) {
+            if !self.sees(record)? {
+                return Err(PutError::Unseen(record));
+            }
+        }
+        if original.is_none()
+            && let Some(payload) = statement.payload
+        {
+            self.brings("statement", payload.into())?;
+        }
+        Ok(())
+    }
+}
+
 /// Something a caller may not do.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum Forbidden {
+    /// An anonymous caller tried to write.
+    #[error("anonymous callers only read: sign in with a token")]
+    Anonymous,
     /// The owner has no principal to issue a token for.
     #[error("only a signed-in caller gets a token, for themselves")]
     NoPrincipal,
+    /// A record put is attributed to someone else.
+    #[error("the {record} is by {by}, but you are {caller}")]
+    NotYours {
+        /// The kind of record.
+        record: &'static str,
+        /// Who the record names as its author or issuer.
+        by: Principal,
+        /// The caller.
+        caller: Principal,
+    },
+    /// A statement of a kind the caller may not issue.
+    #[error("you may not issue `{0}` statements")]
+    Annotate(Kind),
     /// A path the caller may not read.
     #[error("you may not read `{0}`")]
     Read(RepoPath),
+    /// A record carries an attachment the repository has, as a revision's
+    /// description or a statement's payload, but its batch doesn't bring it.
+    #[error("the {record} carries attachment {attachment}, which it doesn't bring")]
+    UnsuppliedAttachment {
+        /// The kind of record.
+        record: &'static str,
+        /// The attachment.
+        attachment: ObjectId,
+    },
     /// A token's scope reaches beyond its issuer's rights.
     #[error("a token may only narrow your rights, which don't include `{0}`")]
     Scope(Capability),
+}
+
+/// A failure to check a record being put.
+#[derive(Debug, thiserror::Error)]
+pub enum PutError {
+    /// The caller may not put it.
+    #[error(transparent)]
+    Forbidden(#[from] Forbidden),
+    /// A statement is about, or promotes, a record the caller doesn't see. To
+    /// the caller, that record doesn't exist.
+    #[error("record {0} not found")]
+    Unseen(RecordId),
+    /// A record or tree cannot be read.
+    #[error(transparent)]
+    Store(#[from] StoreError),
 }
 
 #[cfg(test)]
