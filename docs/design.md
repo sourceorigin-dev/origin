@@ -650,14 +650,18 @@ remote's, and refuses a stale change: one that has a revision on the remote
 that this node lacks. The remote checks the heads again as it publishes the
 revisions, so a push racing another is refused too. Revisions only go to a
 remote that has the acceptance they are based on. Each object is sent after
-the objects it needs: snapshots and attachments, then revisions, then
-statements. A statement that needs a record the remote neither has nor
-receives stays here, and the push reports it.
+the objects it needs: snapshots and attachments, then revisions, each with
+its reserved statements, then the other statements. A statement that needs a
+record the remote neither has nor receives stays here, and the push reports
+it.
 
 Transfers are bounded both ways: a push is split into requests of at most
 `Pack::LIMIT` bytes, and a fetch's answers stop at that size, with the rest
 asked for again (`Part`). Each request of a push expects the heads that the
-requests before it left.
+requests before it left. A revision goes in the same request as its reserved
+statements, such as its conflicts and its abandonment, and the other
+statements about one record also share a request. So the remote never lands a
+revision whose abandonment, or a result whose replacement, is still to come.
 
 ## Workspaces and platform code
 
