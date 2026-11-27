@@ -21,33 +21,34 @@ use super::Annotations;
 use crate::store::{Store, StoreError};
 use crate::tree::Snapshots;
 
-/// The claim a statement makes, checked: only [`Store::claim`] makes one.
-/// A statement claims for itself, unless it promotes another. Then it makes
-/// its original's claim, kind, verdict and issuer included, which holds
-/// because their subjects' input digests are equal.
+/// A statement's claim, checked by [`Store::claim`], the only way to make
+/// one. A statement that isn't a promotion claims for itself. A promotion
+/// makes its original's claim, with the original's kind, verdict and
+/// issuer, since both subjects have the same input digest.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Claim {
     id: StatementId,
     statement: Statement,
-    /// The original a promotion carries, checked.
+    /// For a promotion, the original's id and the original.
     original: Option<(StatementId, Statement)>,
 }
 
 impl Claim {
-    /// The statement making the claim, which evidence cites.
+    /// Returns the id of the statement making the claim, which evidence
+    /// cites.
     #[must_use]
     pub fn id(&self) -> StatementId {
         self.id
     }
 
-    /// The statement making the claim.
+    /// Returns the statement making the claim.
     #[must_use]
     pub fn statement(&self) -> &Statement {
         &self.statement
     }
 
-    /// What is claimed: the statement, or for a promotion its original,
-    /// whose kind, verdict and issuer count.
+    /// Returns what is claimed: the statement itself, or for a promotion, its
+    /// original. Its kind, verdict and issuer are the ones that count.
     #[must_use]
     pub fn claimed(&self) -> &Statement {
         self.original
@@ -55,7 +56,8 @@ impl Claim {
             .map_or(&self.statement, |(_, original)| original)
     }
 
-    /// The original the statement promotes, if it's a promotion.
+    /// Returns the id of the original the statement promotes, if it is a
+    /// promotion.
     #[must_use]
     pub fn original(&self) -> Option<StatementId> {
         self.original.as_ref().map(|&(id, _)| id)
@@ -63,13 +65,11 @@ impl Claim {
 }
 
 impl<P: Platform> Annotations<'_, P> {
-    /// The claims about `subject` that hold, in arrival order: those of
-    /// the statements nothing superseded, that [`Store::claim`] accepts with
-    /// the records this node has, and for a promotion, whose original
-    /// nothing superseded either, and that no statement about `subject`
-    /// of the kind from the original's issuer replaces, whatever came
-    /// first: a result that ran there wins, and so does one taken back
-    /// there (see [`Statement::drop_replaced_promotions`]).
+    /// Returns the claims about `subject` that hold, in arrival order: those
+    /// whose statement nothing superseded and that [`Store::claim`] accepts.
+    /// A promotion also needs its original unsuperseded, and no other statement
+    /// of the same kind about `subject` from the original's issuer replacing it
+    /// (see [`Statement::drop_replaced_promotions`]).
     ///
     /// # Errors
     ///
@@ -112,9 +112,10 @@ impl<P: Platform> Annotations<'_, P> {
         Ok(claims)
     }
 
-    /// Computes and remembers the input digest of every promotable
-    /// statement the index has none for, from every core. Those whose
-    /// subject or trees aren't in the store yet are left for a later search.
+    /// Computes the input digest of every promotable statement the index has
+    /// no digest for, on every core, and stores them in the index. It skips
+    /// statements whose subject or trees the store doesn't have yet, for a
+    /// later search to retry.
     fn compute_digests(&mut self) -> Result<(), StoreError> {
         let missing: Vec<StatementId> = self
             .index
@@ -369,17 +370,20 @@ pub enum InvalidPromotion {
     /// The store doesn't have the original.
     #[error("it promotes statement {}, which this repository doesn't have", .0.short())]
     UnknownOriginal(StatementId),
-    /// The original declares no inputs, depends on external ones, is
-    /// reserved, about a statement, or a promotion itself.
+    /// The original isn't promotable: it declares no inputs, depends on
+    /// external inputs, is of a reserved kind, is about a statement, or is
+    /// itself a promotion.
     #[error("it promotes statement {}, which isn't promotable", .0.short())]
     NotPromotable(StatementId),
-    /// A field differs from the original's.
+    /// A field differs from the original's. Holds the field's name.
     #[error("its {0} differs from its original's")]
     Differs(&'static str),
-    /// Its subject is a statement, which has no snapshot.
+    /// The promotion or its original is about a statement, which has no
+    /// snapshot.
     #[error("it is about a statement, which has no inputs")]
     NoSnapshot,
-    /// Its subject's input digest differs from the original's subject's.
+    /// The promotion's subject has a different input digest from the
+    /// original's subject.
     #[error("its subject's inputs differ from its original's")]
     InputsDiffer,
     /// Its subject is not on the same target as its original's subject.

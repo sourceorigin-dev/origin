@@ -56,11 +56,11 @@ pub struct Conflicted {
 pub struct Conflicts(Vec<Conflicted>);
 
 impl Conflicts {
-    /// The line starting our side, then its label.
+    /// The marker that starts our side, followed by its label.
     const OURS: &str = "<<<<<<< ";
-    /// The line between the sides.
+    /// The marker between the two sides.
     const BETWEEN: &str = "=======";
-    /// The line ending their side, then its label.
+    /// The marker that ends their side, followed by its label.
     const THEIRS: &str = ">>>>>>> ";
 
     /// Builds the conflicts from `conflicted`, sorted by path. When a path
@@ -75,13 +75,14 @@ impl Conflicts {
         Self(conflicted)
     }
 
-    /// Adds `conflicted`, which must come after every path listed.
+    /// Adds `conflicted`, whose path must sort after every path already
+    /// listed.
     pub(crate) fn push(&mut self, conflicted: Conflicted) {
         debug_assert!(self.0.last().is_none_or(|last| last.path < conflicted.path));
         self.0.push(conflicted);
     }
 
-    /// Whether there are none.
+    /// Whether there are no conflicts.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
@@ -118,10 +119,10 @@ impl Conflicts {
         resolved
     }
 
-    /// The content of a file both sides changed: `ours`, then `theirs`,
-    /// between markers naming them with `labels`. A side that removed the
-    /// file is empty. `None` if either side is binary, holding a NUL byte:
-    /// markers would only corrupt it.
+    /// Returns the content of a file both sides changed: `ours`, then
+    /// `theirs`, between conflict markers labeled with `labels`. A side that
+    /// removed the file counts as empty. Returns `None` if either side is
+    /// binary, holding a NUL byte, since markers would corrupt it.
     #[must_use]
     pub fn mark(ours: &[u8], theirs: &[u8], labels: [&str; 2]) -> Option<Vec<u8>> {
         if ours.contains(&0) || theirs.contains(&0) {

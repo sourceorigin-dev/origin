@@ -28,7 +28,7 @@ use crate::store::{Store, StoreError};
 pub use promotion::{Claim, InvalidPromotion};
 pub use retention::Dropped;
 
-/// The statements of a store, through its index.
+/// The statements in a store, found through its index.
 #[derive(Debug)]
 pub struct Annotations<'a, P = Native> {
     store: &'a Store<P>,
@@ -36,21 +36,21 @@ pub struct Annotations<'a, P = Native> {
 }
 
 impl<'a, P: Platform> Annotations<'a, P> {
-    /// The statements of `store`, as `index` knows them.
+    /// Reads the statements of `store` through `index`.
     pub fn new(store: &'a Store<P>, index: Index) -> Self {
         Self { store, index }
     }
 
-    /// The statements of `store`, opening its index.
+    /// Reads the statements of `store`, opening its index.
     ///
     /// # Errors
     ///
-    /// Fails like [`Index::open`].
+    /// Fails if the index cannot be opened, like [`Index::open`].
     pub fn open(store: &'a Store<P>) -> Result<Self, StoreError> {
         Ok(Self::new(store, Index::open(store)?))
     }
 
-    /// The index the statements are found through.
+    /// Returns the index the statements are found through.
     #[must_use]
     pub fn index(&self) -> &Index {
         &self.index
@@ -72,14 +72,15 @@ impl<'a, P: Platform> Annotations<'a, P> {
         self.index.refresh(self.store)
     }
 
-    /// Writes a statement and its payload. Issuing a statement the store
-    /// has is a no-op.
+    /// Checks and writes a statement and its payload, returning the
+    /// statement's id. Issuing a statement the store already has writes
+    /// nothing new.
     ///
     /// # Errors
     ///
     /// Fails if the statement supersedes one from another issuer, is a
-    /// promotion that [`Store::claim`] refuses, is of a reserved kind its
-    /// issuer may not issue, or the records cannot be read or written.
+    /// promotion that [`Store::claim`] refuses, or is of a reserved kind its
+    /// issuer may not issue, or if records cannot be read or written.
     pub fn issue(
         &self,
         statement: &Statement,
@@ -108,22 +109,22 @@ impl<'a, P: Platform> Annotations<'a, P> {
         Ok(self.write(statement, payload)?)
     }
 
-    /// Issues `statement` as its issuer's latest of its kind about its
-    /// subject, superseding the [current](Self::current) one, and returns
-    /// it with its id. One without a verdict, of a kind that isn't
-    /// reserved, withdraws the current one. It reads the current one and
-    /// issues under a lock, from the index read again, so two statements
-    /// issued at once in this store never supersede the same one: the
-    /// second supersedes the first. Statements issued in other stores and
-    /// put here chose what they supersede there, so two of one issuer's can
-    /// still both supersede the same one. Afterwards these annotations hold
-    /// the index as read before the issue, without the new statement.
+    /// Issues `statement` so that it supersedes its issuer's
+    /// [current](Self::current) statement of the same kind about the same
+    /// subject, and returns it with its id. A statement without a verdict, of a
+    /// kind that isn't reserved, withdraws the current one.
+    ///
+    /// It rereads the index, finds the current statement and issues under a
+    /// lock, so two statements issued at once in this store never supersede the
+    /// same one: the second supersedes the first. Statements issued in other
+    /// stores and synced here may still both supersede the same one. Afterwards,
+    /// the index these annotations hold doesn't include the new statement.
     ///
     /// # Errors
     ///
     /// Fails like [`Annotations::issue`], or with
-    /// [`AnnotateError::NothingToWithdraw`] if a withdrawal finds no
-    /// current statement with a verdict.
+    /// [`AnnotateError::NothingToWithdraw`] if a withdrawal finds no current
+    /// statement with a verdict.
     pub fn supersede(
         &mut self,
         mut statement: Statement,
@@ -168,8 +169,8 @@ impl<'a, P: Platform> Annotations<'a, P> {
         Ok(encoded.id().into())
     }
 
-    /// The first statement superseding `statement`, `id`, that its issuer
-    /// issued.
+    /// Returns the first statement that supersedes `statement`, whose id is
+    /// `id`, and comes from the same issuer.
     fn superseded_by(
         &self,
         id: StatementId,
@@ -224,8 +225,9 @@ impl<'a, P: Platform> Annotations<'a, P> {
             .collect()
     }
 
-    /// The latest statement of `kind` from `issuer` about `subject` that
-    /// nothing superseded: the one a new such statement supersedes.
+    /// Returns the latest statement of `kind` from `issuer` about `subject`
+    /// that nothing superseded. A new statement of that kind from that issuer
+    /// supersedes this one.
     ///
     /// # Errors
     ///
@@ -248,11 +250,11 @@ impl<'a, P: Platform> Annotations<'a, P> {
             .map(|annotation| annotation.id))
     }
 
-    /// Issues a `core.divergent` statement as `issuer` if `change` has more
-    /// than one head, returning it. It is about the head with the smallest
-    /// id, and its payload lists every head, one id per line, so the same
-    /// heads always make the same statement: flagging them again writes
-    /// nothing.
+    /// If `change` has more than one head, issues a `core.divergent`
+    /// statement as `issuer` and returns its id; otherwise returns `None`. The
+    /// statement is about the head with the smallest id, and its payload lists
+    /// every head, one id per line. The same heads always make the same
+    /// statement, so flagging them again writes nothing new.
     ///
     /// # Errors
     ///
@@ -370,15 +372,15 @@ pub enum AnnotateError {
     ForeignSupersession {
         /// The statement it supersedes.
         superseded: StatementId,
-        /// Who issued that one.
+        /// Who issued the superseded statement.
         issuer: Principal,
-        /// Who issues the new one.
+        /// Who issues the new statement.
         by: Principal,
     },
     /// A promotion doesn't match its original.
     #[error("invalid promotion")]
     InvalidPromotion(#[from] InvalidPromotion),
-    /// A reserved kind from an issuer that may not issue it.
+    /// The statement is of a reserved kind that its issuer may not issue.
     #[error("{issuer} may not issue `{kind}` statements about this record")]
     Reserved {
         /// The kind.
@@ -386,7 +388,7 @@ pub enum AnnotateError {
         /// Who issued it.
         issuer: Principal,
     },
-    /// A withdrawal found no statement of its issuer's to take back.
+    /// A withdrawal found no statement from its issuer to take back.
     #[error(
         "you have no `{kind}` statement about {} to withdraw",
         subject.describe()
@@ -394,7 +396,7 @@ pub enum AnnotateError {
     NothingToWithdraw {
         /// The kind.
         kind: Kind,
-        /// What it would be about: a revision or a statement.
+        /// The record the withdrawn statement would be about.
         subject: RecordId,
     },
     /// Records cannot be read or written.

@@ -74,7 +74,8 @@ impl<P: Platform> Store<P> {
         Ok(changes)
     }
 
-    /// Diffs two directories, `None` standing for one that doesn't exist.
+    /// Diffs the directory `dir` between two trees, adding each changed file
+    /// to `changes`. `None` stands for a directory that doesn't exist.
     fn diff_dir(
         &self,
         dir: &RepoPath,
@@ -124,30 +125,32 @@ impl<P: Platform> Store<P> {
     }
 }
 
-/// Two trees merged with the changes each made to a common one.
+/// The result of merging two trees that each changed a common base.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Merge {
-    /// The merged tree: both sides' changes, and `ours` where they conflict.
+    /// The merged tree, holding both sides' changes. Where they conflict, it
+    /// holds what the kind of merge leaves there.
     pub tree: TreeId,
     /// The trees the merge made, which the store may not have yet.
     pub trees: Vec<EncodedObject>,
-    /// The files with conflict markers a [marked](Store::merge_marked)
-    /// merge made, which the store may not have yet either.
+    /// The files with conflict markers that a
+    /// [marked](Store::merge_marked) merge made, which the store may not have
+    /// yet either.
     pub files: Vec<EncodedObject>,
-    /// The paths both sides changed, each its own way, with what the merge
-    /// left there.
+    /// The paths both sides changed in different ways, with what the merge
+    /// left at each.
     pub conflicts: Conflicts,
 }
 
-/// What a merge leaves where both sides changed a path, each its own way.
+/// What a merge leaves at a path both sides changed in different ways.
 #[derive(Clone, Copy, Debug)]
 enum OnConflict<'l> {
-    /// `ours`.
+    /// Our version.
     KeepOurs,
-    /// Both versions between conflict markers naming the sides with these
-    /// labels, see [`Conflicts::mark`].
+    /// Both versions between conflict markers labeled with these labels; see
+    /// [`Conflicts::mark`].
     Mark([&'l str; 2]),
-    /// [`Store::UNKNOWN`], a version neither side can have.
+    /// [`Store::UNKNOWN`], an entry neither side can have.
     Unknown,
 }
 
@@ -174,14 +177,13 @@ impl<P: Platform> Store<P> {
     }
 
     /// Merges like [`Store::merge`], but where both sides changed a text
-    /// file, the merged one holds both versions between conflict markers
-    /// naming the sides with `labels`, see [`Conflicts::mark`]. Binary files,
-    /// and paths a directory is on either side of, keep `ours`.
+    /// file, the merged file holds both versions between conflict markers
+    /// labeled with `labels` (see [`Conflicts::mark`]). Binary files, and paths
+    /// that are a directory on either side, keep `ours`.
     ///
     /// # Errors
     ///
-    /// Fails if a tree that differs, or a file that conflicts, cannot be
-    /// read.
+    /// Fails if a tree that differs, or a file that conflicts, cannot be read.
     pub fn merge_marked(
         &self,
         base: Option<TreeId>,
@@ -192,18 +194,18 @@ impl<P: Platform> Store<P> {
         self.merge_with(base, ours, theirs, OnConflict::Mark(labels))
     }
 
-    /// The entry a merge of merge bases has where they conflict: an id no
-    /// object has, so it equals neither side of a merge from it. A merge
-    /// never reads under it either: the bases may have had a directory
-    /// there, so any change at or under its path conflicts.
+    /// The entry a merge of merge bases leaves where they conflict. Its id
+    /// belongs to no object, so it equals neither side of a later merge from
+    /// it. That merge never reads under it either: any change at or under its
+    /// path conflicts, since the bases may have had a directory there.
     const UNKNOWN: TreeEntry = TreeEntry {
         kind: EntryKind::File,
         id: ObjectId::from_bytes([0; ObjectId::LEN]),
     };
 
-    /// Merges like [`Store::merge`], but where both sides changed a path,
-    /// the merged tree has [`Store::UNKNOWN`]: how merge bases are merged
-    /// into one, so a merge from it conflicts there unless both sides
+    /// Merges like [`Store::merge`], but puts [`Store::UNKNOWN`] where both
+    /// sides changed a path. This is how several merge bases become one, so
+    /// that a merge from the result conflicts at those paths unless both sides
     /// agree.
     ///
     /// # Errors
@@ -254,9 +256,10 @@ impl<P: Platform> Store<P> {
         Ok(merge)
     }
 
-    /// Merges three versions of the directory `dir`, `None` standing for one
-    /// that doesn't exist, returning the merged one, or `None` if it's
-    /// empty.
+    /// Merges three versions of the directory `dir`, base, ours and theirs,
+    /// `None` standing for one that doesn't exist. Resolves conflicts as
+    /// `on_conflict` says and records the trees it makes and the conflicts in
+    /// `merge`. Returns the merged directory, or `None` if it's empty.
     fn merge_dir(
         &self,
         dir: &RepoPath,
@@ -338,10 +341,11 @@ impl<P: Platform> Store<P> {
         Ok(Some(id))
     }
 
-    /// The entry of a file both sides changed, `ours` and `theirs`, that
-    /// holds both versions between conflict markers: a file on the side
-    /// that removed it is empty. Keeps `ours` if either side isn't a
-    /// regular file, or is binary or missing from the store.
+    /// Returns the entry of a file both sides changed, `ours` and `theirs`,
+    /// that holds both versions between conflict markers, and adds the new
+    /// file to `merge`. A side that removed the file counts as empty. Keeps
+    /// `ours` if either side isn't a regular file, or is binary or missing from
+    /// the store.
     fn mark(
         &self,
         ours: Option<TreeEntry>,
@@ -464,8 +468,8 @@ impl<P: Platform> Store<P> {
     }
 }
 
-/// Looks up the entries of snapshots by path, reading each tree once,
-/// however many snapshots share it.
+/// Looks up the entries of snapshots by path, caching each tree it reads,
+/// so a tree shared by several snapshots is read once.
 #[derive(Debug)]
 pub struct Snapshots<'a, P> {
     store: &'a Store<P>,
@@ -473,7 +477,7 @@ pub struct Snapshots<'a, P> {
 }
 
 impl<'a, P: Platform> Snapshots<'a, P> {
-    /// Looks up snapshots in `store`.
+    /// Creates a lookup over the snapshots in `store`.
     pub fn new(store: &'a Store<P>) -> Self {
         Self {
             store,
@@ -481,8 +485,8 @@ impl<'a, P: Platform> Snapshots<'a, P> {
         }
     }
 
-    /// What `snapshot` stores at `path`, or `None` if nothing is there. At
-    /// the root, that's the snapshot's own tree.
+    /// Returns what `snapshot` holds at `path`, or `None` if nothing is
+    /// there. At the root, that's the snapshot's own tree.
     ///
     /// # Errors
     ///
