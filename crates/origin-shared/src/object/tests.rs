@@ -41,6 +41,7 @@ fn sample_statement() -> Statement {
         issuer: "node:ci-1".parse().unwrap(),
         inputs: Some(Inputs {
             paths: vec![RepoPath::new("src").unwrap(), RepoPath::root()],
+            target_paths: Vec::new(),
             definition: Digest::of(b"cargo test"),
             toolchain: Digest::of(b"rustc 1.99.0"),
             external: false,
@@ -108,8 +109,8 @@ fn encoding_is_stable() {
             "ab13bedf42e8",
             "d06087ffcfd2",
             "8783b1fca530",
-            "b4f235b57ce9",
-            "f0442b2f9f6c",
+            "deec8210f35c",
+            "cfdeda35b53c",
         ]
     );
 }
