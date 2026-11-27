@@ -9,11 +9,12 @@ use utoipa::openapi::RefOr;
 use utoipa::openapi::schema::{ObjectBuilder, Schema, Type};
 
 use crate::access::{Capability, Targets};
+use crate::api::At;
 use crate::policy::{KindPattern, Principals};
 use crate::{
-    AcceptanceId, AttachmentId, BlobId, ChangeId, Digest, EntryName, Kind, NodePublicKey, ObjectId,
-    Principal, PrincipalName, RecordId, RepoPath, RevisionId, StatementId, TargetId, TargetName,
-    TreeId, Verdict,
+    AcceptanceId, AttachmentId, BlobId, ChangeId, Digest, EntryKind, EntryName, Kind,
+    NodePublicKey, ObjectId, Principal, PrincipalName, RecordId, RepoPath, RevisionId, StatementId,
+    TargetId, TargetName, TreeId, Verdict,
 };
 
 /// Implements serialization for each type as the string it displays as, and
@@ -75,6 +76,8 @@ as_text! {
     Period => "30s";
     Capability => "write src";
     Targets => "main";
+    At => "main";
+    EntryKind => "file";
 }
 
 /// A length of time in whole seconds. It is written as a whole number of

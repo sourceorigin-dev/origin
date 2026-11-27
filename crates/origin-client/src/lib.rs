@@ -20,9 +20,10 @@
 
 use origin_shared::access::Rights;
 use origin_shared::api::{
-    Annotation, ApiError, EventsQuery, FetchRecords, FetchSnapshot, Inventory, InventoryRequest,
-    IssuedToken, LandRequest, Landings, LogEntry, LogQuery, MORE, NewTarget, PutQuery, RepoName,
-    RepoSummary, Revisions, StatementsQuery, Stored, TargetInfo, TokenRequest,
+    Annotation, ApiError, BrowseQuery, EventsQuery, FetchRecords, FetchSnapshot, Inventory,
+    InventoryRequest, IssuedToken, LandRequest, Landings, Listing, LogEntry, LogQuery, MORE,
+    NewTarget, PutQuery, RepoName, RepoSummary, Revisions, StatementsQuery, Stored, TargetInfo,
+    TokenRequest,
 };
 use origin_shared::event::Page;
 use origin_shared::landing::Pending;
@@ -117,6 +118,11 @@ endpoints! {
         /// Issues a token that acts for the caller, with a narrower scope.
         fn issue_token(request: &TokenRequest) -> IssuedToken =
             POST "tokens", json(request) => json;
+        /// Lists a directory of a target's tip, or of a revision's or an
+        /// acceptance's snapshot.
+        fn tree(query: &BrowseQuery) -> Listing = GET "tree", query(query) => json;
+        /// Reads a file of a snapshot, found the way `tree` finds a directory.
+        fn file(query: &BrowseQuery) -> Vec<u8> = GET "file", query(query) => bytes;
     }
 }
 
@@ -228,6 +234,10 @@ impl Response {
         let more = self.0.headers().contains_key(MORE);
         let pack = Pack::decode(&self.0.bytes().await?)?;
         Ok(Part { pack, more })
+    }
+
+    async fn bytes(self) -> Result<Vec<u8>, Error> {
+        Ok(self.0.bytes().await?.to_vec())
     }
 }
 
