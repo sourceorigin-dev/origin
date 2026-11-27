@@ -55,9 +55,10 @@ pub(super) struct Candidate {
     pub(super) subject: RecordId,
     /// The target's snapshot once it lands.
     pub(super) state: TreeId,
-    /// The trees the merge made, to write first.
+    /// The objects the merge made, to write first.
     pub(super) trees: Vec<EncodedObject>,
-    /// The rebased revision, if there is one, to write after the trees.
+    /// The revision checked, if it is new, to write after the trees: a rebased
+    /// revision, or the merge of a target landing.
     pub(super) revision: Option<EncodedObject>,
 }
 

@@ -2,7 +2,8 @@ use std::sync::Barrier;
 use std::thread;
 
 use origin_shared::{
-    AttachmentId, Base, Digest, Inputs, ObjectId, RepoPath, Revision, RevisionId, Verdict,
+    AcceptanceBody, AttachmentId, Base, Digest, Inputs, NodeKey, RepoPath, Revision, RevisionId,
+    TargetName, Verdict,
 };
 
 use super::*;
@@ -19,7 +20,7 @@ pub(super) fn principal(name: &str) -> Principal {
     name.parse().unwrap()
 }
 
-/// Writes a revision of `change` with `files`, evolving from
+/// Writes a revision of `change` on `main` with `files`, evolving from
 /// `predecessors`.
 pub(super) fn revision(
     store: &Store,
@@ -27,17 +28,40 @@ pub(super) fn revision(
     predecessors: &[RevisionId],
     files: &[(&str, &str)],
 ) -> RevisionId {
+    revision_on(store, &TargetName::MAIN, change, predecessors, files)
+}
+
+/// Writes a revision of `change` on `target`'s first acceptance with
+/// `files`, evolving from `predecessors`.
+pub(super) fn revision_on(
+    store: &Store,
+    target: &TargetName,
+    change: u8,
+    predecessors: &[RevisionId],
+    files: &[(&str, &str)],
+) -> RevisionId {
+    let acceptance = AcceptanceBody {
+        target: target.id(),
+        seq: 0,
+        prev: None,
+        state: build(store, &[]),
+        landed: Vec::new(),
+        evidence: Vec::new(),
+        policy: None,
+    }
+    .sign(&NodeKey::from_bytes(&[1; 32]))
+    .encode();
     let encoded = Revision {
         change: ChangeId::from_bytes([change; 16]),
         predecessors: predecessors.to_vec(),
-        base: Base::Acceptance(ObjectId::from_bytes([0; 32]).into()),
+        base: Base::Acceptance(acceptance.id().into()),
         deps: Vec::new(),
         snapshot: build(store, files),
         description: AttachmentId::from(EncodedObject::attachment(b"").id()),
         author: principal("user:alice"),
     }
     .encode();
-    store.write_all(std::slice::from_ref(&encoded)).unwrap();
+    store.write_all(&[acceptance, encoded.clone()]).unwrap();
     encoded.id().into()
 }
 

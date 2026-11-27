@@ -343,6 +343,10 @@ network or the environment still declares its paths, which remain useful
 information, but sets `external`. It then runs again on every revision. Human
 reviews usually declare no inputs, so they never promote automatically.
 
+The index groups promotable statements by kind, issuer and declared inputs, and
+caches each statement's input digest, computed from its subject's trees the
+first time a search needs it. Promotion never runs as a side effect of reading.
+
 ## Targets and policy
 
 Appending acceptances to a chain: the caller verifies the signatures, since
@@ -493,6 +497,34 @@ the tip if its change landed, or the queue's rebase if it was rebased.
 For a small project the queue runs inside your own `origin` process. Later,
 batching (one acceptance landing several changes) and speculative merge trains
 raise a busy target's throughput without changing the model.
+
+Details of a landing:
+
+- Landing a change lands its stack: the head of each change below it that the
+  target doesn't have yet, from the bottom up, each with its own acceptance. If
+  a change waits, the queue keeps the whole stack waiting, so a retry lands the
+  rest once that change can land.
+- A revision made on the tip lands as it is; the queue's node rebases any other
+  into a new revision of its change, on the tip. If the merge would leave the
+  target unchanged, nothing lands.
+- If both sides changed a path, a `core.conflict` statement about the revision
+  lists the paths, and the change waits until a new revision of it merges.
+- The submitter must have write access to every path the landing changes on the
+  target, whatever it lands, so landing a revision made on an old acceptance, or
+  another target, never reverts or deletes what they may not change. On
+  `policy`, the policy is that of the acceptance before, never the one landing.
+- Each of the target's requirements needs a claim about the revision that
+  lands. Results about the target's revisions with the same input digest are
+  promoted to it first, and a valid promotion claims what its original does, as
+  the original's issuer.
+- Landing another target merges the source's tip from the newest acceptances
+  both targets' histories share. The requirements apply to the merge, a
+  revision this node makes on the target's tip, as for a rebase, so results
+  about the same merge on another target, whose checks may differ, never count.
+- The queue of each target lives in `queue/<target id>/`: a `lock`, taken while
+  landing so landings on one target never race, and a file for each waiting
+  landing, `change-<id>` or `target-<target id>`, so waiting landings can be
+  listed and retried.
 
 ## Events
 

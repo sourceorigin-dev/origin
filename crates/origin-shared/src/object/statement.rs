@@ -10,12 +10,13 @@ use crate::{
     RevisionId, StatementId, TreeEntry, TreeId,
 };
 
-/// An attributable claim about another record: a check result, a review, a
-/// conflict, an abandonment.
+/// A claim about another record, attributed to its issuer, such as a check
+/// result, a review, a conflict or an abandonment.
 ///
-/// Statements are permanent. An issuer revises one by issuing another that
-/// supersedes it. A promoted statement carries another one over to a record
-/// with the same input digest, pointing at it instead of copying its issuer.
+/// Statements are permanent. An issuer revises a statement by issuing
+/// another that supersedes it. A promoted statement carries another
+/// statement over to a record on the same target with the same input
+/// digest. It points at the original instead of copying its issuer.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
 pub struct Statement {
     /// The record the claim is about.
