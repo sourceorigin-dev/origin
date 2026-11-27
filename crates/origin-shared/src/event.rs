@@ -274,12 +274,12 @@ mod tests {
     fn check_requests_about_one_record_are_told_apart() {
         let subject = RecordId::Revision(EncodedObject::blob(b"a revision").id().into());
         let request = |onto: &str, kind: &str| EventKind::CheckRequested {
-            onto: TargetName::new(onto).unwrap(),
+            onto: TargetName::new(onto).expect("the name is valid"),
             subject,
             requirement: Requirement {
-                kind: Kind::new(kind).unwrap(),
+                kind: Kind::new(kind).expect("the name is valid"),
                 verdict: Verdict::Pass,
-                issuer: "group:runners".parse().unwrap(),
+                issuer: "group:runners".parse().expect("the text parses"),
             },
         };
         let requests = [
