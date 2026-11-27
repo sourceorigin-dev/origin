@@ -31,8 +31,9 @@ fn paths(dir: &tempfile::TempDir, files: usize, shards: usize) -> impl FnMut() -
 /// Writes each file in a durable write of its own, which costs a batch sync
 /// and a directory sync per file.
 #[divan::bench(args = [1, 16, 128], sample_count = 10, sample_size = 1)]
+#[expect(clippy::expect_used, reason = "A benchmark fails by panicking.")]
 fn one_at_a_time(bencher: Bencher<'_, '_>, files: usize) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("a temporary directory is created");
     let platform = Native::default();
     bencher
         .counter(ItemsCount::new(files))
@@ -40,8 +41,8 @@ fn one_at_a_time(bencher: Bencher<'_, '_>, files: usize) {
         .bench_local_values(|paths| {
             for path in paths {
                 let write = DurableWrite::new(&platform);
-                write.stage(path, &CONTENTS).unwrap();
-                write.commit().unwrap();
+                write.stage(path, &CONTENTS).expect("the file is staged");
+                write.commit().expect("the write commits");
             }
         });
 }
@@ -49,8 +50,9 @@ fn one_at_a_time(bencher: Bencher<'_, '_>, files: usize) {
 /// Writes all the files in one durable write: one batch sync and one
 /// directory sync.
 #[divan::bench(args = [1, 16, 128], sample_count = 10, sample_size = 1)]
+#[expect(clippy::expect_used, reason = "A benchmark fails by panicking.")]
 fn batched(bencher: Bencher<'_, '_>, files: usize) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("a temporary directory is created");
     let platform = Native::default();
     bencher
         .counter(ItemsCount::new(files))
@@ -58,17 +60,18 @@ fn batched(bencher: Bencher<'_, '_>, files: usize) {
         .bench_local_values(|paths| {
             let write = DurableWrite::new(&platform);
             for path in paths {
-                write.stage(path, &CONTENTS).unwrap();
+                write.stage(path, &CONTENTS).expect("the file is staged");
             }
-            write.commit().unwrap();
+            write.commit().expect("the write commits");
         });
 }
 
 /// Writes all the files in one durable write, spread over 32 directories
 /// like loose objects.
 #[divan::bench(args = [128], sample_count = 10, sample_size = 1)]
+#[expect(clippy::expect_used, reason = "A benchmark fails by panicking.")]
 fn batched_sharded(bencher: Bencher<'_, '_>, files: usize) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("a temporary directory is created");
     let platform = Native::default();
     bencher
         .counter(ItemsCount::new(files))
@@ -76,17 +79,18 @@ fn batched_sharded(bencher: Bencher<'_, '_>, files: usize) {
         .bench_local_values(|paths| {
             let write = DurableWrite::new(&platform);
             for path in paths {
-                write.stage(path, &CONTENTS).unwrap();
+                write.stage(path, &CONTENTS).expect("the file is staged");
             }
-            write.commit().unwrap();
+            write.commit().expect("the write commits");
         });
 }
 
 /// Writes all the files in one durable write, staged from 8 threads at
 /// once.
 #[divan::bench(args = [16, 128], sample_count = 10, sample_size = 1)]
+#[expect(clippy::expect_used, reason = "A benchmark fails by panicking.")]
 fn batched_parallel(bencher: Bencher<'_, '_>, files: usize) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("a temporary directory is created");
     let platform = Native::default();
     bencher
         .counter(ItemsCount::new(files))
@@ -98,21 +102,24 @@ fn batched_parallel(bencher: Bencher<'_, '_>, files: usize) {
                     let write = &write;
                     scope.spawn(move || {
                         for path in chunk {
-                            write.stage(path, &CONTENTS).unwrap();
+                            write.stage(path, &CONTENTS).expect("the file is staged");
                         }
                     });
                 }
             });
-            write.commit().unwrap();
+            write.commit().expect("the write commits");
         });
 }
 
 /// Takes and releases an uncontended exclusive lock, as every landing
 /// does.
 #[divan::bench]
+#[expect(clippy::expect_used, reason = "A benchmark fails by panicking.")]
 fn lock(bencher: Bencher<'_, '_>) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("a temporary directory is created");
     let path = dir.path().join("lock");
     let platform = Native::default();
-    bencher.bench(|| drop(LockedFile::open(&platform, &path, LockMode::Exclusive).unwrap()));
+    bencher.bench(|| {
+        drop(LockedFile::open(&platform, &path, LockMode::Exclusive).expect("the lock is taken"));
+    });
 }
