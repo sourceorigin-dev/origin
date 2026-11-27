@@ -711,6 +711,25 @@ checkout, so the runner first looks for a result that covers it, and checks the
 snapshot out only to run it. Each checkout is removed afterwards, and the
 commands run there are killed along with what they left running.
 
+A worker long-polls the events and runs each requested check, so the statement
+it issues lets the landing continue. It runs the check on the landing's subject
+as defined by the `checks.toml` at the tip of the target it lands on, never the
+candidate's own. The target's requirements trust this runner's statements, so a
+change that redefines a required check to pass trivially must not make the
+worker report a pass. A request whose target has no tip, or no `checks.toml`
+there, stays unanswered until the worker reconciles.
+
+Events are only a prompt: one can come while the worker is down, and a check
+can fail to run. So the worker also reconciles: when it starts, when the remote
+can be reached again, and every `Worker::RECONCILE`. It lists the waiting
+landings, which the remote enumerates, and answers every check they lack that
+it hasn't answered yet. It reads the end of the events before listing, and
+moves its cursor there, so no event after the listed landings is missed. While
+the remote can't be reached, the worker waits and retries, then reconciles, so
+a check cut short by the remote going away runs again. Events may come more
+than once, but a check that already has a result is skipped, so nothing runs
+twice.
+
 ## Permissions and credentials
 
 Path rules map a path to `none`, `read` or `write` for everyone, groups and

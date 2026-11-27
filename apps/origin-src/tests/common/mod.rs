@@ -92,6 +92,26 @@ impl User {
         self.config.path()
     }
 
+    /// Starts a long-running command in `cwd`. Returns the process and a
+    /// receiver of its output lines as they arrive.
+    pub fn spawn(&self, cwd: &Path, args: &[&str]) -> (Child, mpsc::Receiver<String>) {
+        let mut child = self
+            .command(cwd, args)
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdout = BufReader::new(child.stdout.take().unwrap());
+        let (send, receive) = mpsc::channel();
+        thread::spawn(move || {
+            for line in stdout.lines() {
+                if send.send(line.unwrap()).is_err() {
+                    break;
+                }
+            }
+        });
+        (child, receive)
+    }
+
     /// Builds an `origin` command with `args` that runs in `cwd` as this user,
     /// with the plugins built with it on `$PATH`. Plugins keep their state in
     /// the user's configuration directory.
@@ -174,22 +194,7 @@ impl Repo {
     /// Starts a long-running command, such as `watch`. Returns the process and a
     /// receiver of its output lines as they arrive.
     pub fn spawn(&self, args: &[&str]) -> (Child, mpsc::Receiver<String>) {
-        let mut child = self
-            .user
-            .command(self.root(), args)
-            .stdout(Stdio::piped())
-            .spawn()
-            .unwrap();
-        let stdout = BufReader::new(child.stdout.take().unwrap());
-        let (send, receive) = mpsc::channel();
-        thread::spawn(move || {
-            for line in stdout.lines() {
-                if send.send(line.unwrap()).is_err() {
-                    break;
-                }
-            }
-        });
-        (child, receive)
+        self.user.spawn(self.root(), args)
     }
 
     /// Returns the full id of the working copy's revision.
@@ -360,8 +365,13 @@ impl Server {
         format!("token-{user}")
     }
 
-    #[expect(clippy::panic, reason = "A test helper fails by panicking.")]
     pub fn start() -> Self {
+        Self::start_with(&[])
+    }
+
+    /// Starts a server whose repository was made by `origin repo create` with
+    /// `args`, such as `--admin user:alice`.
+    pub fn start_with(args: &[&str]) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("origin-server.toml");
         let tokens: Vec<_> = Self::USERS
@@ -377,12 +387,12 @@ impl Server {
             ),
         )
         .unwrap();
-        let origin = |args: &[&str]| {
+        let server = |args: &[&str]| {
             let mut command = Command::new(origin());
             command.args(args).arg("--config").arg(&config);
             command
         };
-        let created = origin(&["repo", "create"])
+        let created = server(&[&["repo", "create"], args].concat())
             .arg(dir.path().join("repos/demo"))
             .output()
             .unwrap();
@@ -391,7 +401,18 @@ impl Server {
             "{}",
             String::from_utf8_lossy(&created.stderr)
         );
-        let mut child = origin(&["serve"])
+        let (child, base) = Self::serve(&config);
+        Self { dir, child, base }
+    }
+
+    /// Runs `origin serve` with `config`. Returns the process and its base URL
+    /// once it listens. Kills the process and panics if it prints anything else
+    /// first.
+    #[expect(clippy::panic, reason = "A test helper fails by panicking.")]
+    fn serve(config: &Path) -> (Child, String) {
+        let mut child = Command::new(origin())
+            .args(["serve", "--config"])
+            .arg(config)
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
@@ -404,7 +425,23 @@ impl Server {
             panic!("`origin serve` printed {line:?} ({read:?}), not its address");
         };
         let base = base.to_owned();
-        Self { dir, child, base }
+        (child, base)
+    }
+
+    /// Kills the server, runs `meanwhile`, then serves the repository again at
+    /// the same address.
+    pub fn restart(&mut self, meanwhile: impl FnOnce()) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        meanwhile();
+        let config = self.dir().join("origin-server.toml");
+        let address = self.base.strip_prefix("http://").unwrap();
+        let toml = fs::read_to_string(&config).unwrap();
+        let toml = toml.replace("127.0.0.1:0", address);
+        fs::write(&config, toml).unwrap();
+        let (child, base) = Self::serve(&config);
+        assert_eq!(base, self.base);
+        self.child = child;
     }
 
     /// Returns the directory that holds the server's configuration, key and
