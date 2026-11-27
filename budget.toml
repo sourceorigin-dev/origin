@@ -11,4 +11,5 @@ origin-ci = 1
 origin-src = 2
 
 [invariant]
+origin-shared = 1
 origin-src = 11

@@ -216,7 +216,6 @@ impl FromStr for RecordId {
     }
 }
 
-// The tags are the records' object kinds.
 tagged!(RecordId {
     Snapshot = 2,
     Revision = 3,
