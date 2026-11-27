@@ -132,7 +132,6 @@ fn promotes_results_whose_inputs_are_unchanged() {
         &check(first, "review", Verdict::Pass, "user:bob", None),
     );
 
-    // A docs-only change keeps lint, and nothing that reads docs.
     let docs_only = revision(
         &store,
         2,
@@ -145,8 +144,6 @@ fn promotes_results_whose_inputs_are_unchanged() {
     );
     assert_eq!(promote(&store, docs_only), [], "promoted once");
 
-    // An unchanged snapshot keeps every promotable result, never the
-    // external one or the review.
     let same = revision(&store, 3, &[], FILES);
     let kinds: Vec<_> = promote(&store, same)
         .into_iter()
@@ -163,7 +160,6 @@ fn promotes_results_whose_inputs_are_unchanged() {
     );
     assert_eq!(promote(&store, source), []);
 
-    // Promoted results aren't promoted again: their originals are.
     let again = revision(&store, 5, &[], FILES);
     let originals: Vec<_> = promote(&store, again).into_iter().map(|(_, o)| o).collect();
     assert!(originals.contains(&Some(lint)), "{originals:?}");
@@ -185,7 +181,6 @@ fn direct_results_win_over_promotion() {
     );
     assert_eq!(promote(&store, second), [], "it ran there, and failed");
 
-    // Of several matching results, the latest is promoted.
     let third = revision(&store, 3, &[], FILES);
     let promoted = promote(&store, third);
     let second_result = Annotations::open(&store)
@@ -217,7 +212,6 @@ fn results_there_replace_promoted_ones_whatever_came_first() {
             .collect()
     };
 
-    // A failure there, after a promoted pass.
     let second = revision(&store, 2, &[], FILES);
     assert_eq!(promote(&store, second).len(), 1);
     issue(
@@ -226,7 +220,6 @@ fn results_there_replace_promoted_ones_whatever_came_first() {
     );
     assert_eq!(verdicts(second), [(false, Some(Verdict::Fail))]);
 
-    // A pass there, then taken back, after a promoted pass.
     let third = revision(&store, 3, &[], FILES);
     assert_eq!(promote(&store, third).len(), 1);
     let pass = check(third, "lint", Verdict::Pass, "node:ci", inputs);
@@ -282,20 +275,17 @@ fn promotions_must_match_their_original() {
         other => panic!("{other:?}"),
     };
 
-    // Turning a failure into a pass.
     let forged = Statement {
         verdict: Some(Verdict::Pass),
         ..promotion(failure, &failed)
     };
     assert_eq!(refused(&forged), InvalidPromotion::Differs("verdict"));
-    // Carrying it where the inputs differ.
     let changed = revision(&store, 3, &[], &[("src/lib.rs", "v2")]);
     let moved = Statement {
         subject: RecordId::Revision(changed),
         ..promotion(failure, &failed)
     };
     assert_eq!(refused(&moved), InvalidPromotion::InputsDiffer);
-    // Carrying a result that read the network.
     failed.inputs.as_mut().unwrap().external = true;
     let external = issue(&store, &failed);
     assert_eq!(
@@ -308,8 +298,6 @@ fn promotions_must_match_their_original() {
         InvalidPromotion::UnknownOriginal(unknown)
     );
 
-    // Written anyway, as a fetch could, none of them claims anything,
-    // and a valid one claims as the original's issuer.
     let valid = promotion(
         failure,
         &check(first, "lint", Verdict::Fail, "node:ci", inputs),
@@ -339,8 +327,6 @@ fn superseded_promotions_hold_nothing() {
     let second = revision(&store, 2, &[], FILES);
     assert_eq!(promote(&store, second), [("lint".to_owned(), Some(id))]);
 
-    // The rerun replaces the original, so the promotion of it no longer
-    // holds, and the rerun is promoted in its place.
     let rerun = issue(
         &store,
         &Statement {

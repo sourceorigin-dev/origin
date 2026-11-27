@@ -207,8 +207,6 @@ impl<P: Platform> Session<'_, '_, P> {
                 }
             }
         }
-        // What a landing on `policy` lands governs the next one, which
-        // this node must still be the authority of.
         let landed_policy = if self.onto == TargetName::POLICY {
             self.queue.authorize(&self.policy, &self.onto)?;
             Some(Queue::check_policy(store, candidate.state)?)
@@ -216,8 +214,6 @@ impl<P: Platform> Session<'_, '_, P> {
             None
         };
         let mut records: Vec<EncodedObject> = candidate.revision.into_iter().collect();
-        // A landing that changes nothing, which only records another
-        // target's tip, needs no evidence.
         let requirements = if candidate.state == self.state {
             Vec::new()
         } else {
@@ -226,7 +222,6 @@ impl<P: Platform> Session<'_, '_, P> {
         let mut evidence = Vec::new();
         let mut missing = Vec::new();
         if !requirements.is_empty() {
-            // Promotion reads the revision.
             store.write_all(&records)?;
             records.clear();
             let mut reader = Reader::new(store, &self.queue.paths);

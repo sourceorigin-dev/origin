@@ -131,7 +131,6 @@ impl<'a, P: Platform> Annotations<'a, P> {
         statement.supersedes =
             self.current(statement.subject, &statement.kind, &statement.issuer)?;
         if statement.verdict.is_none() && !statement.kind.is_reserved() {
-            // A withdrawal takes back a statement with a verdict.
             let withdrawable = match statement.supersedes {
                 Some(current) => !self.store.get(current)?.withdraws(),
                 None => false,

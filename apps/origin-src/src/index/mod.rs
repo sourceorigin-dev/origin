@@ -113,7 +113,6 @@ impl Index {
             return Ok(index);
         }
         let _lock = store.lock_index(LockMode::Exclusive)?;
-        // Another process may have rebuilt it while this one waited.
         let (mut index, intact) = Self::read(store)?;
         if intact && index.catch_up(store)? {
             return Ok(index);
@@ -152,8 +151,6 @@ impl Index {
     /// Rebuilds the index, keeping the arrival order of `old`. The caller must
     /// hold the index lock exclusively.
     fn rebuild_locked<P: Platform>(store: &Store<P>, old: &Self) -> Result<Rebuilt, StoreError> {
-        // Every entry up to it is as published as it will be, so the store
-        // has their records; later ones are caught up.
         let applied = store.oplog().settled()?;
         let order: HashMap<RecordId, usize> = old
             .arrivals
@@ -173,8 +170,6 @@ impl Index {
             applied,
             ..Self::default()
         };
-        // Records of entries after it are kept in memory, not written:
-        // catching up writes them once their entries settle.
         let mut later = HashSet::new();
         for logged in store.oplog().after(applied)?.entries {
             if let Effect::Wrote(written) = logged.effect {
@@ -188,7 +183,6 @@ impl Index {
             .into_iter()
             .partition(|entry| !later.contains(&entry.record()));
         index.added.extend(unsettled.iter().map(Entry::record));
-        // Digests never change, so those of statements still there stay.
         let mut digests: Vec<_> = old
             .digests
             .iter()
@@ -220,8 +214,6 @@ impl Index {
                     for entry in entries.into_owned() {
                         index.insert(entry);
                     }
-                    // Frames from processes catching up at once can come in
-                    // any order.
                     index.applied = index.applied.max(applied);
                 }
                 Frame::Digests(digests) => index.digests.extend(digests.iter().copied()),
@@ -271,10 +263,6 @@ impl Index {
         let Some(last) = read.entries.last() else {
             return Ok(true);
         };
-        // The index stays before the first entry whose write may still be
-        // in progress, to look again next time, but takes the records
-        // published after it, such as this process's own: in memory only,
-        // since a power loss may take them back before their entry settles.
         let applied = last.seq.min(oplog.settled()?).max(self.applied);
         let mut caught = Vec::new();
         for logged in &read.entries {
@@ -302,7 +290,6 @@ impl Index {
             self.insert(entry.clone());
         }
         self.applied = applied;
-        // Not synced: a lost frame is caught up again from the op log.
         store.append_to_index(&Frame::Records {
             applied,
             entries: Cow::Owned(caught),
@@ -591,7 +578,6 @@ impl Entry {
                 })
             }
             ObjectKind::Acceptance => {
-                // Decoding checks it's well formed, as for other records.
                 object.decode_as::<origin_shared::Acceptance>()?;
                 Some(Self::Acceptance(id.into()))
             }
@@ -856,7 +842,6 @@ impl<P: Platform> Store<P> {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
             Err(source) => return Err(io_error(source)),
         };
-        // Closing the log releases the lock.
         self.platform
             .lock(&log, LockMode::Exclusive)
             .map_err(io_error)?;

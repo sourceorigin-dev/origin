@@ -190,22 +190,12 @@ impl<'a, P: Platform> Queue<'a, P> {
             let subject = RecordId::Acceptance(tip.acceptance);
             return session.block(proposal, subject, &merge.conflicts);
         }
-        // A merge that changes nothing has nothing to record either when
-        // one tip is in the other's history: the target has the source's
-        // already, or the source has nothing the target lacks.
         let [ours, theirs] = tips;
         let either = history.descends(ours, theirs) || history.descends(theirs, ours);
         if merge.tree == session.state && either {
             session.forget(&proposal)?;
             return Ok(Landing::Unchanged(proposal));
         }
-        // Even a merge that changes nothing lands, so that the tip is in
-        // the target's history, and later merges start from it.
-        //
-        // Checked as a revision on `onto`'s tip, as a rebase is, so results
-        // about it count on `onto` alone (see `Store::target_of`): the same
-        // merge on another target is checked with that target's checks. The
-        // same tips make the same revision, which a retry checks again.
         let onto_tip = session.tip.acceptance;
         let digest = Digest::of(&[*onto_tip.as_bytes(), *tip.acceptance.as_bytes()].concat());
         let mut change = [0; ChangeId::LEN];
@@ -301,7 +291,6 @@ impl<'a, P: Platform> Queue<'a, P> {
                 if name == Self::LOCK || DurableWrite::<P>::is_temporary(name) {
                     continue;
                 }
-                // Read without the lock: a landing that just ended forgot it.
                 let text = match fs::read_to_string(&path) {
                     Ok(text) => text,
                     Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
@@ -399,8 +388,6 @@ impl<'a, P: Platform> Queue<'a, P> {
             .store
             .head(onto)?
             .ok_or_else(|| LandError::UnknownTarget(onto.clone()))?;
-        // A landing on `policy` is governed by the acceptance before it: its
-        // tip, whatever the policy it lands says.
         let (policy_head, policy) = if *onto == TargetName::POLICY {
             let state = self.store.get(tip.acceptance)?.body().state;
             (tip.acceptance, Self::check_policy(self.store, state)?)

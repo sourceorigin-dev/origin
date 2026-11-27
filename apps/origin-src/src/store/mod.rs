@@ -139,7 +139,6 @@ impl<P: Platform> Store<P> {
             if DurableWrite::<P>::is_temporary(&entry.file_name()) {
                 let path = entry.path();
                 match Self::remove_if_stale(&path) {
-                    // Its writer published or removed it in the meantime.
                     Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                     result => result.map_err(|source| StoreError::io(&path, source))?,
                 }
@@ -278,8 +277,6 @@ impl<P: Platform> Store<P> {
         items: &[T],
         map: impl Fn(&[T]) -> R + Sync,
     ) -> Vec<R> {
-        // Asking for the cores reads the cgroup's quota, which costs more than
-        // handling a lone item, such as writing one object.
         if items.len() <= 1 {
             return vec![map(items)];
         }
@@ -319,18 +316,13 @@ impl<P: Platform> Store<P> {
         for shard in list(&loose)? {
             let prefix = shard.file_name();
             for object in list(&shard.path())? {
-                // Anything else, such as temporary files, isn't an object.
                 let mut hex = prefix.clone();
                 hex.push(object.file_name());
                 ids.extend(hex.to_str().and_then(|hex| hex.parse::<ObjectId>().ok()));
             }
         }
-        // Only now: a compaction publishes its pack before it removes the
-        // loose files, so one that removed some since they were listed
-        // published them in the manifest read here.
+        // INVARIANT: packed ids are read after the loose ones: a compaction publishes its pack before removing loose files.
         ids.extend(self.packed_ids()?);
-        // A compaction in progress, or a writer unaware of a pack, leaves
-        // objects both loose and packed.
         ids.sort_unstable();
         ids.dedup();
         Ok(ids)
@@ -373,7 +365,6 @@ impl<P: Platform> Store<P> {
     pub fn stored_at(&self, id: ObjectId) -> Result<SystemTime, StoreError> {
         let path = self.path(id);
         match fs::metadata(&path).and_then(|metadata| metadata.modified()) {
-            // Compaction may have moved it into a pack.
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 let (_, location) = self.find_packed(id)?.ok_or(StoreError::NotFound(id))?;
                 Ok(location.stored())
@@ -479,7 +470,6 @@ impl<P: Platform> Store<P> {
         let path = self.path(id);
         let (compressed, path) = match fs::read(&path) {
             Ok(compressed) => (compressed, path),
-            // Compaction may have just moved it into a pack.
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 let Some((pack, location)) = self.find_packed(id)? else {
                     return Ok(None);
@@ -599,9 +589,6 @@ impl<P: Platform> Store<P> {
         while !rest.is_empty() {
             let chunk = &rest[..size.min(rest.len())];
             let read = AtomicUsize::new(0);
-            // Each core reads its part of the chunk, in order, until it
-            // fails or the chunk holds its target, though always one object,
-            // so the first part moves on.
             let parts = Self::on_every_core(chunk, |part| {
                 let mut objects = Vec::new();
                 for &id in part {
@@ -620,8 +607,6 @@ impl<P: Platform> Store<P> {
                 }
                 (objects.len() == part.len(), objects)
             });
-            // In order, up to the first part that stopped short: the rest
-            // comes with the next chunk.
             let mut handed = 0;
             for (whole, objects) in parts {
                 for object in objects {
@@ -759,7 +744,6 @@ impl<P: Platform> Batch<'_, P> {
             self.store.reload_packs()?;
             *read = true;
         }
-        // Lookups from every core needn't wait on each other.
         drop(read);
         Ok(self.store.packs.find(id).is_some())
     }
@@ -981,7 +965,6 @@ pub(crate) mod tests {
         store.write_all(slice::from_ref(&blob)).unwrap();
         store.platform.0.lock().clear();
 
-        // Its writer may not have synced it yet, if another one wrote it.
         assert_eq!(store.write_all(slice::from_ref(&blob)).unwrap(), 0);
         let shard = store.path(blob.id()).parent().unwrap().to_owned();
         assert_eq!(
@@ -1135,7 +1118,6 @@ pub(crate) mod tests {
         let (_dir, store) = store();
         let blob = EncodedObject::blob(b"hello");
         store.write_all(slice::from_ref(&blob)).unwrap();
-        // A single-segment frame recording 4 EiB, holding a 5-byte raw block.
         let mut frame = vec![0x28, 0xb5, 0x2f, 0xfd, 0xe0];
         frame.extend_from_slice(&(1u64 << 62).to_le_bytes());
         frame.extend_from_slice(&[5 << 3 | 1, 0, 0]);

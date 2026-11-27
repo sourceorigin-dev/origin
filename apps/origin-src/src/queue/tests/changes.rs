@@ -47,8 +47,6 @@ fn lands_rebases_and_skips_what_the_target_has() {
         repo.files(&[("a", "a"), ("b", "b")])
     );
 
-    // Both changes are on `main` now: neither lands again, though `b`'s
-    // head is the rebased revision and `a`'s the original.
     assert_eq!(repo.land(1), [Landing::Unchanged(change(1))]);
     assert_eq!(repo.land(2), [Landing::Unchanged(change(2))]);
     assert_eq!(repo.tip(&TargetName::MAIN).seq, 2);
@@ -267,8 +265,6 @@ fn a_waiting_stack_lands_whole_once_it_can() {
         "kept as the landing of the whole stack"
     );
 
-    // Retrying it, as once the evidence arrives, lands both: the result
-    // is promoted to the upper change, which doesn't change `src`.
     let annotations = Annotations::open(&repo.store).unwrap();
     annotations.issue(&ci_test(lower, "user:ci"), None).unwrap();
     let landings = repo.land(2);

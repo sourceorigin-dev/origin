@@ -36,7 +36,6 @@ fn pack_files<P: Platform>(store: &Store<P>) -> Vec<String> {
 fn packs_small_objects_and_leaves_large_ones_loose() {
     let (_dir, store) = store();
     let small = objects(0, 100);
-    // Hashes don't compress, so this stays above the limit.
     let large = EncodedObject::blob(
         &(0..1024_u32)
             .flat_map(|i| *Digest::of(&i.to_le_bytes()).as_bytes())
@@ -62,7 +61,6 @@ fn packs_small_objects_and_leaves_large_ones_loose() {
         "a pack, its index, manifest, lock"
     );
 
-    // A store opened afresh finds them too.
     let reopened = Store::new(&store.root, Native::default());
     assert_readable(&reopened, &small);
     assert!(reopened.contains(small[0].id()).unwrap());
@@ -103,8 +101,6 @@ fn removes_loose_duplicates_of_packed_objects() {
     let objects = objects(0, 10);
     store.write_all(&objects).unwrap();
 
-    // A batch that read the manifest before a compaction packed them
-    // writes them again.
     let unaware = Store::new(&store.root, Native::default());
     let batch = unaware.batch();
     assert!(batch.write(&EncodedObject::blob(b"first")).unwrap());
@@ -119,8 +115,6 @@ fn removes_loose_duplicates_of_packed_objects() {
     assert!(!store.path(objects[0].id()).exists());
     assert_readable(&store, &objects);
 
-    // A later batch reads the manifest, even in a process that never
-    // loaded the packs.
     let fresh = Store::new(&store.root, Native::default());
     assert_eq!(fresh.write_all(&objects).unwrap(), 0);
     assert!(!store.path(objects[0].id()).exists());
@@ -152,7 +146,6 @@ fn compacts_once_enough_loose_objects_pile_up() {
     let few = objects(0, 100);
     store.write_all(&few).unwrap();
     assert_eq!(store.compact_if_due().unwrap(), None);
-    // Enough for their estimate from one shard to be past the threshold.
     let many = objects(
         100,
         u32::try_from(3 * Store::<Native>::COMPACT_AFTER).unwrap(),
@@ -173,7 +166,6 @@ fn rewriting_a_packed_object_syncs_the_manifest() {
     store.compact().unwrap();
     store.platform.0.lock().clear();
 
-    // The compactor may not have synced the manifest naming it yet.
     assert_eq!(store.write_all(&objects[..1]).unwrap(), 0);
     let packs = store.packs_dir();
     assert_eq!(
@@ -220,7 +212,6 @@ fn unreadable_objects_fail_the_compaction() {
     let (_dir, store) = store();
     let objects = objects(0, 10);
     store.write_all(&objects).unwrap();
-    // Reading a directory fails.
     let unreadable = store.path(objects[3].id());
     fs::remove_file(&unreadable).unwrap();
     fs::create_dir(&unreadable).unwrap();
@@ -250,7 +241,6 @@ fn rejects_corrupt_indexes() {
     store.compact().unwrap();
     let index = Pack::file_path(&store.packs_dir(), store.packs.loaded()[0].id, "idx");
     let mut bytes = fs::read(&index).unwrap();
-    // Swap the first two ids, which keeps them valid but unsorted.
     let ids = Pack::INDEX_MAGIC.len()..Pack::INDEX_MAGIC.len() + 2 * ObjectId::LEN;
     bytes[ids].rotate_left(ObjectId::LEN);
     fs::write(&index, bytes).unwrap();
@@ -324,7 +314,6 @@ fn a_failed_compaction_loses_nothing() {
     let second = objects(10, 10);
     store.write_all(&second).unwrap();
 
-    // The new pack and its index are durable, the manifest isn't.
     store.platform.crash_after(1);
     assert!(store.compact().is_err());
     let fresh = Store::new(&store.root, Native::default());
@@ -346,8 +335,6 @@ fn readers_never_miss_an_object_during_compaction() {
     let written: Vec<_> = (0..rounds).map(|round| objects(round * 50, 50)).collect();
     let published = AtomicUsize::new(0);
     thread::scope(|scope| {
-        // Readers in this process, sharing the compactor's packs, and
-        // as another process would, with packs of their own.
         for reader in [store.clone(), Store::new(&store.root, Native::default())] {
             let (written, published) = (&written, &published);
             scope.spawn(move || {

@@ -246,8 +246,6 @@ impl KeyFile {
         let key = NodeKey::generate().map_err(ConfigError::Random)?;
         let name = self.0.file_name().unwrap_or_default().to_string_lossy();
         let temp = dir.join(format!(".{name}-{}", process::id()));
-        // A crash can leave one behind, under a pid that a reboot hands out
-        // again. Only this process uses the name.
         let _ = fs::remove_file(&temp);
         let written = OpenOptions::new()
             .write(true)
@@ -259,7 +257,6 @@ impl KeyFile {
                 Native::default().sync_file(&file)
             })
             .and_then(|()| fs::hard_link(&temp, &self.0));
-        // Best effort: a leftover is never read.
         let _ = fs::remove_file(&temp);
         match written {
             Ok(()) => {}

@@ -299,7 +299,6 @@ impl Frames {
         }
         let offset = file.metadata()?.len();
         if let Err(error) = (&*file).write_all(frame) {
-            // Best effort: the next append cuts it off otherwise.
             let _ = file.set_len(offset);
             return Err(error);
         }

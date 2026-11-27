@@ -220,7 +220,6 @@ impl OriginService {
         call: impl FnOnce(&mut Annotations<'s>) -> Result<T, ServiceError>,
     ) -> Result<T, ServiceError> {
         let mut taken = self.indexes.take(most);
-        // A failed refresh drops the index, to read whole next time.
         let index = match taken.index.take() {
             Some(mut index) => {
                 index.refresh(&self.store)?;
@@ -647,18 +646,13 @@ impl OriginService {
         if *caller == Caller::Anonymous {
             return Err(Forbidden::Anonymous.into());
         }
-        // Objects this finds stored stay until what refers to them is.
         let _held = self.store.hold_objects()?;
         let held: HashMap<ObjectId, Option<ObjectKind>> = pack
             .objects
             .iter()
             .map(|object| (object.id(), object.kind().ok()))
             .collect();
-        // Makes what the repository has of the dependencies durable before
-        // anything refers to them: their writers may not have yet.
         let dependencies = self.store.batch();
-        // The dependencies the repository has, whose kinds are read once
-        // every object is checked otherwise.
         let mut stored: HashMap<ObjectId, (ObjectId, ObjectKind)> = HashMap::new();
         let mut snapshots = SnapshotLayers::default();
         let mut statements = StatementRounds::default();
@@ -677,8 +671,6 @@ impl OriginService {
                         return Err(ServiceError::WrongKind { id, needed, kind });
                     }
                     Some(_) => {}
-                    // Two objects needing it as different kinds can't both
-                    // be right.
                     None if dependencies.depend(needed)? => match stored.entry(needed) {
                         Entry::Occupied(entry) if entry.get().1 != kind => {
                             return Err(ServiceError::WrongKind { id, needed, kind });
@@ -1237,8 +1229,6 @@ impl OriginService {
             };
             Ok(landed)
         });
-        // Even a failed landing may have written records, such as a
-        // conflict.
         self.wakeup.notify();
         landed
     }
@@ -1889,8 +1879,6 @@ mod tests {
         service
             .put_records(&Caller::Owner, Pack { objects })
             .unwrap();
-        // A crash between the two finds the conflict alone, never the
-        // revision without it.
         let entries = oplog.after(before).unwrap().entries;
         let written = |record: RecordId| {
             let written = |entry: &&crate::oplog::Entry| match &entry.effect {
@@ -2000,7 +1988,6 @@ mod tests {
         let node = Node::new("hosted".parse().unwrap(), NodeKey::from_bytes(&[7; 32]));
         let policy = Policy::initial(&node.name, &node.key().unwrap().public(), None);
         let service = OriginService::create(dir.path().join("repo"), node, &policy).unwrap();
-        // A landing holds an index all along: a read meanwhile takes another.
         let read = service.annotations(|_| {
             service.annotations(|annotations| Ok(annotations.index().changes().count()))
         });

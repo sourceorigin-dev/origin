@@ -245,9 +245,6 @@ fn promotion_store() -> (tempfile::TempDir, Store, RevisionId) {
         }));
     }
     store.write_all(&statements).unwrap();
-    // Version 1000's sources with the docs of other versions: the seven
-    // checks that don't read docs promote from version 1000, the two that
-    // only read docs from the latest version with those docs.
     let target = revision(&store, revisions, 1000, 3);
     (dir, store, target)
 }
@@ -288,7 +285,6 @@ fn promotions_uncached(bencher: Bencher<'_, '_>) {
     bencher
         .counter(ItemsCount::new(STATEMENTS))
         .with_inputs(|| {
-            // Rebuilding without the old index forgets every digest.
             fs::remove_file(&log).unwrap();
             Annotations::open(&store).unwrap()
         })

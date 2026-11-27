@@ -55,8 +55,6 @@ impl Conflicts {
     /// appears more than once, the last entry wins.
     #[must_use]
     pub fn new(mut conflicted: Vec<Conflicted>) -> Self {
-        // Stable, so the latest of each path comes last, and dedup keeps the
-        // first of equal ones: reverse around it.
         conflicted.reverse();
         conflicted.sort_by(|a, b| a.path.cmp(&b.path));
         conflicted.dedup_by(|a, b| a.path == b.path);

@@ -65,11 +65,8 @@ fn every_statement_revision_landing_and_request_fires_an_event() {
     let annotations = Annotations::open(&repo.store).unwrap();
     annotations.issue(&ci_test(code, "node:ci"), None).unwrap();
     repo.land(1);
-    // Rebased onto the tested code, the docs change gets its result
-    // promoted; the other change conflicts.
     repo.land(2);
     repo.land(3);
-    // Two revisions of the docs change from the same one: divergence.
     let base = Base::Acceptance(repo.tip(&TargetName::MAIN).acceptance);
     repo.revision(2, &[docs], base, &[("docs/guide.md", "left")]);
     repo.revision(2, &[docs], base, &[("docs/guide.md", "right")]);
@@ -145,7 +142,6 @@ fn cursors_survive_index_rebuilds_and_filters_select() {
         subjects: vec![start],
         ..Filter::default()
     };
-    // The revision's creation, and the statement about it.
     let code_hex = code.to_hex();
     assert_eq!(all(&events, 0, &about(code_hex[..8].to_owned())).len(), 2);
     assert_eq!(
@@ -162,8 +158,6 @@ fn cursors_survive_index_rebuilds_and_filters_select() {
 fn unpublished_entries_hold_back_later_events_while_writes_are_in_progress() {
     let repo = repo();
     let events = Events::new(&repo.store);
-    // An entry for a revision that was never published, as a crashed
-    // write leaves.
     let missing = index::Entry::Revision {
         id: ObjectId::from_bytes([9; 32]).into(),
         change: ChangeId::from_bytes([9; 16]),
@@ -189,7 +183,6 @@ fn unpublished_entries_hold_back_later_events_while_writes_are_in_progress() {
         "it may be in progress"
     );
     assert_eq!(events.end().unwrap(), crashed - 1, "no cursor passes it");
-    // Its writer crashes.
     drop(writing);
     let page = events
         .after(crashed - 1, &Filter::default(), usize::MAX)
@@ -211,8 +204,6 @@ fn a_landing_waiting_again_after_a_conflict_requests_its_checks() {
     repo.land(1);
     repo.land(2);
     let start = events.end().unwrap();
-    // While the landing waits again, its entry is in the log before its
-    // file replaces the conflict's: readers wait for both.
     let again = Effect::Waiting {
         onto: TargetName::MAIN,
         proposal: origin_shared::landing::Proposal::Change(ChangeId::from_bytes([2; 16])),

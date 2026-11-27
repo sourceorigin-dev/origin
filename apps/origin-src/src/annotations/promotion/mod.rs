@@ -95,7 +95,6 @@ impl<P: Platform> Annotations<'_, P> {
                 .claim(annotation.id, annotation.statement.clone())
             {
                 Ok(Ok(claim)) => claim,
-                // A clone may lack the trees a promotion is checked with.
                 Ok(Err(_)) | Err(StoreError::NotFound(_)) => continue,
                 Err(error) => return Err(error),
             };
@@ -173,8 +172,6 @@ impl<P: Platform> Annotations<'_, P> {
         };
         self.compute_digests()?;
 
-        // The results the revision has that hold, by kind and original
-        // issuer.
         let held: HashSet<_> = self
             .claims(subject)?
             .iter()
@@ -184,7 +181,6 @@ impl<P: Platform> Annotations<'_, P> {
         let mut snapshots = Snapshots::new(self.store);
         let mut promotions = Vec::new();
         for (_, statements) in self.index.promotable() {
-            // A group shares its kind, issuer and inputs.
             let first = self.store.get(statements[0])?;
             let Some(inputs) = &first.inputs else {
                 continue;

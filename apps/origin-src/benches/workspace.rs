@@ -46,8 +46,7 @@ static MAIN: LazyLock<Main> = LazyLock::new(|| {
     store.init().unwrap();
     let empty = Tree::default().encode();
     store.write_all(std::slice::from_ref(&empty)).unwrap();
-    // The stat cache only vouches for files that changed well before the
-    // scan.
+    // wall-clock: the stat cache only vouches for files that changed well before the scan.
     thread::sleep(Duration::from_millis(2_100));
     let (root, cache) = Worktree::new(dir.path(), &store)
         .snapshot(&StatCache::default())

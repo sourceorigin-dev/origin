@@ -22,7 +22,6 @@ fn missing_evidence_waits_and_promoted_results_count() {
         std::slice::from_ref(pending)
     );
 
-    // A user outside the group doesn't count; the runner does.
     let annotations = Annotations::open(&repo.store).unwrap();
     annotations
         .issue(&ci_test(code, "user:mallory"), None)
@@ -40,8 +39,6 @@ fn missing_evidence_waits_and_promoted_results_count() {
     assert_eq!(acceptance.body().evidence, [result]);
     assert_eq!(Queue::pending(&repo.store).unwrap(), []);
 
-    // The docs change is rebased onto `src` as tested, so the result is
-    // promoted to it, and counts as the runner's.
     let [landing] = &repo.land(2)[..] else {
         panic!()
     };
@@ -147,14 +144,12 @@ fn forged_promotions_are_no_evidence() {
         .unwrap()
         .issue(&original, None)
         .unwrap();
-    // Eve wraps the trusted failure as a pass, written as a fetch would.
     let forged = Statement {
         verdict: Some(Verdict::Pass),
         issuer: "user:eve".parse().unwrap(),
         promoted_from: Some(id),
         ..original.clone()
     };
-    // And carries a result that read the network to another change.
     let old = repo.change_on_main(3, &[("src/lib.rs", "bad")]);
     let docs = repo.change_on_main(2, &[("src/lib.rs", "bad"), ("docs", "d")]);
     let mut external = ci_test(old, "user:ci");
@@ -190,7 +185,6 @@ fn replaced_results_are_promoted_again() {
             |_| Ok(true),
         )
         .unwrap();
-    // The same passing result runs again, replacing the one promoted.
     let rerun = Statement {
         supersedes: Some(id),
         ..original

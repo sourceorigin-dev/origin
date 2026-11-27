@@ -12,8 +12,6 @@ use origin_shared::{EncodedObject, Kind, ObjectId, Record, RecordId, Statement, 
 use origin_src::store::Store;
 
 fn main() {
-    // Every store lives in here, so the fixtures, which statics never drop,
-    // go with it once the benchmarks are done.
     let root = tempfile::tempdir().unwrap();
     ROOT.set(root.path().to_owned()).unwrap();
     divan::main();
@@ -117,7 +115,6 @@ fn packed_store(packs: u32) -> &'static Store {
 /// Writing a million statements as loose objects, in one batch.
 #[divan::bench(sample_count = 3, sample_size = 1)]
 fn write_loose(bencher: Bencher<'_, '_>) {
-    // Generated now, so the single sample times only the write.
     LazyLock::force(&STATEMENTS_1M);
     bencher
         .counter(ItemsCount::new(STATEMENTS))

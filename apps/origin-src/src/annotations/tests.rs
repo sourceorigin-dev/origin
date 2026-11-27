@@ -139,9 +139,6 @@ fn statements_issued_at_once_supersede_one_another() {
     let revision = revision(&store, 1, &[], FILES);
     let rounds = 50;
     for _ in 0..rounds {
-        // Both prepared before either thread starts, so a failure fails
-        // the test rather than leaving a thread at the barrier. Different
-        // verdicts, so the two never make one statement.
         let racers = [Verdict::Pass, Verdict::Fail].map(|verdict| {
             let annotations = Annotations::open(&store).unwrap();
             (
@@ -181,7 +178,6 @@ fn only_the_issuer_supersedes_its_results() {
     );
     let target = revision(&store, 2, &[], FILES);
 
-    // Another issuer's claim to supersede it doesn't count.
     let mut foreign = check(first, "lint", Verdict::Fail, "node:other", None);
     foreign.supersedes = Some(pass);
     let annotations = Annotations::open(&store).unwrap();
@@ -204,7 +200,6 @@ fn only_the_issuer_supersedes_its_results() {
         "a fetched one stands as a statement of its own"
     );
 
-    // The issuer's own does: the rerun's failure is promoted instead.
     let mut rerun = check(first, "lint", Verdict::Fail, "node:ci", inputs);
     rerun.supersedes = Some(pass);
     let fail = issue(&store, &rerun);
@@ -260,8 +255,6 @@ fn flags_each_divergence_once() {
 fn reserved_kinds_have_authors() {
     let (_dir, store) = store();
     let first = revision(&store, 1, &[], FILES);
-    // The queue rebases it: its author is the queue, but alice created
-    // the change.
     let rebased = Revision {
         predecessors: vec![first],
         author: principal("node:queue"),
@@ -334,8 +327,6 @@ fn withdrawals_have_nothing_to_promote() {
 fn only_the_creator_of_a_change_abandons_it() {
     let (_dir, store) = store();
     let first = revision(&store, 1, &[], FILES);
-    // Eve takes the change over, then another root of it of hers
-    // merges in: alice still created the change, and eve never did.
     let write = |predecessors: Vec<RevisionId>, author: &str| {
         let encoded = Revision {
             predecessors,

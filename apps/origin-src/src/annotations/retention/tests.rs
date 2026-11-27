@@ -130,8 +130,6 @@ fn promotions_and_collection_exclude_each_other() {
         .unwrap();
     let second = RecordId::Revision(revision(&store, 2, &[], FILES));
 
-    // A promotion refers to the payload without writing it: it waits
-    // for a collection under way, which then reads it.
     let collecting = store.lock_for_collection().unwrap();
     let (done, promoted) = std::sync::mpsc::channel();
     thread::scope(|scope| {
@@ -163,7 +161,6 @@ fn writers_never_trust_a_pack_collection_rewrote() {
         .issue(&statement, Some(payload.clone()))
         .unwrap();
     store.compact().unwrap();
-    // Another process, which loaded the pack holding the payload.
     let writer = Store::new(dir.path().join(".origin"), Native::default());
     assert!(writer.contains(payload.id()).unwrap());
 

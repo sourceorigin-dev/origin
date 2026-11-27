@@ -28,7 +28,6 @@ fn conflicts_block_until_a_revision_merges() {
         std::slice::from_ref(pending)
     );
 
-    // A new revision that takes `main`'s version merges.
     let tip = Base::Acceptance(repo.tip(&TargetName::MAIN).acceptance);
     repo.revision(2, &[two], tip, &[("shared", "one"), ("more", "m")]);
     assert!(matches!(repo.land(2)[..], [Landing::Landed { .. }]));
@@ -47,13 +46,11 @@ fn unresolved_conflicts_never_land() {
             written: Some(EncodedObject::blob(content.as_bytes()).id()),
         }])
     };
-    // From someone else, it says nothing about the revision's files.
     let foreign = conflicts(marked).statement(
         RecordId::Revision(revision),
         "user:eve".parse().unwrap(),
         None,
     );
-    // From its author, it does.
     let (payload, statement) = conflicts(marked).statement(
         RecordId::Revision(revision),
         "user:ada".parse().unwrap(),
@@ -92,8 +89,6 @@ fn unresolved_conflicts_never_land() {
         "{error}"
     );
 
-    // A revision whose file is no longer what the conflict wrote there
-    // is resolved, whatever the file holds.
     let edited = repo.change_on_main(2, &[("file", "Heading\n=======\n")]);
     let (payload, statement) = conflicts(marked).statement(
         RecordId::Revision(edited),
