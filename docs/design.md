@@ -617,6 +617,27 @@ interrupted transfer is detected and repaired. Records are fetched by id.
 Syncing never overwrites files in a running workspace. A fetch only adds files
 the user may newly read.
 
+### Fetching chains
+
+A fetch brings the chain of each target this node follows (those it holds and
+those asked for), starting after the last acceptance it holds. Each acceptance
+must follow the one before it, and must be signed by the authority that its
+governing policy (`Policy::governing`) names:
+
+- An acceptance of `policy` is governed by the acceptance before it. Only the
+  first acceptance of `policy` is checked against itself.
+- Any other acceptance is governed by the policy it names, which must be on
+  this node's verified chain of `policy`.
+- Acceptances this node only stores, such as a fetched revision's base, never
+  govern anything.
+
+Each acceptance comes with what it landed, and the records of those changes.
+Fetched records are written before the chains that refer to them.
+
+Then the fetch compares the records of changes with the remote's, by id. It
+fetches the missing ones, the records they refer to, and the records of the
+changes those belong to.
+
 ## Workspaces and platform code
 
 `origin workspace new [--change X] [path]` creates a workspace that shares
