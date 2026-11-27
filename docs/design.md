@@ -639,6 +639,24 @@ which a remote on a local path accepts; `ORIGIN_REVISION` is the full id of the
 revision the working copy is; `ORIGIN_REMOTE` is the repository's remote, if it
 has one. Outside a working copy, none of them is set.
 
+In `checks.toml`, `inputs` lists the files and directories a check reads (the
+whole snapshot by default), and `toolchain` is a command whose output
+identifies the tools the check runs with. The landing queue promotes results by
+input digest alone, without reading the checks, so results of different
+definitions must never share a digest. A worker runs the checks its target
+defines, so its results declare `checks.toml` as the target's state holds it,
+not as the record holds it: a candidate that restores an older `checks.toml`
+doesn't match the results of the older definition, and one that only edits it
+still matches the results of the definition in force. The queue never promotes
+a result from one target to another, since their checks may differ.
+
+**Known limitation.** A result declares the toolchain output it ran with, and
+the queue never runs the toolchain command itself. So upgrading the tools where
+checks run, with the inputs unchanged, doesn't stop old results from being
+promoted. Pin the tools in a file the check reads instead, such as
+`rust-toolchain.toml` in its `inputs`: then a new toolchain changes the inputs,
+and the check runs again.
+
 ## Permissions and credentials
 
 Path rules map a path to `none`, `read` or `write` for everyone, groups and

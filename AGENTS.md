@@ -27,6 +27,7 @@ review bots read and write at the same time, written in Rust.
   what it reads and checks what it writes, by the rights `policy.rs`
   resolves from `policy.toml`. `plugin.rs` runs `origin <name>` as
   `origin-<name>` from `PATH`, passing the repository in the environment.
+- `apps/origin-ci`: the CI plugin, `origin-ci`, which reads `checks.toml`.
 - `tools/xtask`: development tasks, run with `cargo xtask`, such as timing
   origin against git (`just bench-git`).
 
