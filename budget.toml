@@ -3,10 +3,10 @@
 [expect]
 origin-platform = 2
 origin-shared = 3
-origin-src = 9
+origin-src = 10
 
 [invariant]
 origin-src = 5
 
 [wall-clock]
-origin-src = 1
+origin-src = 2
