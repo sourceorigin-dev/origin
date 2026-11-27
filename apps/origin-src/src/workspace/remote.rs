@@ -3,10 +3,10 @@
 //!
 //! A repository has at most one remote, named in `.origin/remote` and shared by
 //! its workspaces. A clone holds only the snapshots it read, and fetches the
-//! others when a command needs them. `.origin/remote-cursor` keeps the remote's
-//! event cursor as of the last fetch, so the next fetch only compares the
-//! changes that moved since (see [`Sync::moved`]). The design's "Sync" section
-//! describes both.
+//! others when a command needs them. The remote's event cursor as of each
+//! user's last fetch, with its op log's generation, is kept with their rights
+//! ([`Workspace::access`]), so their next fetch only compares the changes that
+//! moved since ([`Sync::moved`]). The design's "Sync" section describes both.
 
 use std::fs;
 use std::io;
@@ -115,6 +115,9 @@ impl Workspace {
         let meta = root.join(Self::META_DIR);
         let store = Store::new(meta, Native::default()).with_actor(actor.in_workspace(&root));
         store.init()?;
+        let rights = remote.whoami()?;
+        Self::save_access(&store, url, &config, &rights, true)?;
+        let store = store.with_withheld(rights.paths);
         let sync = Sync::new(&store, &remote, config.node().clone(), config.user());
         let cursor = sync.moved(None)?.cursor;
         sync.fetch_chains(slice::from_ref(target))?;
@@ -159,15 +162,11 @@ impl Workspace {
         Ok(workspace)
     }
 
-    /// The file in the repository's `.origin` that holds the remote's event cursor
-    /// as of the last fetch.
-    const CURSOR: &str = "remote-cursor";
-
-    /// Returns the remote's event cursor as of the last fetch, if any, written
-    /// `<generation> <next>`. A cursor that cannot be read is forgotten, so the
-    /// next fetch compares every change.
+    /// Returns the remote's event cursor as of the user's last fetch, if any,
+    /// written `<generation> <next>`. A cursor that cannot be read is forgotten, so
+    /// the next fetch compares every change.
     fn cursor(&self) -> Option<Cursor> {
-        let path = self.store.root().join(Self::CURSOR);
+        let path = Self::user_file(&self.store, &self.config, "cursor").ok()??;
         let text = fs::read_to_string(path).ok()?;
         let (generation, next) = text.trim_end().split_once(' ')?;
         Some(Cursor {
@@ -180,15 +179,20 @@ impl Workspace {
     /// an older cursor, or none, only makes the next fetch slower, and a cursor
     /// torn by a crash either doesn't parse or reads from earlier.
     fn save_cursor(&self, cursor: &Cursor) -> Result<(), WorkspaceError> {
-        let path = self.store.root().join(Self::CURSOR);
+        let Some(path) = Self::user_file(&self.store, &self.config, "cursor")? else {
+            return Ok(());
+        };
         let text = format!("{} {}\n", cursor.generation, cursor.next);
         fs::write(&path, text).map_err(|source| WorkspaceError::io(&path, source))
     }
 
-    /// Forgets the remote's event cursor, so the next fetch compares every change.
-    /// Used for a new remote, or once the user can see more of it.
+    /// Forgets the remote's event cursor as of the user's last fetch, so the next
+    /// fetch compares every change. Used for a new remote, or once the user can see
+    /// more of it.
     pub(super) fn forget_cursor(&self) -> Result<(), WorkspaceError> {
-        let path = self.store.root().join(Self::CURSOR);
+        let Some(path) = Self::user_file(&self.store, &self.config, "cursor")? else {
+            return Ok(());
+        };
         match fs::remove_file(&path) {
             Err(error) if error.kind() != io::ErrorKind::NotFound => {
                 Err(WorkspaceError::io(&path, error))
@@ -197,9 +201,9 @@ impl Workspace {
         }
     }
 
-    /// Returns the URL of the repository's remote, if it has one.
-    fn remote_url(&self) -> Result<Option<RemoteUrl>, WorkspaceError> {
-        let path = self.store.root().join(Self::REMOTE);
+    /// Returns the URL of the remote of the repository in `store`, if it has one.
+    pub(super) fn remote_url(store: &Store) -> Result<Option<RemoteUrl>, WorkspaceError> {
+        let path = store.root().join(Self::REMOTE);
         match fs::read_to_string(&path) {
             Ok(url) => Ok(Some(RemoteUrl::parse(url.trim_end())?)),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -213,7 +217,7 @@ impl Workspace {
         if let Some(remote) = self.remote.get() {
             return Ok(remote.as_ref());
         }
-        let remote = match self.remote_url()? {
+        let remote = match Self::remote_url(&self.store)? {
             Some(url) => Some(Self::open_remote(&url, &self.config)?),
             None => None,
         };
@@ -227,7 +231,7 @@ impl Workspace {
     fn open_remote(url: &RemoteUrl, config: &UserConfig) -> Result<Remote, WorkspaceError> {
         let remote = Remote::open(url, Self::node_of(config)?, url.token(config))?;
         if let Remote::Local(service) = &remote
-            && service.store().root().join(Self::REMOTE).exists()
+            && Self::remote_url(service.store())?.is_some()
         {
             return Err(WorkspaceError::RemoteWithRemote(url.clone()));
         }
@@ -259,7 +263,7 @@ impl Workspace {
     /// written.
     pub fn set_remote(&self, url: Option<&str>) -> Result<(), WorkspaceError> {
         let Some(url) = url else {
-            match self.remote_url()? {
+            match Self::remote_url(&self.store)? {
                 Some(url) => println!("{url}"),
                 None => println!("No remote: set one with `origin remote <url>`."),
             }
@@ -285,10 +289,11 @@ impl Workspace {
     /// Fails if there's no remote, the remote lacks a target or change asked for,
     /// or the remote or the store fails.
     pub fn fetch(
-        &self,
+        &mut self,
         targets: &[TargetName],
         changes: &[ChangeId],
     ) -> Result<(), WorkspaceError> {
+        self.refresh_access()?;
         let remote = self.require_remote()?;
         for target in targets {
             if self.store.head(target)?.is_none() {
@@ -350,7 +355,12 @@ impl Workspace {
                 .map(|change| working_copy.find_change(change))
                 .collect::<Result<_, _>>()?
         };
-        let pushed = self.sync(self.require_remote()?).push(&changes)?;
+        let rights = self.push_access()?;
+        let mut sync = self.sync(self.require_remote()?);
+        if let Some(rights) = rights {
+            sync = sync.writing(rights.paths);
+        }
+        let pushed = sync.push(&changes)?;
         Self::print_unsent(&pushed);
         if pushed.objects == 0 {
             println!("Everything up to date.");

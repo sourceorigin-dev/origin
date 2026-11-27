@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use origin_platform::Native;
 use origin_shared::event::Filter;
-use origin_shared::{AcceptanceBody, Kind, NodeKey, RepoPath, Verdict};
+use origin_shared::{AcceptanceBody, Kind, NodeKey, Verdict};
 
 use super::*;
 use crate::events::Events;

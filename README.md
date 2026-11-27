@@ -117,6 +117,59 @@ send each server under `[tokens]`, by its URL
 (`"http://127.0.0.1:7878" = "<token>"`), or in `$ORIGIN_TOKEN`. See
 [the design](docs/design.md) for the model.
 
+## Permissions
+
+What each user may do lives in `policy.toml`, so changing it is a landing
+on `policy`, which only `admin` may make:
+
+```toml
+[grants]                       # capabilities: annotate, land, admin
+"group:maintainers" = ["admin", "land *", "annotate review"]
+"group:runners"     = ["annotate ci.*"]
+
+[[paths]]                      # path access: none, read or write
+path   = "secrets"
+grants = { all = "none", "group:maintainers" = "write" }
+
+[[paths]]                      # CI's checks: only maintainers redefine them
+path   = "checks.toml"
+grants = { all = "read", "group:maintainers" = "write" }
+```
+
+Under a path, the most specific rule that mentions you decides, and paths
+no rule mentions you for are writable. Without `[grants]`, everyone lands
+on every target but `policy` and issues every kind of statement. Content
+you may not read never reaches your clone: those files are missing from
+the working copy and stay as they were in your revisions, and fetching
+restores them once you may read them. Revisions that only change what you
+can't read, and the statements about them, are hidden from you, and you
+may not issue statements about them, nor promote their results. Reading
+nothing hides the repository whole. You may only push revisions that
+change paths you write, and land what changes only paths you write. You
+may take over someone else's change, and hand it on: where you can't
+write, your revision must do exactly what theirs did, the same files
+changed from the same contents to the same ones, with exactly the same
+conflicts unresolved, on the same change below, and a new change lists
+there only those of the revision it's on. Only a new change gets a root
+revision. Anyone who reads a change, even with a token that only reads,
+may still copy its head as it is: the change then diverges until someone
+converges it again. The statements you push need their kind's `annotate`, promotions
+included, but for the reserved `core.*` kinds, which come only from whom
+core names: `core.abandon` from the change's creator, who made its root
+revision, or an `admin`, so you can't abandon a change you took over;
+`core.conflict` from a revision's author, or a node. Each user of a clone,
+and each scope of their tokens, keeps their own rights on the remote, as
+of their last fetch, so workspaces of one clone can act for different
+users, or agents.
+
+`origin token issue --scope <capability>... --ttl <period>` asks the remote
+for a token acting for you with a narrower scope, such as `write src`,
+`read /`, `annotate ci.*`, `land main` or `admin`; the server verifies it
+without storing it. A server's operator signs one for any principal with
+`origin token issue --config origin-server.toml --as user:agent-1 --scope
+...`. A token never grants more than its principal's rights, lasts at most
+7 days, and a token issued with a token expires with it.
+
 `converge` merges the files of a change's heads. A text file two heads
 changed holds both versions between conflict markers (`<<<<<<<`, `=======`,
 `>>>>>>>`), and a binary one keeps one side. A `core.conflict` statement

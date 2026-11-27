@@ -4,16 +4,17 @@
 //! - **Fetching** brings each followed target's chain after the last
 //!   acceptance this node holds, verified against its governing policy, then
 //!   the records of the changes that moved since the last fetch
-//!   ([`Sync::moved`]). [`Sync::need`] fetches a snapshot when it is read.
+//!   ([`Sync::moved`]). [`Sync::need`] fetches a snapshot when it is read,
+//!   without the paths the user may not read ([`Store::with_withheld`]).
 //! - **Pushing** shares revisions, with their snapshots, and the user's
-//!   statements, and refuses a stale change. It never lands anything.
-//! - Both ways, a transfer stops at [`Pack::LIMIT`] bytes (see [`Part`]).
+//!   statements, refusing a stale change or one the user may not write.
 
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::{iter, mem};
 
 use origin_platform::Native;
+use origin_shared::access::{Level, PathAccess};
 use origin_shared::api::{
     ErrorCode, EventsQuery, Expected, FetchRecords, FetchSnapshot, Inventory, InventoryRequest,
     List, LogQuery, PutQuery,
@@ -23,12 +24,13 @@ use origin_shared::object::{BadSignature, DecodeError};
 use origin_shared::pack::{Pack, Packer, Part};
 use origin_shared::{
     Acceptance, AcceptanceId, Base, ChangeId, EncodedObject, Head, Object, ObjectId, ObjectKind,
-    Principal, PrincipalName, Record, RecordId, Revision, RevisionId, Statement, StatementId,
-    TargetName, TreeId,
+    Principal, PrincipalName, Record, RecordId, RepoPath, Revision, RevisionId, Statement,
+    StatementId, TargetName, TreeId,
 };
 
 use crate::annotations::Annotations;
 use crate::index::Index;
+use crate::permissions::{Effects, Forbidden};
 use crate::policy::{Policy, PolicyError};
 use crate::remote::{Remote, RemoteError};
 use crate::service::Dependencies;
@@ -43,6 +45,8 @@ pub struct Sync<'a> {
     node: Principal,
     /// The user, whose statements pushes share.
     user: Principal,
+    /// The paths the user may write on the remote, as of the last fetch.
+    writes: PathAccess,
     /// The most bytes one request of a push holds: [`Pack::LIMIT`], except in
     /// tests.
     pack_limit: usize,
@@ -320,14 +324,26 @@ impl<'a> Sync<'a> {
     /// server sends.
     const EVENTS: u32 = 1024;
 
-    /// Syncs `store` with `remote`, as the node `node`, for `user`.
+    /// Syncs `store` with `remote`, as the node `node`, for `user`. The user
+    /// may write everything until [`Sync::writing`] says otherwise.
     pub fn new(store: &'a Store, remote: &'a Remote, node: PrincipalName, user: Principal) -> Self {
         Self {
             store,
             remote,
             node: Principal::Node(node),
             user,
+            writes: PathAccess::uniform(Level::Write),
             pack_limit: Pack::LIMIT,
+        }
+    }
+
+    /// Returns this sync, knowing the user may only write `paths`, so a push
+    /// the remote would refuse fails before sending anything.
+    #[must_use]
+    pub fn writing(self, paths: PathAccess) -> Self {
+        Self {
+            writes: paths,
+            ..self
         }
     }
 
@@ -918,6 +934,24 @@ impl<'a> Sync<'a> {
         Ok(true)
     }
 
+    /// Fetches what the snapshot of `record` holds under `paths`, whatever the
+    /// store has. Used for files a checkout lacks, such as those withheld until
+    /// the user could read them.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the remote doesn't have the record, or the remote or the store
+    /// fails.
+    pub fn need_paths(&self, record: RecordId, paths: Vec<RepoPath>) -> Result<(), SyncError> {
+        let request = FetchSnapshot {
+            of: record,
+            have: Vec::new(),
+            paths,
+            skip: 0,
+        };
+        self.fetch_parts(request, None)
+    }
+
     /// Fetches what `request` asks for, part after part, in one batch. With
     /// `whole`, the snapshot is fetched whole and marked as being fetched until
     /// the batch is durable.
@@ -979,6 +1013,7 @@ impl<'a> Sync<'a> {
             {
                 self.check_shared(*id, revision, base)?;
             }
+            self.check_writes(revision)?;
         }
 
         let mut content = Vec::new();
@@ -1323,6 +1358,15 @@ impl<'a> Sync<'a> {
         Ok(())
     }
 
+    /// Checks that the user may make the changes `revision` makes (see
+    /// [`Effects`]).
+    fn check_writes(&self, revision: &Revision) -> Result<(), SyncError> {
+        match Effects::new(self.store, self.store, &self.writes).check(revision)? {
+            Some(forbidden) => Err(forbidden.into()),
+            None => Ok(()),
+        }
+    }
+
     /// Returns `changes` and every change below their revisions, following
     /// their bases and dependencies.
     fn stack(&self, index: &Index, changes: &[ChangeId]) -> Result<Vec<ChangeId>, SyncError> {
@@ -1424,6 +1468,9 @@ pub enum SyncError {
     /// A snapshot was needed of a record that has none.
     #[error("{0} has no snapshot")]
     NoSnapshot(RecordId),
+    /// A push would change something the user may not.
+    #[error("the remote would refuse the push, as of your rights when you last fetched")]
+    Forbidden(#[from] Forbidden),
     /// The change has no revision to push.
     #[error("change {} has no revisions", .0.short())]
     UnknownChange(ChangeId),

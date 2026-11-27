@@ -486,7 +486,8 @@ impl<'a, P: Platform> Writer<'a, P> {
 
 /// Checks what revisions change at paths their writer may not write, by
 /// the rules in the module docs. The service runs it on every revision a
-/// signed-in caller puts.
+/// signed-in caller puts, and a client on those it pushes, before sending
+/// anything.
 pub struct Effects<'a, P, V> {
     store: &'a Store<P>,
     /// Where revisions are read from: the batch first, then the store.
