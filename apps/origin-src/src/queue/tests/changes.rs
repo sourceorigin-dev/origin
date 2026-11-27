@@ -21,8 +21,10 @@ fn lands_rebases_and_skips_what_the_target_has() {
     let acceptance = repo
         .store
         .get(repo.tip(&TargetName::MAIN).acceptance)
-        .unwrap();
-    acceptance.verify(&repo.key.public()).unwrap();
+        .expect("`get(repo.tip(&TargetName::MAIN).acceptance)` succeeds");
+    acceptance
+        .verify(&repo.key.public())
+        .expect("`verify(&repo.key.public())` succeeds");
     assert_eq!(
         acceptance.body().policy,
         Some(repo.tip(&TargetName::POLICY).acceptance)
@@ -33,10 +35,16 @@ fn lands_rebases_and_skips_what_the_target_has() {
     };
     let rebased = landed(landing);
     assert_ne!(rebased, b, "made on an older tip, it is rebased");
-    let revision = repo.store.get(rebased).unwrap();
+    let revision = repo.store.get(rebased).expect("`get(rebased)` succeeds");
     assert_eq!(revision.predecessors, [b]);
-    assert_eq!(revision.author, "node:queue".parse().unwrap());
-    let log = repo.store.log(&TargetName::MAIN).unwrap();
+    assert_eq!(
+        revision.author,
+        "node:queue".parse().expect("`parse()` succeeds")
+    );
+    let log = repo
+        .store
+        .log(&TargetName::MAIN)
+        .expect("`log(&TargetName::MAIN)` succeeds");
     assert_eq!(
         revision.base,
         Base::Acceptance(log[1]),
@@ -82,7 +90,7 @@ fn refuses_divergent_and_abandoned_changes() {
             ChangeId::from_bytes([1; 16]),
             &main,
         )
-        .unwrap_err();
+        .expect_err("the operation fails");
     assert!(matches!(error, LandError::Divergent { .. }), "{error}");
 
     let given_up = repo.change_on_main(2, &[("b", "b")]);
@@ -90,13 +98,15 @@ fn refuses_divergent_and_abandoned_changes() {
         subject: RecordId::Revision(given_up),
         kind: Kind::ABANDON,
         verdict: None,
-        issuer: "user:ada".parse().unwrap(),
+        issuer: "user:ada".parse().expect("`parse()` succeeds"),
         inputs: None,
         payload: None,
         supersedes: None,
         promoted_from: None,
     };
-    repo.store.write_all(&[abandon.encode()]).unwrap();
+    repo.store
+        .write_all(&[abandon.encode()])
+        .expect("`write_all(&[abandon.encode()])` succeeds");
     let error = repo
         .queue()
         .land_change(
@@ -104,7 +114,7 @@ fn refuses_divergent_and_abandoned_changes() {
             ChangeId::from_bytes([2; 16]),
             &main,
         )
-        .unwrap_err();
+        .expect_err("the operation fails");
     assert!(matches!(error, LandError::Abandoned(_)), "{error}");
 }
 
@@ -113,17 +123,25 @@ fn only_the_authority_lands() {
     let repo = Repo::new("[targets.main]\nauthority = \"node:queue\"\n");
     repo.change_on_main(1, &[("a", "a")]);
     let change = ChangeId::from_bytes([1; 16]);
-    let other = Queue::new(&repo.store, &repo.key, PrincipalName::new("other").unwrap());
+    let other = Queue::new(
+        &repo.store,
+        &repo.key,
+        PrincipalName::new("other").expect("`PrincipalName::new()` succeeds"),
+    );
     let error = other
         .land_change(&mut repo.annotations(), change, &TargetName::MAIN)
-        .unwrap_err();
+        .expect_err("`land_change()` fails");
     assert!(matches!(error, LandError::NotAuthority { .. }), "{error}");
 
     let impostor = NodeKey::from_bytes(&[8; 32]);
-    let queue = Queue::new(&repo.store, &impostor, PrincipalName::new("queue").unwrap());
+    let queue = Queue::new(
+        &repo.store,
+        &impostor,
+        PrincipalName::new("queue").expect("`PrincipalName::new()` succeeds"),
+    );
     let error = queue
         .land_change(&mut repo.annotations(), change, &TargetName::MAIN)
-        .unwrap_err();
+        .expect_err("`land_change()` fails");
     assert!(matches!(error, LandError::WrongKey(_)), "{error}");
     assert_eq!(repo.tip(&TargetName::MAIN).seq, 0);
 }
@@ -149,10 +167,20 @@ fn concurrent_landings_serialize() {
         }
     });
     assert_eq!(*landed.lock(), changes.len());
-    let log = repo.store.log(&TargetName::MAIN).unwrap();
+    let log = repo
+        .store
+        .log(&TargetName::MAIN)
+        .expect("`log(&TargetName::MAIN)` succeeds");
     assert_eq!(log.len(), changes.len() + 1);
     for pair in log.windows(2) {
-        assert_eq!(repo.store.get(pair[1]).unwrap().body().prev, Some(pair[0]));
+        assert_eq!(
+            repo.store
+                .get(pair[1])
+                .expect("`get(pair[1])` succeeds")
+                .body()
+                .prev,
+            Some(pair[0])
+        );
     }
     assert_eq!(repo.main_files().len(), changes.len(), "every file landed");
 }
@@ -160,13 +188,13 @@ fn concurrent_landings_serialize() {
 #[test]
 fn pending_landings_round_trip() {
     let pending = Pending {
-        onto: TargetName::new("release/v3").unwrap(),
+        onto: TargetName::new("release/v3").expect("`TargetName::new()` succeeds"),
         proposal: Proposal::Target(TargetName::MAIN),
         subject: RecordId::Snapshot(Tree::default().encode().id().into()),
         blocked: Blocked::Evidence(vec![Requirement {
-            kind: Kind::new("ci.test").unwrap(),
+            kind: Kind::new("ci.test").expect("`Kind::new()` succeeds"),
             verdict: Verdict::Pass,
-            issuer: "group:runners".parse().unwrap(),
+            issuer: "group:runners".parse().expect("`parse()` succeeds"),
         }]),
         expires: None,
     };
@@ -220,7 +248,7 @@ fn only_the_creator_of_a_change_abandons_it() {
         subject: RecordId::Revision(revision),
         kind: Kind::ABANDON,
         verdict: None,
-        issuer: issuer.parse().unwrap(),
+        issuer: issuer.parse().expect("`parse()` succeeds"),
         inputs: None,
         payload: None,
         supersedes: None,
@@ -257,7 +285,7 @@ fn a_waiting_stack_lands_whole_once_it_can() {
     };
     assert_eq!(pending.subject, RecordId::Revision(lower));
     assert_eq!(
-        Queue::pending(&repo.store).unwrap(),
+        Queue::pending(&repo.store).expect("`Queue::pending(&repo.store)` succeeds"),
         [Pending {
             proposal: change(2),
             ..pending.clone()
@@ -265,15 +293,21 @@ fn a_waiting_stack_lands_whole_once_it_can() {
         "kept as the landing of the whole stack"
     );
 
-    let annotations = Annotations::open(&repo.store).unwrap();
-    annotations.issue(&ci_test(lower, "user:ci"), None).unwrap();
+    let annotations =
+        Annotations::open(&repo.store).expect("`Annotations::open(&repo.store)` succeeds");
+    annotations
+        .issue(&ci_test(lower, "user:ci"), None)
+        .expect("`issue()` succeeds");
     let landings = repo.land(2);
     assert_eq!(landed(&landings[0]), lower);
     assert!(
         matches!(landings[1], Landing::Landed { proposal: ref p, .. } if *p == change(2)),
         "{landings:?}"
     );
-    assert_eq!(Queue::pending(&repo.store).unwrap(), []);
+    assert_eq!(
+        Queue::pending(&repo.store).expect("`Queue::pending(&repo.store)` succeeds"),
+        []
+    );
 }
 
 #[test]

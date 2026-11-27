@@ -34,16 +34,18 @@ pub(crate) struct Repo {
 
 impl Repo {
     pub(crate) fn new(extra: &str) -> Self {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("`tempfile::tempdir()` succeeds");
         let store = Store::new(dir.path().join(".origin"), Native::default());
-        store.init().unwrap();
+        store.init().expect("`init()` succeeds");
         let key = NodeKey::from_bytes(&[7; 32]);
         let repo = Self {
             _dir: dir,
             store,
             key,
         };
-        repo.queue().init(&repo.policy_toml(extra)).unwrap();
+        repo.queue()
+            .init(&repo.policy_toml(extra))
+            .expect("`init(&repo.policy_toml(extra))` succeeds");
         repo
     }
 
@@ -62,22 +64,31 @@ impl Repo {
             .iter()
             .map(|(_, content)| EncodedObject::blob(content.as_bytes()))
             .collect();
-        self.store.write_all(&blobs).unwrap();
+        self.store
+            .write_all(&blobs)
+            .expect("`write_all(&blobs)` succeeds");
         build(&self.store, files)
     }
 
     pub(crate) fn queue(&self) -> Queue<'_> {
-        Queue::new(&self.store, &self.key, PrincipalName::new("queue").unwrap())
+        Queue::new(
+            &self.store,
+            &self.key,
+            PrincipalName::new("queue").expect("`PrincipalName::new()` succeeds"),
+        )
     }
 
     pub(crate) fn tip(&self, target: &TargetName) -> Head {
-        self.store.head(target).unwrap().unwrap()
+        self.store
+            .head(target)
+            .expect("`head(target)` succeeds")
+            .expect("`head(target)` yields a value")
     }
 
     fn state(&self, target: &TargetName) -> TreeId {
         self.store
             .get(self.tip(target).acceptance)
-            .unwrap()
+            .expect("`get(self.tip(target).acceptance)` succeeds")
             .body()
             .state
     }
@@ -102,7 +113,7 @@ impl Repo {
         .encode();
         self.store
             .write_all(std::slice::from_ref(&encoded))
-            .unwrap();
+            .expect("`write_all(std::slice::from_ref(&encoded))` succeeds");
         encoded.id().into()
     }
 
@@ -125,17 +136,17 @@ impl Repo {
         let empty = build(&self.store, &[]);
         self.store
             .diff(empty, self.state(&TargetName::MAIN))
-            .unwrap()
+            .expect("`diff(empty, self.state(&TargetName::MAIN))` succeeds")
             .into_iter()
             .map(|change| {
                 let content = self
                     .store
-                    .try_blob(change.new.unwrap().id)
-                    .unwrap()
-                    .unwrap();
+                    .try_blob(change.new.expect("`new` yields a value").id)
+                    .expect("`try_blob(change.new.id)` succeeds")
+                    .expect("`try_blob(change.new.id)` yields a value");
                 (
                     change.path.as_str().to_owned(),
-                    String::from_utf8(content).unwrap(),
+                    String::from_utf8(content).expect("`String::from_utf8(content)` succeeds"),
                 )
             })
             .collect()
@@ -148,11 +159,11 @@ impl Repo {
                 ChangeId::from_bytes([change; 16]),
                 &TargetName::MAIN,
             )
-            .unwrap()
+            .expect("`land_change` succeeds")
     }
 
     pub(crate) fn annotations(&self) -> Annotations<'_> {
-        Annotations::open(&self.store).unwrap()
+        Annotations::open(&self.store).expect("`Annotations::open(&self.store)` succeeds")
     }
 }
 
@@ -176,9 +187,9 @@ fn landed(landing: &Landing) -> RevisionId {
 pub(crate) fn ci_test(subject: RevisionId, issuer: &str) -> Statement {
     Statement {
         subject: RecordId::Revision(subject),
-        kind: Kind::new("ci.test").unwrap(),
+        kind: Kind::new("ci.test").expect("`Kind::new()` succeeds"),
         verdict: Some(Verdict::Pass),
-        issuer: issuer.parse().unwrap(),
+        issuer: issuer.parse().expect("`parse()` succeeds"),
         inputs: Some(Inputs {
             paths: vec![RepoPath::new("src").unwrap()],
             target_paths: Vec::new(),

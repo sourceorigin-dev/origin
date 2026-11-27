@@ -1855,11 +1855,11 @@ mod tests {
             deps: Vec::new(),
             snapshot: repo.files(&[("a", "<<<<<<<")]),
             description: description.id().into(),
-            author: "user:ada".parse().unwrap(),
+            author: "user:ada".parse().expect("`parse()` succeeds"),
         }
         .encode();
         let conflicts = crate::conflict::Conflicts::new(vec![crate::conflict::Conflicted {
-            path: RepoPath::new("a").unwrap(),
+            path: RepoPath::new("a").expect("`RepoPath::new()` succeeds"),
             written: None,
         }]);
         let subject = RecordId::Revision(revision.id().into());
@@ -1878,8 +1878,11 @@ mod tests {
         let objects = objects.to_vec();
         service
             .put_records(&Caller::Owner, Pack { objects })
-            .unwrap();
-        let entries = oplog.after(before).unwrap().entries;
+            .expect("`put_records` succeeds");
+        let entries = oplog
+            .after(before)
+            .expect("`after(before)` succeeds")
+            .entries;
         let written = |record: RecordId| {
             let written = |entry: &&crate::oplog::Entry| match &entry.effect {
                 crate::oplog::Effect::Wrote(written) => {
@@ -1887,7 +1890,11 @@ mod tests {
                 }
                 _ => false,
             };
-            entries.iter().find(written).unwrap().seq
+            entries
+                .iter()
+                .find(written)
+                .expect("`find(written)` yields a value")
+                .seq
         };
         let conflict = RecordId::Statement(conflict.id().into());
         assert!(written(conflict) < written(subject));
