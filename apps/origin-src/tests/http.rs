@@ -55,7 +55,7 @@ impl Server {
             name: "hosted".parse().unwrap(),
             key: Arc::new(NodeKey::from_bytes(&[7; 32])),
         };
-        let open = Policy::initial(&node.name, &node.key.public());
+        let open = Policy::initial(&node.name, &node.key.public(), None);
         let strict = format!(
             "[nodes]\nhosted = \"{}\"\n[targets.policy]\nauthority = \"node:hosted\"\n\
              [targets.main]\nauthority = \"node:hosted\"\n\
