@@ -260,6 +260,22 @@ impl Repo {
         change.split(' ').next().unwrap().to_owned()
     }
 
+    /// Lands a policy that makes `main` require a passing `ci.test` result from
+    /// the `runners` group, which includes `ada`.
+    pub fn require_tests(&self) {
+        self.ok(&["new", "--on", "policy", "Require tests"]);
+        let policy = self
+            .read("policy.toml")
+            .replace("# [groups]", "[groups]")
+            .replace(
+                "# runners = [\"node:ci-1\"]",
+                "runners = [\"node:ci-1\", \"user:ada\"]",
+            )
+            .replace("# require", "require");
+        self.write("policy.toml", &policy);
+        assert!(self.ok(&["land"]).contains(" on policy #1\n"));
+    }
+
     /// Creates a workspace at `path` and returns its change.
     pub fn workspace(&self, path: &Path, args: &[&str]) -> String {
         let path = path.to_str().unwrap();

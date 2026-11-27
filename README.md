@@ -58,6 +58,7 @@ origin whoami | permissions         # who the remote thinks you are, and what yo
 origin token issue --scope "write src" [--ttl 1h]  # a short-lived token for an agent
 
 origin ci run [<rev>]               # run the checks of checks.toml, and issue their results
+origin ci exec lint --inputs src -- cargo clippy  # run a command as the check ci.lint, now
 ```
 
 Landing rebases a change onto the target's tip, file by file, checks the
@@ -162,7 +163,11 @@ landing queue promotes results without running the toolchain command, so
 new tools with unchanged inputs don't stop old results from being
 promoted: pin the toolchain in an input, such as `rust-toolchain.toml`.
 `origin ci run` checks a revision of this repository as you, and fails if a
-check fails. Its checkouts
+check fails. `origin ci exec <name> [--rev <rev>] [--inputs <path>...]
+[--toolchain <cmd>] [--external] -- <command...>` runs a command as the
+check `ci.<name>` the same way, in a checkout of the revision, with the
+command as its definition: always, even if a result covers it, superseding
+your previous result of that kind. Its checkouts
 live in `$XDG_STATE_HOME/origin-ci/` (or `~/.local/state/`).
 
 ## Permissions

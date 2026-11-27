@@ -20,6 +20,7 @@
 //! `checks.toml` is itself always an input, read from where the checks are in
 //! force (see [`Defined`]), so results of different definitions never match.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use origin_shared::{Digest, Inputs, InvalidName, Kind, RepoPath};
@@ -124,6 +125,44 @@ impl Checks {
 }
 
 impl Check {
+    /// Creates a check named `name` that is given rather than read from
+    /// `checks.toml`. It runs `words`, each quoted for the shell, and reads
+    /// `inputs`, or the whole snapshot if there are none.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the name doesn't make a valid kind.
+    pub fn adhoc(
+        name: &str,
+        words: &[String],
+        inputs: Vec<RepoPath>,
+        toolchain: Option<String>,
+        external: bool,
+    ) -> Result<Self, InvalidName> {
+        let words: Vec<_> = words.iter().map(|word| Self::quote(word)).collect();
+        Ok(Self {
+            kind: Checks::kind(name)?,
+            command: words.join(" "),
+            inputs: if inputs.is_empty() {
+                vec![RepoPath::root()]
+            } else {
+                inputs
+            },
+            target_inputs: Vec::new(),
+            toolchain,
+            external,
+        })
+    }
+
+    /// Returns `word` quoted for the shell, or as it is if it needs no quotes.
+    fn quote(word: &str) -> Cow<'_, str> {
+        let plain = |byte: u8| byte.is_ascii_alphanumeric() || b"_-./:,+@%".contains(&byte);
+        if !word.is_empty() && word.bytes().all(plain) {
+            return Cow::Borrowed(word);
+        }
+        Cow::Owned(format!("'{}'", word.replace('\'', "'\\''")))
+    }
+
     /// Returns the inputs a result of the check declares it depended on,
     /// including the output of its toolchain command, if it has one.
     #[must_use]
@@ -180,4 +219,92 @@ impl TryFrom<ChecksFile> for Checks {
 }
 
 #[cfg(test)]
-mod tests;
+mod tests {
+    use std::slice;
+
+    use super::*;
+
+    const LINT_AND_LINKS: &str = "[checks.lint]\ncommand = \"cargo clippy\"\n\
+        inputs = [\"src\", \"Cargo.toml\"]\ntoolchain = \"rustc -V\"\n\
+        [checks.links]\ncommand = \"lychee docs\"\nexternal = true\n";
+
+    #[test]
+    fn parses_checks_by_kind() {
+        let checks = Checks::parse(LINT_AND_LINKS, Defined::InSnapshot).unwrap();
+        let lint = checks.get(&Kind::new("ci.lint").unwrap()).unwrap();
+        assert_eq!(
+            lint.inputs,
+            [
+                RepoPath::new("src").unwrap(),
+                RepoPath::new("Cargo.toml").unwrap(),
+                RepoPath::new("checks.toml").unwrap(),
+            ],
+            "the checks are an input of each"
+        );
+        assert_eq!(lint.target_inputs, []);
+        assert_eq!(lint.toolchain.as_deref(), Some("rustc -V"));
+        let links = checks.get(&Kind::new("ci.links").unwrap()).unwrap();
+        assert_eq!(Checks::kind("links").unwrap(), links.kind);
+        assert_eq!(links.inputs, [RepoPath::root()], "the whole snapshot");
+        assert!(links.external && links.inputs(b"").external);
+        assert_eq!(checks.iter().count(), 2);
+
+        let parse = |text| Checks::parse(text, Defined::InSnapshot);
+        assert!(
+            parse("[checks.Lint]\ncommand = \"x\"\n").is_err(),
+            "not a kind"
+        );
+        assert!(
+            parse("[checks.lint]\ncmd = \"x\"\n").is_err(),
+            "unknown key"
+        );
+        assert_eq!(parse("").unwrap(), Checks::default());
+    }
+
+    #[test]
+    fn checks_in_force_on_a_target_read_it_there() {
+        let checks = Checks::parse(LINT_AND_LINKS, Defined::OnTarget).unwrap();
+        let file = RepoPath::new(Checks::FILE).unwrap();
+        for check in checks.iter() {
+            assert_eq!(check.target_inputs, slice::from_ref(&file), "{check:?}");
+            assert!(!check.inputs.contains(&file), "{check:?}");
+        }
+        let lint = checks.get(&Kind::new("ci.lint").unwrap()).unwrap();
+        let in_snapshot = Checks::parse(LINT_AND_LINKS, Defined::InSnapshot).unwrap();
+        let ran = lint.inputs(b"rustc 1.99.0");
+        assert_eq!(ran.target_paths, [file]);
+        assert_ne!(
+            ran,
+            in_snapshot.get(&lint.kind).unwrap().inputs(b"rustc 1.99.0")
+        );
+    }
+
+    #[test]
+    fn inputs_follow_the_command_and_toolchain() {
+        let check = |command: &str| Check {
+            kind: Kind::new("ci.test").unwrap(),
+            command: command.to_owned(),
+            inputs: vec![RepoPath::new("src").unwrap()],
+            target_inputs: Vec::new(),
+            toolchain: None,
+            external: false,
+        };
+        let inputs = check("cargo test").inputs(b"rustc 1.99.0");
+        assert_eq!(inputs, check("cargo test").inputs(b"rustc 1.99.0"));
+        assert_ne!(
+            inputs,
+            check("cargo test --release").inputs(b"rustc 1.99.0")
+        );
+        assert_ne!(inputs, check("cargo test").inputs(b"rustc 1.100.0"));
+    }
+
+    #[test]
+    fn adhoc_checks_quote_their_words() {
+        let words = ["A=1", "printf", "%s\\n", "a b", "it's", ""].map(String::from);
+        let check = Check::adhoc("say", &words, Vec::new(), None, false).unwrap();
+        assert_eq!(check.kind, Checks::kind("say").unwrap());
+        assert_eq!(check.command, r"'A=1' printf '%s\n' 'a b' 'it'\''s' ''");
+        assert_eq!(check.inputs, [RepoPath::root()], "the whole snapshot");
+        assert_eq!(check.target_inputs, [], "no checks.toml");
+    }
+}

@@ -11,6 +11,9 @@ use std::time::{Duration, Instant};
 
 use common::Repo;
 use origin_platform::{Native, Processes};
+use origin_shared::{Digest, Inputs, RecordId};
+use origin_src::annotations::Annotations;
+use origin_src::store::Store;
 
 /// Returns a `checks.toml` whose `test` check reads `src` (and, like every
 /// check, `checks.toml`), and appends a line to `log` each time it runs.
@@ -83,6 +86,103 @@ fn tool_mode_runs_checks_and_promotes_unchanged_results() {
     };
     let runs = key.as_ref().unwrap().path().join("runs");
     assert_eq!(fs::read_dir(runs).unwrap().count(), 0);
+}
+
+/// Returns the inputs of the `kind` statement about `revision`, from the
+/// repository's records.
+fn inputs_of(repo: &Repo, revision: &str, kind: &str) -> Inputs {
+    let store = Store::new(repo.path(".origin"), Native::default());
+    let revision = RecordId::Revision(revision.parse().unwrap());
+    let about = Annotations::open(&store).unwrap().about(revision).unwrap();
+    let current = about
+        .into_iter()
+        .rev()
+        .find(|annotation| annotation.statement.kind.as_str() == kind)
+        .unwrap();
+    current.statement.inputs.unwrap()
+}
+
+#[test]
+fn exec_runs_a_command_as_a_check() {
+    let repo = Repo::new();
+    repo.write("src/lib.rs", "fn a() {}\n");
+    repo.ok(&["describe", "First"]);
+    let first = repo.revision();
+    repo.ok(&["new"]);
+    repo.write("src/lib.rs", "fn b() {}\n");
+    let exec = |command: &[&str]| {
+        let args = [
+            &[
+                "ci", "exec", "lint", "--rev", &first, "--inputs", "src", "--",
+            ],
+            command,
+        ];
+        let output = repo.run(repo.root(), &args.concat());
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        (output.status.success(), stdout)
+    };
+
+    let reads = ["sh", "-c", "cat src/lib.rs; printf '%s\\n' \"$0\"", "a b"];
+    let (passed, stdout) = exec(&reads);
+    assert!(passed && stdout.starts_with("ci.lint pass in "), "{stdout}");
+    let statements = repo.ok(&["statements", &first]);
+    assert!(
+        statements.contains("ci.lint pass by user:ada\n"),
+        "{statements}"
+    );
+    assert!(statements.contains("    inputs: src\n"), "{statements}");
+    assert!(
+        statements.contains("    payload: fn a() {}\n"),
+        "{statements}"
+    );
+    let definition = r#"sh -c 'cat src/lib.rs; printf '\''%s\n'\'' "$0"' 'a b'"#;
+    let inputs = inputs_of(&repo, &first, "ci.lint");
+    assert_eq!(inputs.definition, Digest::of(definition.as_bytes()));
+
+    assert!(exec(&reads).1.starts_with("ci.lint pass in "));
+    let (passed, stdout) = exec(&["sh", "-c", "echo broken; exit 3"]);
+    assert!(!passed, "{stdout}");
+    assert!(stdout.starts_with("ci.lint fail in "), "{stdout}");
+    assert!(stdout.ends_with("broken\n"), "its output: {stdout}");
+    let statements = repo.ok(&["statements", &first]);
+    assert_eq!(
+        statements.matches(" (superseded by ").count(),
+        2,
+        "{statements}"
+    );
+    assert!(
+        statements.contains("ci.lint fail by user:ada\n"),
+        "{statements}"
+    );
+
+    repo.write("src/lib.rs", "fn a() {}\n");
+    repo.ok(&["describe", "Same library"]);
+    let promoted = repo.ok(&["promote"]);
+    assert!(
+        promoted.contains("Promoted ci.lint fail by user:ada"),
+        "{promoted}"
+    );
+}
+
+#[test]
+fn a_failed_exec_wins_over_a_promoted_pass() {
+    let repo = Repo::new();
+    repo.require_tests();
+    let exec = |command: &str| {
+        let args = ["ci", "exec", "test", "--inputs", "src", "--", command];
+        repo.run(repo.root(), &args).status.success()
+    };
+    repo.ok(&["new", "--on", "main", "Library"]);
+    repo.write("src/lib.rs", "fn a() {}\n");
+    assert!(exec("true"));
+    assert!(repo.ok(&["land"]).contains(" on main #1\n"));
+
+    repo.ok(&["new", "--on", "main", "Docs"]);
+    repo.write("docs.md", "docs\n");
+    assert!(repo.ok(&["promote"]).contains("Promoted ci.test pass"));
+    assert!(!exec("false"));
+    let landing = repo.ok(&["land"]);
+    assert!(landing.starts_with("The landing of change "), "{landing}");
 }
 
 #[test]
