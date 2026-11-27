@@ -16,14 +16,14 @@ async fn serves_the_repositories_it_created() {
     let repos = client.repos().await.unwrap();
     assert_eq!(repos.len(), 1);
     let targets = client
-        .repo(RepoName::new("demo").unwrap())
+        .repo(RepoName::new("demo").expect("`RepoName::new()` succeeds"))
         .targets()
         .await
-        .unwrap();
+        .expect("`targets()` succeeds");
     assert!(
         targets
             .iter()
-            .all(|target| target.authority == Some("hosted".parse().unwrap())),
+            .all(|target| target.authority == Some("hosted".parse().expect("`parse()` succeeds"))),
         "the server orders the targets: {targets:?}"
     );
 }

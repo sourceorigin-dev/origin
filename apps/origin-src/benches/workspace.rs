@@ -6,6 +6,8 @@
 //! directory on Btrfs, XFS or APFS to measure real clones. Elsewhere,
 //! `cloned` falls back to copying after its first clone.
 
+#![expect(clippy::expect_used, reason = "A benchmark fails by panicking.")]
+
 use std::io;
 use std::path::Path;
 use std::sync::LazyLock;
@@ -40,21 +42,26 @@ struct Main {
 }
 
 static MAIN: LazyLock<Main> = LazyLock::new(|| {
-    let dir = tempfile::tempdir().unwrap();
-    TREE.write(dir.path()).unwrap();
+    let dir = tempfile::tempdir().expect("`tempfile::tempdir()` succeeds");
+    TREE.write(dir.path())
+        .expect("`write(dir.path())` succeeds");
     let store = Store::new(dir.path().join(".origin"), Native::default());
-    store.init().unwrap();
+    store.init().expect("`init()` succeeds");
     let empty = Tree::default().encode();
-    store.write_all(std::slice::from_ref(&empty)).unwrap();
+    store
+        .write_all(std::slice::from_ref(&empty))
+        .expect("`write_all(std::slice::from_ref(&empty))` succeeds");
     // wall-clock: the stat cache only vouches for files that changed well before the scan.
     thread::sleep(Duration::from_millis(2_100));
     let (root, cache) = Worktree::new(dir.path(), &store)
         .snapshot(&StatCache::default())
-        .unwrap();
-    let changes = store.diff(TreeId::from(empty.id()), root).unwrap();
+        .expect("`snapshot(&StatCache::default())` succeeds");
+    let changes = store
+        .diff(TreeId::from(empty.id()), root)
+        .expect("`diff(TreeId::from(empty.id()), root)` succeeds");
     Main {
         dir,
-        cache: cache.unwrap(),
+        cache: cache.expect("`cache` yields a value"),
         changes,
     }
 });
@@ -75,12 +82,15 @@ impl Main {
                 } else {
                     Vec::new()
                 };
-                (tempfile::tempdir().unwrap(), sources)
+                (
+                    tempfile::tempdir().expect("`tempfile::tempdir()` succeeds"),
+                    sources,
+                )
             })
             .bench_local_refs(|(workspace, sources)| {
                 Worktree::new(workspace.path(), &store)
                     .checkout(&self.changes, sources, None)
-                    .unwrap();
+                    .expect("`checkout(&self.changes, sources, None)` succeeds");
             });
     }
 }

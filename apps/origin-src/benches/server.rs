@@ -4,6 +4,8 @@
 //! service that keeps its index open with one that reads the index on each
 //! landing. Run it on a real disk: syncs are most of the cost of a put.
 
+#![expect(clippy::expect_used, reason = "A benchmark fails by panicking.")]
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -52,17 +54,24 @@ impl Hosted {
     }
 
     fn service(&self) -> OriginService {
-        OriginService::open(self.dir.path().join("demo"), self.node.clone()).unwrap()
+        OriginService::open(self.dir.path().join("demo"), self.node.clone())
+            .expect("`OriginService::open()` succeeds")
     }
 
     /// Puts a change on the tip of `main` that adds one file, `file-<n>`.
     fn put_change(service: &OriginService, n: u64) -> RevisionId {
         let store = service.store();
-        let tip = store.head(&TargetName::MAIN).unwrap().unwrap().acceptance;
-        let mut tree: Tree = store.get(store.get(tip).unwrap().body().state).unwrap();
+        let tip = store
+            .head(&TargetName::MAIN)
+            .expect("`head(&TargetName::MAIN)` succeeds")
+            .expect("the main target has a head")
+            .acceptance;
+        let mut tree: Tree = store
+            .get(store.get(tip).expect("`get(tip)` succeeds").body().state)
+            .expect("the tip revision names a stored tree");
         let content = EncodedObject::blob(format!("fn f{n}() {{}}\n").as_bytes());
         tree.insert(
-            EntryName::new(format!("file-{n}")).unwrap(),
+            EntryName::new(format!("file-{n}")).expect("the file name is valid"),
             TreeEntry {
                 kind: EntryKind::File,
                 id: content.id(),
@@ -86,7 +95,9 @@ impl Hosted {
         let pack = Pack {
             objects: vec![content, tree, description, revision],
         };
-        service.put_records(&Caller::Owner, pack).unwrap();
+        service
+            .put_records(&Caller::Owner, pack)
+            .expect("`put_records(&Caller::Owner, pack)` succeeds");
         id
     }
 
@@ -99,8 +110,10 @@ impl Hosted {
         let mut repositories = Repositories::new(credentials);
         repositories.insert("demo".parse().unwrap(), self.service());
         let url = runtime.block_on(async {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let address = listener.local_addr().unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("`tokio::net::TcpListener::bind()` succeeds");
+            let address = listener.local_addr().expect("`local_addr()` succeeds");
             tokio::spawn(async move { axum::serve(listener, Api::router(repositories)).await });
             format!("http://{address}")
         });
@@ -118,9 +131,9 @@ fn statements(subject: RevisionId, start: usize, count: usize) -> Vec<EncodedObj
         .map(|n| {
             Statement {
                 subject: RecordId::Revision(subject),
-                kind: Kind::new(format!("bench.k{n}")).unwrap(),
+                kind: Kind::new(format!("bench.k{n}")).expect("the kind is valid"),
                 verdict: Some(Verdict::Pass),
-                issuer: "node:ci".parse().unwrap(),
+                issuer: "node:ci".parse().expect("`parse()` succeeds"),
                 inputs: None,
                 payload: None,
                 supersedes: None,
@@ -146,7 +159,11 @@ fn put_records(bencher: Bencher<'_, '_>, batch: usize) {
                 batch,
             ),
         })
-        .bench_local_refs(|pack| runtime.block_on(repo.put_records(pack)).unwrap());
+        .bench_local_refs(|pack| {
+            runtime
+                .block_on(repo.put_records(pack))
+                .expect("`block_on(repo.put_records(pack))` succeeds")
+        });
 }
 
 /// Fetches a batch of statements by id in one request.
@@ -160,10 +177,12 @@ fn fetch_records(bencher: Bencher<'_, '_>, batch: usize) {
     };
     runtime
         .block_on(repo.put_records(&Pack { objects }))
-        .unwrap();
-    bencher
-        .counter(ItemsCount::new(batch))
-        .bench(|| runtime.block_on(repo.fetch_records(&request)).unwrap());
+        .expect("`put_records` succeeds");
+    bencher.counter(ItemsCount::new(batch)).bench(|| {
+        runtime
+            .block_on(repo.fetch_records(&request))
+            .expect("`block_on(repo.fetch_records(&request))` succeeds")
+    });
 }
 
 /// Measures an idle long-poll woken by a statement put, from the start of
@@ -178,16 +197,23 @@ fn long_poll_wakeup(bencher: Bencher<'_, '_>) {
         .with_inputs(|| {
             let cursor = runtime
                 .block_on(repo.events(&EventsQuery::default()))
-                .unwrap()
+                .expect("`block_on(repo.events(&EventsQuery::default()))` succeeds")
                 .next;
             let query = EventsQuery {
                 cursor: Some(cursor),
                 wait: Some(Period::from_secs(30)),
-                kind: List(vec!["statement.issued".parse().unwrap()]),
+                kind: List(vec![
+                    "statement.issued".parse().expect("`parse()` succeeds"),
+                ]),
                 ..EventsQuery::default()
             };
             let poller = repo.clone();
-            let poll = runtime.spawn(async move { poller.events(&query).await.unwrap() });
+            let poll = runtime.spawn(async move {
+                poller
+                    .events(&query)
+                    .await
+                    .expect("`events(&query)` succeeds")
+            });
             // wall-clock: long enough for the poll to be waiting.
             std::thread::sleep(Duration::from_millis(20));
             let pack = Pack {
@@ -197,8 +223,10 @@ fn long_poll_wakeup(bencher: Bencher<'_, '_>) {
         })
         .bench_local_values(|(poll, pack)| {
             runtime.block_on(async {
-                repo.put_records(&pack).await.unwrap();
-                let page = poll.await.unwrap();
+                repo.put_records(&pack)
+                    .await
+                    .expect("`put_records(&pack)` succeeds");
+                let page = poll.await.expect("`poll` succeeds");
                 assert_eq!(page.events.len(), 1);
             });
         });
@@ -220,16 +248,23 @@ fn long_poll_wakeup_from_another_process(bencher: Bencher<'_, '_>) {
         .with_inputs(|| {
             let cursor = runtime
                 .block_on(repo.events(&EventsQuery::default()))
-                .unwrap()
+                .expect("`block_on(repo.events(&EventsQuery::default()))` succeeds")
                 .next;
             let query = EventsQuery {
                 cursor: Some(cursor),
                 wait: Some(Period::from_secs(30)),
-                kind: List(vec!["statement.issued".parse().unwrap()]),
+                kind: List(vec![
+                    "statement.issued".parse().expect("`parse()` succeeds"),
+                ]),
                 ..EventsQuery::default()
             };
             let poller = repo.clone();
-            let poll = runtime.spawn(async move { poller.events(&query).await.unwrap() });
+            let poll = runtime.spawn(async move {
+                poller
+                    .events(&query)
+                    .await
+                    .expect("`events(&query)` succeeds")
+            });
             std::thread::sleep(Duration::from_millis(20));
             (
                 poll,
@@ -237,8 +272,10 @@ fn long_poll_wakeup_from_another_process(bencher: Bencher<'_, '_>) {
             )
         })
         .bench_local_values(|(poll, objects)| {
-            other.write_all(&objects).unwrap();
-            let page = runtime.block_on(poll).unwrap();
+            other
+                .write_all(&objects)
+                .expect("`write_all(&objects)` succeeds");
+            let page = runtime.block_on(poll).expect("`block_on(poll)` succeeds");
             assert_eq!(page.events.len(), 1);
         });
 }
@@ -255,25 +292,34 @@ fn land_with_large_index(bencher: Bencher<'_, '_>, kept: bool) {
     let hosted = Hosted::new();
     let service = hosted.service();
     for batch in statements(hosted.revision, 0, RECORDS).chunks(1000) {
-        service.store().write_all(batch).unwrap();
+        service
+            .store()
+            .write_all(batch)
+            .expect("`write_all(batch)` succeeds");
     }
     let land = |service: &OriginService, change: ChangeId| {
         let request = LandRequest {
             proposal: Proposal::Change(change),
             onto: None,
         };
-        let landed = service.land(&Caller::Owner, &request).unwrap();
+        let landed = service
+            .land(&Caller::Owner, &request)
+            .expect("`land(&Caller::Owner, &request)` succeeds");
         assert!(matches!(landed.landings[..], [Landing::Landed { .. }]));
     };
     service
         .statements(&Caller::Owner, RecordId::Revision(hosted.revision))
-        .unwrap();
+        .expect("`statements()` succeeds");
     let mut n = 0;
     bencher
         .with_inputs(|| {
             n += 1;
             let revision = Hosted::put_change(&service, n);
-            service.store().get(revision).unwrap().change
+            service
+                .store()
+                .get(revision)
+                .expect("`get(revision)` succeeds")
+                .change
         })
         .bench_local_values(|change| {
             if kept {
