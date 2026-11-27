@@ -651,8 +651,8 @@ impl OriginService {
         landed
     }
 
-    /// Returns the target the stack of `change` is on: the target of the acceptance
-    /// at the bottom of its head's stack.
+    /// Returns the target the stack of `change` is on: the target of its head's
+    /// stack.
     fn target_of(&self, index: &Index, change: ChangeId) -> Result<TargetName, ServiceError> {
         let head = match index.heads(change)[..] {
             [head] => head,
@@ -665,18 +665,7 @@ impl OriginService {
                 .into());
             }
         };
-        let mut base = self.store.get(head)?.base;
-        let acceptance = loop {
-            match base {
-                Base::Revision(id) => base = self.store.get(id)?.base,
-                Base::Acceptance(id) => break id,
-            }
-        };
-        let target = self.store.get(acceptance)?.body().target;
-        Ok(self
-            .store
-            .target_name(target)?
-            .ok_or(StoreError::NotFound(acceptance.into()))?)
+        Ok(self.store.stack_target(head)?)
     }
 
     /// Lists every landing waiting on every target, and why it waits.

@@ -1,11 +1,57 @@
 //! End-to-end tests of sharing work: cloning, pushing, fetching and
-//! pulling, over HTTP and through a local path.
+//! pulling, and landing and watching against a remote, over HTTP and
+//! through a local path.
 
 mod common;
 
 use std::fs;
+use std::time::{Duration, Instant};
 
 use common::{Repo, Server, User};
+
+#[test]
+fn work_lands_through_the_server_and_reaches_other_clones() {
+    let server = Server::start();
+    let (ada, bob) = (User::new("ada"), User::new("bob"));
+    let alice = Repo::clone(&ada, &server.url(), &[]);
+    assert!(
+        alice
+            .ok(&["status"])
+            .ends_with("On top of: main #0\nNo changes.\n")
+    );
+    alice.write("README.md", "hello\n");
+    alice.write("src/lib.rs", "fn lib() {}\n");
+    alice.ok(&["describe", "Add the library"]);
+    let change = alice.change();
+    assert!(alice.ok(&["push"]).starts_with("Pushed "));
+    assert_eq!(alice.ok(&["push"]), "Everything up to date.\n");
+    let landed = alice.ok(&["land"]);
+    assert!(
+        landed.contains(&format!("Landed change {change}")),
+        "{landed}"
+    );
+    assert!(landed.contains("on main #1"), "{landed}");
+
+    let bobs = Repo::clone(&bob, &server.url(), &[]);
+    assert_eq!(bobs.read("README.md"), "hello\n");
+    assert_eq!(bobs.read("src/lib.rs"), "fn lib() {}\n");
+    let log = bobs.ok(&["log"]);
+    assert!(log.contains(&format!("{change} Add the library")), "{log}");
+
+    bobs.write("notes.md", "bob\n");
+    alice.write("README.md", "hello, world\n");
+    alice.ok(&["land"]);
+    let pulled = bobs.ok(&["pull"]);
+    assert!(pulled.starts_with("`main`: #1 -> #2\n"), "{pulled}");
+    assert_eq!(bobs.read("README.md"), "hello, world\n");
+    assert_eq!(bobs.read("notes.md"), "bob\n");
+    let status = bobs.ok(&["status"]);
+    assert!(
+        status.contains("On top of: main #2\nA notes.md\n"),
+        "{status}"
+    );
+    assert!(bobs.ok(&["pull"]).ends_with("on the tip of `main`.\n"));
+}
 
 #[test]
 fn pushing_a_change_that_moved_on_the_server_is_refused() {
@@ -31,6 +77,28 @@ fn pushing_a_change_that_moved_on_the_server_is_refused() {
     assert!(alice.ok(&["status"]).contains("Divergent"));
     alice.ok(&["converge", &change]);
     assert!(alice.ok(&["push"]).starts_with("Pushed "));
+}
+
+#[test]
+fn watch_follows_the_remote_events() {
+    let server = Server::start();
+    let ada = User::new("ada");
+    let alice = Repo::clone(&ada, &server.url(), &[]);
+    let watcher = Repo::clone(&ada, &server.url(), &[]);
+    let (mut watch, lines) = watcher.spawn(&["watch", "--kind", "target.advanced", "--since", "0"]);
+    alice.write("file", "content\n");
+    alice.ok(&["land"]);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let line = lines
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .expect("the landing on main within the deadline");
+        if line.contains("target.advanced target=main seq=1") {
+            break;
+        }
+    }
+    watch.kill().unwrap();
+    watch.wait().unwrap();
 }
 
 #[test]
@@ -65,6 +133,29 @@ fn clones_make_the_directories_they_go_in() {
             .success()
     );
     assert!(link.symlink_metadata().is_ok(), "the symlink stays");
+}
+
+#[test]
+fn local_paths_are_remotes_served_in_process() {
+    let ada = User::new("ada");
+    let origin = Repo::init(&ada);
+    origin.write("README.md", "hello\n");
+    origin.ok(&["land"]);
+
+    let url = origin.root().to_str().unwrap();
+    let clone = Repo::clone(&ada, url, &[]);
+    assert_eq!(clone.read("README.md"), "hello\n");
+    clone.write("src/lib.rs", "fn lib() {}\n");
+    let landed = clone.ok(&["land"]);
+    assert!(landed.contains("on main #2"), "{landed}");
+    let log = origin.ok(&["log", "main"]);
+    assert!(log.contains("◆ main #2"), "{log}");
+
+    let bobs = Repo::clone(&User::new("bob"), url, &[]);
+    assert_eq!(bobs.read("src/lib.rs"), "fn lib() {}\n");
+    bobs.write("bob.txt", "bob\n");
+    let error = bobs.fails(&["land"]);
+    assert!(error.contains("authority"), "{error}");
 }
 
 #[test]

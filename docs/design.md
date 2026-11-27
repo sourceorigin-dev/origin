@@ -164,6 +164,19 @@ the exact content written there.
 
 ### Behind
 
+After a landing, the working copy of the workspace that ran it follows its
+change. If the change landed, or the target already had it, the working copy
+starts a new change on the target's tip, so later edits build on what the target
+has. If the queue rebased the change, the working copy moves to the rebased
+revision. If the working copy is on top of a change that landed, it is rebased
+onto the tip.
+
+Other workspaces don't move: they are behind their change until `origin pull`
+moves them the same way, merging the edits made since. Where those edits
+conflict, the files hold both versions between conflict markers, and a
+`core.conflict` statement lists them. The working copy can't land until those
+files change or `origin resolve` accepts them (see [Conflicts](#conflicts)).
+
 A change can move on without the working copy. Its head may land from
 another workspace, or the queue may rebase it. The working copy is then
 *behind*:
