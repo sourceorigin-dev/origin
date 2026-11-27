@@ -655,11 +655,29 @@ Records put:
   a stack of revisions and statements about them. The caller sees the records their
   batch adds, but a record the store already had only if they saw it before.
 
-Revisions put:
-- A revision may only evolve from revisions the caller sees.
-- It may only hold content the caller supplies, or that a snapshot it refers
-  to holds at the same path (`Store::unsupplied`), so no one reads a file by
-  placing its id where they may read.
+Revisions put (landings check what they change on the target separately, in
+the queue):
+- **History.** A revision must extend its change's history. Only a new change
+  gets a root (a revision with no predecessors), and a successor may only
+  evolve from revisions of its own change that the caller sees. So no one
+  makes a change diverge with a root of their own, or becomes one of the
+  change's creators, who may abandon it.
+- **Effects.** A revision's *effect* is each file it changes at paths its
+  writer may not write, from its base's entry to its own. A root must have no
+  effect. A successor must have exactly each predecessor's effect, and if it
+  sits on another change, its predecessors must sit on that same change. It
+  must also list, in its `core.conflict`, exactly its predecessors' unresolved
+  conflicts at those paths; a root lists those of the revision it is on. Only
+  a `core.conflict` may supersede a `core.conflict`, and once a revision's
+  listing is stored, it may not change at those paths. So a successor never
+  reverts, replaces or resolves someone else's edits, or adds a conflict,
+  where its writer may not write, and never brings in a stack that would land
+  with it. Rebasing onto a newer tip keeps the effect and the conflicts, so it
+  is refused if the new base changed a conflicted entry. Someone who takes a
+  change over edits only what they may write, and hands it on.
+- **Content.** A revision may only hold content the caller supplies, or that
+  a snapshot it refers to holds at the same path (`Store::unsupplied`), so no
+  one reads a file by placing its id where they may read.
 
 Tokens:
 - Static tokens in the server configuration keep working.
